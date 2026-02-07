@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+      content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self';"
     />
     <title>WA Template Sender</title>
     <link rel="stylesheet" href="./styles.css" />
@@ -222,6 +222,7 @@
                   </div>
                   <div class="rowRight">
                     <button class="btnGhost" id="btnAddRecipientRow">Add row</button>
+                    <button class="btnGhost" id="btnClearRecipients">Clear all</button>
                     <button class="btnGhost" id="btnImportWaContacts">WA Contacts</button>
                     <button class="btnGhost" id="btnDownloadCsvTemplate">CSV template</button>
                     <button class="btnGhost" id="btnImportCsv">Import CSV</button>
@@ -287,6 +288,7 @@
                       <span>Rewrite each message via backend AI before sending</span>
                     </label>
                   </div>
+                  <div class="smallMuted" id="aiRewriteStateText">Disabled: send original template message</div>
 
                   <label class="label">Backend endpoint URL</label>
                   <input id="aiEndpoint" class="input" placeholder="https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM" />
@@ -370,6 +372,53 @@
       </main>
 
       <div class="toastWrap" id="toastWrap"></div>
+
+      <div class="modal hidden" id="waContactsModal">
+        <div class="modalBackdrop" id="waContactsModalBackdrop"></div>
+        <div class="modalCard waContactsCard">
+          <div class="modalHeader">
+            <div>
+              <div class="modalTitle">WhatsApp Contacts</div>
+              <div class="modalSub">Tick contacts to add into recipients</div>
+            </div>
+            <button class="btnGhost" id="btnCloseWaContactsModal">Close</button>
+          </div>
+
+          <div class="form">
+            <div class="row" style="margin-top: 0;">
+              <input class="input" id="waContactsSearch" placeholder="Search by name, phone, or jid" />
+              <button class="btnGhost" id="btnRefreshWaContacts">Refresh</button>
+            </div>
+
+            <div class="row" style="margin-top: 0; justify-content: space-between;">
+              <label class="check">
+                <input type="checkbox" id="waContactsSelectAll" />
+                <span>Select all visible</span>
+              </label>
+              <div class="smallMuted" id="waContactsCount">0 selected</div>
+            </div>
+
+            <div class="tableWrap waContactsTableWrap">
+              <table class="table waContactsTable">
+                <thead>
+                  <tr>
+                    <th style="width: 52px;">Pick</th>
+                    <th style="width: 300px;">Contact</th>
+                    <th style="width: 220px;">Name</th>
+                    <th style="width: 170px;">Phone</th>
+                    <th>JID</th>
+                  </tr>
+                </thead>
+                <tbody id="waContactsBody"></tbody>
+              </table>
+            </div>
+
+            <div class="row" style="justify-content: flex-end;">
+              <button class="btnGhost" id="btnImportSelectedWaContacts">Add selected contacts</button>
+            </div>
+          </div>
+        </div>
+      </div>
 
       <div class="modal hidden" id="csvModal">
         <div class="modalBackdrop" id="csvModalBackdrop"></div>

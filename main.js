@@ -30,9 +30,16 @@ let win = null;
 let sock = null;
 let isConnecting = false;
 let isConnected = false;
+let connectSetupPromise = null;
+let waContactsByProfileMem = {};
+const invalidSessionProfiles = new Set();
+const restartRecoveryDoneByAttempt = new Set();
+let lastFetchedWaVersion = null;
+let lastFetchedWaVersionAt = 0;
 
 // Used to ignore late events from old sockets
 let handshakeAttemptId = 0;
+let startupReconnectScheduled = false;
 
 const store = new Store();
 
@@ -44,6 +51,105 @@ const templatesFile = path.join(dataDir, "templates.json");
 
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+
+async function getLatestWaVersionSafe(fetchLatestBaileysVersion) {
+  const now = Date.now();
+  // Reuse last known good version for 6 hours.
+  if (lastFetchedWaVersion && now - lastFetchedWaVersionAt < 6 * 60 * 60 * 1000) {
+    return lastFetchedWaVersion;
+  }
+  if (typeof fetchLatestBaileysVersion !== "function") return null;
+
+  const timeoutMs = 4000;
+  try {
+    const timed = Promise.race([
+      fetchLatestBaileysVersion(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error("version_fetch_timeout")), timeoutMs))
+    ]);
+    const latest = await timed;
+    const version = Array.isArray(latest?.version) && latest.version.length === 3 ? latest.version : null;
+    if (version) {
+      lastFetchedWaVersion = version;
+      lastFetchedWaVersionAt = now;
+      return version;
+    }
+  } catch (e) {
+    log.warn({ err: e }, "Failed to fetch latest WA Web version, using library default");
+  }
+  return null;
+}
+
+function clearPersistedContactsCache() {
+  try {
+    if (typeof store.delete === "function") store.delete("waContactsByProfile");
+    else store.set("waContactsByProfile", {});
+  } catch (e) {
+    store.set("waContactsByProfile", {});
+  }
+  waContactsByProfileMem = {};
+}
+
+function normalizeContactsCacheRoot(raw) {
+  const root = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+
+  for (const [profileId, byPhoneRaw] of Object.entries(root)) {
+    if (!profileId || !byPhoneRaw || typeof byPhoneRaw !== "object") continue;
+    const byPhone = {};
+
+    for (const [phoneKey, contactRaw] of Object.entries(byPhoneRaw)) {
+      if (!contactRaw || typeof contactRaw !== "object") continue;
+      let msisdn = "";
+      try {
+        msisdn = normalizeMsisdn(contactRaw.msisdn || phoneKey || "");
+      } catch (e) {
+        continue;
+      }
+      if (!msisdn) continue;
+
+      const jid = normalizeJidForContact(contactRaw.jid || `${msisdn}@s.whatsapp.net`);
+      byPhone[msisdn] = {
+        msisdn,
+        jid: jid || `${msisdn}@s.whatsapp.net`,
+        name: sanitizeContactName(contactRaw.name),
+        notify: sanitizeContactName(contactRaw.notify),
+        verifiedName: sanitizeContactName(contactRaw.verifiedName),
+        imgUrl: contactRaw.imgUrl ? String(contactRaw.imgUrl).trim() || null : null,
+        status: sanitizeContactName(contactRaw.status),
+        photoCheckedAt: String(contactRaw.photoCheckedAt || "").trim() || null,
+        updatedAt: String(contactRaw.updatedAt || "").trim() || nowIsoShort()
+      };
+    }
+
+    if (Object.keys(byPhone).length > 0) out[profileId] = byPhone;
+  }
+
+  return out;
+}
+
+function persistContactsCache() {
+  try {
+    store.set("waContactsByProfile", waContactsByProfileMem);
+  } catch (e) {
+    log.warn({ err: e }, "Failed to persist WA contacts cache");
+  }
+}
+
+function loadPersistedContactsCache() {
+  try {
+    waContactsByProfileMem = normalizeContactsCacheRoot(store.get("waContactsByProfile"));
+  } catch (e) {
+    waContactsByProfileMem = {};
+  }
+}
+
+function clearContactsCacheForProfile(profileId) {
+  if (!profileId) return;
+  if (!waContactsByProfileMem || typeof waContactsByProfileMem !== "object") return;
+  if (!Object.prototype.hasOwnProperty.call(waContactsByProfileMem, profileId)) return;
+  delete waContactsByProfileMem[profileId];
+  persistContactsCache();
 }
 
 function isValidTemplateVarName(name) {
@@ -191,11 +297,35 @@ function delayMsFromPattern(patternName, minSec, maxSec, idx) {
 }
 
 /* --------------------------- Profiles (saved WhatsApp numbers) ---------------------------- */
+function normalizeProfileRecord(raw, fallbackId) {
+  const p = raw && typeof raw === "object" ? raw : {};
+  const id = String(p.id || fallbackId || "").trim() || "p_" + Math.random().toString(16).slice(2);
+  const name = String(p.name || "WhatsApp Profile").trim() || "WhatsApp Profile";
+  return {
+    id,
+    name,
+    customName: p.customName === true,
+    waJid: String(p.waJid || "").trim(),
+    waMsisdn: String(p.waMsisdn || "").trim(),
+    waName: String(p.waName || "").trim(),
+    lastConnectedAt: String(p.lastConnectedAt || "").trim()
+  };
+}
+
+function saveProfiles(profiles) {
+  const list = Array.isArray(profiles) ? profiles : [];
+  const normalized = list.map((p, idx) => normalizeProfileRecord(p, `p_${idx + 1}`));
+  store.set("profiles", normalized);
+  return normalized;
+}
+
 function loadProfiles() {
   ensureDir(profilesRootDir);
   const profiles = store.get("profiles");
-  if (Array.isArray(profiles) && profiles.length > 0) return profiles;
-  const defaultProfile = { id: "p_default", name: "Default WhatsApp" };
+  if (Array.isArray(profiles) && profiles.length > 0) {
+    return saveProfiles(profiles);
+  }
+  const defaultProfile = normalizeProfileRecord({ id: "p_default", name: "Default WhatsApp", customName: false });
   store.set("profiles", [defaultProfile]);
   store.set("activeProfileId", defaultProfile.id);
   return [defaultProfile];
@@ -223,30 +353,161 @@ function setActiveProfileId(profileId) {
 function createProfile(name) {
   const profiles = loadProfiles();
   const id = "p_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
-  const profile = { id, name: String(name || "New Profile").trim() || "New Profile" };
+  const trimmed = String(name || "").trim();
+  const profile = normalizeProfileRecord({
+    id,
+    name: trimmed || "New Profile",
+    customName: !!trimmed
+  });
   profiles.push(profile);
-  store.set("profiles", profiles);
+  saveProfiles(profiles);
   ensureDir(getProfileAuthDir(id));
   return profile;
 }
 
-function deleteProfile(profileId) {
+function renameProfile(profileId, newName) {
+  const nextName = String(newName || "").trim();
+  if (!nextName) throw new Error("Profile name cannot be empty");
   const profiles = loadProfiles();
-  if (profiles.length <= 1) throw new Error("Cannot delete the last profile");
-  const nextProfiles = profiles.filter((p) => p.id !== profileId);
-  if (nextProfiles.length === profiles.length) throw new Error("Profile not found");
-  store.set("profiles", nextProfiles);
+  const idx = profiles.findIndex((p) => p.id === profileId);
+  if (idx < 0) throw new Error("Profile not found");
+
+  profiles[idx] = {
+    ...profiles[idx],
+    name: nextName,
+    customName: true
+  };
+  saveProfiles(profiles);
+  return profiles[idx];
+}
+
+async function deleteProfile(profileId) {
+  const profiles = loadProfiles();
   const activeId = getActiveProfileId();
-  if (activeId === profileId) {
-    store.set("activeProfileId", nextProfiles[0].id);
+  const isActive = activeId === profileId;
+
+  const idx = profiles.findIndex((p) => p.id === profileId);
+  if (idx < 0) throw new Error("Profile not found");
+
+  if (isActive) {
+    handshakeAttemptId++;
+    handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
+    await waitForConnectSetupIdle();
+    await stopSocket();
+    isConnecting = false;
   }
+
+  const nextProfiles = profiles.filter((p) => p.id !== profileId);
+
   const profileDir = path.join(profilesRootDir, profileId);
   try {
     fs.rmSync(profileDir, { recursive: true, force: true });
   } catch (e) {
     // ignore
   }
-  return true;
+  invalidSessionProfiles.delete(profileId);
+  clearContactsCacheForProfile(profileId);
+
+  // Never leave app without at least one profile
+  if (nextProfiles.length === 0) {
+    const fallback = normalizeProfileRecord({
+      id: "p_default",
+      name: "Default WhatsApp",
+      customName: false
+    });
+    saveProfiles([fallback]);
+    store.set("activeProfileId", fallback.id);
+    ensureDir(getProfileAuthDir(fallback.id));
+
+    win?.webContents.send("wa:status", {
+      connected: false,
+      text: "Not connected",
+      profileId: fallback.id
+    });
+    return { ok: true, activeProfileId: fallback.id, replaced: true };
+  }
+
+  saveProfiles(nextProfiles);
+  if (isActive) {
+    const nextActiveId = nextProfiles[0].id;
+    store.set("activeProfileId", nextActiveId);
+    await autoReconnectActiveProfile();
+    return { ok: true, activeProfileId: nextActiveId, replaced: false };
+  }
+
+  return { ok: true, activeProfileId: getActiveProfileId(), replaced: false };
+}
+
+async function terminateProfileSession(profileId) {
+  const profiles = loadProfiles();
+  const idx = profiles.findIndex((p) => p.id === profileId);
+  if (idx < 0) throw new Error("Profile not found");
+
+  const activeProfileId = getActiveProfileId();
+  const isActive = activeProfileId === profileId;
+  const authDir = getProfileAuthDir(profileId);
+
+  if (isActive) {
+    handshakeAttemptId++;
+    handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
+    await waitForConnectSetupIdle();
+    await stopSocket();
+    isConnecting = false;
+  }
+
+  clearAuthDir(authDir);
+  invalidSessionProfiles.delete(profileId);
+  clearContactsCacheForProfile(profileId);
+
+  profiles[idx] = normalizeProfileRecord(
+    {
+      ...profiles[idx],
+      waJid: "",
+      waMsisdn: "",
+      waName: "",
+      lastConnectedAt: ""
+    },
+    profiles[idx].id
+  );
+  saveProfiles(profiles);
+
+  if (isActive) {
+    win?.webContents.send("wa:status", {
+      connected: false,
+      text: "Session terminated. Handshake required.",
+      profileId
+    });
+  }
+
+  return { ok: true, profileId, activeProfileId };
+}
+
+function updateConnectedProfileMeta(profileId, waUser) {
+  const profiles = loadProfiles();
+  const idx = profiles.findIndex((p) => p.id === profileId);
+  if (idx < 0) return null;
+
+  const current = profiles[idx];
+  const jid = normalizeJidForContact(waUser?.id || current.waJid || "");
+  const msisdn = msisdnFromUserJid(jid);
+  const waName = sanitizeContactName(waUser?.name || waUser?.notify || waUser?.verifiedName || current.waName || "");
+
+  const next = {
+    ...current,
+    waJid: jid || current.waJid || "",
+    waMsisdn: msisdn || current.waMsisdn || "",
+    waName: waName || current.waName || "",
+    lastConnectedAt: nowIsoShort()
+  };
+
+  if (!next.customName) {
+    const autoName = next.waName || (next.waMsisdn ? `WhatsApp ${next.waMsisdn}` : "");
+    if (autoName) next.name = autoName;
+  }
+
+  profiles[idx] = normalizeProfileRecord(next, next.id);
+  saveProfiles(profiles);
+  return profiles[idx];
 }
 
 /* --------------------------- Sent Log key: templateId + "|" + msisdn -> lastSentAt ---------------------------- */
@@ -282,16 +543,22 @@ function clearSentForTemplate(templateId) {
   return true;
 }
 
-/* --------------------------- WhatsApp Contacts Cache (per profile) ---------------------------- */
+/* --------------------------- WhatsApp Contacts (persisted cache + live sync) ---------------------------- */
 function getContactsStoreObj() {
-  const v = store.get("waContactsByProfile");
-  if (v && typeof v === "object") return v;
-  store.set("waContactsByProfile", {});
-  return {};
+  return waContactsByProfileMem;
 }
 
 function sanitizeContactName(v) {
   return String(v || "").trim();
+}
+
+function getContactDisplayName(c) {
+  return (
+    sanitizeContactName(c?.name) ||
+    sanitizeContactName(c?.notify) ||
+    sanitizeContactName(c?.verifiedName) ||
+    ""
+  );
 }
 
 function upsertContactsForProfile(profileId, contacts) {
@@ -307,16 +574,24 @@ function upsertContactsForProfile(profileId, contacts) {
     if (!msisdn) continue;
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
-    const nameCandidate =
-      sanitizeContactName(c?.name) ||
-      sanitizeContactName(c?.notify) ||
-      sanitizeContactName(c?.verifiedName) ||
-      sanitizeContactName(existing?.name);
+    const nameCandidate = sanitizeContactName(c?.name) || sanitizeContactName(existing?.name);
+    const notify = sanitizeContactName(c?.notify) || sanitizeContactName(existing?.notify);
+    const verifiedName = sanitizeContactName(c?.verifiedName) || sanitizeContactName(existing?.verifiedName);
+    const imgUrl =
+      c?.imgUrl === null || c?.imgUrl === undefined
+        ? existing?.imgUrl ?? null
+        : String(c.imgUrl || "").trim() || null;
+    const status = sanitizeContactName(c?.status) || sanitizeContactName(existing?.status);
 
     const next = {
       msisdn,
       jid: jid || existing?.jid || `${msisdn}@s.whatsapp.net`,
       name: nameCandidate,
+      notify,
+      verifiedName,
+      imgUrl,
+      status,
+      photoCheckedAt: existing?.photoCheckedAt || null,
       updatedAt: nowIsoShort()
     };
 
@@ -325,7 +600,11 @@ function upsertContactsForProfile(profileId, contacts) {
       prev &&
       prev.msisdn === next.msisdn &&
       prev.jid === next.jid &&
-      String(prev.name || "") === String(next.name || "");
+      String(prev.name || "") === String(next.name || "") &&
+      String(prev.notify || "") === String(next.notify || "") &&
+      String(prev.verifiedName || "") === String(next.verifiedName || "") &&
+      String(prev.imgUrl || "") === String(next.imgUrl || "") &&
+      String(prev.status || "") === String(next.status || "");
 
     if (!same) {
       byPhone[msisdn] = next;
@@ -335,7 +614,7 @@ function upsertContactsForProfile(profileId, contacts) {
 
   if (changed > 0) {
     root[profileId] = byPhone;
-    store.set("waContactsByProfile", root);
+    persistContactsCache();
   }
 
   return changed;
@@ -355,7 +634,7 @@ function upsertChatsAsContactsForProfile(profileId, chats) {
       sanitizeContactName(chat?.notify) ||
       sanitizeContactName(chat?.pushName) ||
       "";
-    contacts.push({ id: jid, jid, name, notify: name });
+    contacts.push({ id: jid, jid, name, notify: name, verifiedName: sanitizeContactName(chat?.verifiedName) });
   }
 
   return upsertContactsForProfile(profileId, contacts);
@@ -367,8 +646,8 @@ function getContactsForProfile(profileId) {
   const rows = Object.values(byPhone).filter((x) => x && typeof x === "object");
 
   rows.sort((a, b) => {
-    const an = String(a?.name || "").toLowerCase();
-    const bn = String(b?.name || "").toLowerCase();
+    const an = getContactDisplayName(a).toLowerCase();
+    const bn = getContactDisplayName(b).toLowerCase();
     if (an && bn) return an.localeCompare(bn);
     if (an) return -1;
     if (bn) return 1;
@@ -376,6 +655,84 @@ function getContactsForProfile(profileId) {
   });
 
   return rows;
+}
+
+function shouldRefreshContactPhoto(contact, minMinutesBetweenChecks) {
+  if (!contact || typeof contact !== "object") return false;
+  if (contact.imgUrl) return false;
+  if (!contact.jid || !String(contact.jid).endsWith("@s.whatsapp.net")) return false;
+  const mins = Math.max(1, Number(minMinutesBetweenChecks || 180));
+  const last = Date.parse(String(contact.photoCheckedAt || ""));
+  if (!Number.isFinite(last)) return true;
+  return Date.now() - last >= mins * 60 * 1000;
+}
+
+async function enrichContactPhotosForProfile(profileId, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  if (!isConnected || !sock) return getContactsForProfile(profileId);
+  if (!profileId) return [];
+
+  const maxPhotoFetchRaw = Number(opts.maxPhotoFetch);
+  const maxPhotoFetch = Number.isFinite(maxPhotoFetchRaw) ? Math.max(1, Math.min(200, maxPhotoFetchRaw)) : 40;
+  const minMinutesRaw = Number(opts.minMinutesBetweenPhotoChecks);
+  const minMinutesBetweenPhotoChecks = Number.isFinite(minMinutesRaw)
+    ? Math.max(1, Math.min(1440, minMinutesRaw))
+    : 180;
+  const concurrencyRaw = Number(opts.photoFetchConcurrency);
+  const photoFetchConcurrency = Number.isFinite(concurrencyRaw) ? Math.max(1, Math.min(8, concurrencyRaw)) : 3;
+
+  const root = getContactsStoreObj();
+  const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
+  const contacts = Object.values(byPhone).filter((x) => x && typeof x === "object");
+  const targets = contacts
+    .filter((c) => shouldRefreshContactPhoto(c, minMinutesBetweenPhotoChecks))
+    .slice(0, maxPhotoFetch);
+
+  if (targets.length === 0) return getContactsForProfile(profileId);
+
+  let index = 0;
+  let changed = 0;
+  async function worker() {
+    while (index < targets.length) {
+      const currIndex = index++;
+      const item = targets[currIndex];
+      const now = nowIsoShort();
+
+      try {
+        const photo = await sock.profilePictureUrl(item.jid, "image");
+        const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : item;
+        const next = {
+          ...prev,
+          imgUrl: photo ? String(photo) : null,
+          photoCheckedAt: now,
+          updatedAt: now
+        };
+
+        const same =
+          String(prev.imgUrl || "") === String(next.imgUrl || "") &&
+          String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
+        if (!same) {
+          byPhone[item.msisdn] = next;
+          changed++;
+        }
+      } catch (e) {
+        const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : item;
+        byPhone[item.msisdn] = { ...prev, photoCheckedAt: now };
+        changed++;
+      }
+    }
+  }
+
+  const workers = [];
+  for (let i = 0; i < photoFetchConcurrency; i++) workers.push(worker());
+  await Promise.all(workers);
+
+  if (changed > 0) {
+    root[profileId] = byPhone;
+    persistContactsCache();
+  }
+
+  return getContactsForProfile(profileId);
 }
 
 /* --------------------------- AI Rewrite (via external backend) ---------------------------- */
@@ -682,6 +1039,16 @@ async function stopSocket() {
   }
 }
 
+async function waitForConnectSetupIdle() {
+  while (connectSetupPromise) {
+    try {
+      await connectSetupPromise;
+    } catch (e) {
+      // ignore setup errors while waiting for lock release
+    }
+  }
+}
+
 function clearAuthDir(authDir) {
   try {
     fs.rmSync(authDir, { recursive: true, force: true });
@@ -697,221 +1064,230 @@ function hasRegisteredSession(profileId) {
     const credsPath = path.join(authDir, "creds.json");
     if (!fs.existsSync(credsPath)) return false;
     const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8"));
-    return !!creds?.registered;
+    if (!creds || typeof creds !== "object") return false;
+    if (creds.registered === true) return true;
+
+    // Newer/older Baileys snapshots may not always expose `registered`.
+    // Treat persisted account identity as a reusable session.
+    const hasMe = typeof creds?.me?.id === "string" && creds.me.id.length > 0;
+    const hasAccount = !!creds?.account;
+    return hasMe || hasAccount;
   } catch (e) {
     return false;
   }
 }
 
 async function connectWA(method, attemptId) {
-  if (isConnecting) return;
-  isConnecting = true;
+  await waitForConnectSetupIdle();
+  if (attemptId !== handshakeAttemptId) return;
 
-  try {
-    const activeProfileId = getActiveProfileId();
-    const authDir = getProfileAuthDir(activeProfileId);
-    ensureDir(authDir);
-
-    const {
-      makeWASocket,
-      useMultiFileAuthState,
-      DisconnectReason,
-      Browsers,
-      fetchLatestBaileysVersion
-    } = await getBaileys();
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
-
-    // Always use a realistic browser signature (helps both QR and pairing)
-    const browser =
-      Browsers && typeof Browsers.windows === "function"
-        ? Browsers.windows("Google Chrome")
-        : ["Windows", "Chrome", "124.0.0.0"];
-
-    // UI: show something immediately
-    win?.webContents.send("wa:status", {
-      connected: false,
-      text: "Connecting...",
-      profileId: activeProfileId
-    });
-
-    // Ensure only one live socket
-    await stopSocket();
-
-    let waVersion;
+  const run = (async () => {
+    isConnecting = true;
     try {
-      const latest = await fetchLatestBaileysVersion();
-      if (Array.isArray(latest?.version) && latest.version.length === 3) {
-        waVersion = latest.version;
-      }
-    } catch (e) {
-      log.warn({ err: e }, "Unable to fetch latest WA Web version, continuing with Baileys default");
-    }
+      const activeProfileId = getActiveProfileId();
+      const authDir = getProfileAuthDir(activeProfileId);
+      ensureDir(authDir);
 
-    sock = makeWASocket({
-      auth: state,
-      printQRInTerminal: false,
-      logger: log,
-      browser,
-      syncFullHistory: true,
-      ...(waVersion ? { version: waVersion } : {})
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-    sock.ev.on("messaging-history.set", (history) => {
-      upsertContactsForProfile(activeProfileId, history?.contacts || []);
-      upsertChatsAsContactsForProfile(activeProfileId, history?.chats || []);
-    });
-    sock.ev.on("contacts.upsert", (contacts) => {
-      upsertContactsForProfile(activeProfileId, contacts || []);
-    });
-    sock.ev.on("contacts.update", (contacts) => {
-      upsertContactsForProfile(activeProfileId, contacts || []);
-    });
-    sock.ev.on("chats.upsert", (chats) => {
-      upsertChatsAsContactsForProfile(activeProfileId, chats || []);
-    });
-    sock.ev.on("chats.update", (chats) => {
-      upsertChatsAsContactsForProfile(activeProfileId, chats || []);
-    });
-
-    // Limit auto recovery loops per handshake attempt
-    let autoRecoverCount = 0;
-
-    sock.ev.on("connection.update", async (update) => {
-      // Ignore late events from old attempts
+      const {
+        makeWASocket,
+        useMultiFileAuthState,
+        DisconnectReason,
+        Browsers,
+        fetchLatestBaileysVersion
+      } = await getBaileys();
+      if (attemptId !== handshakeAttemptId) return;
+      const { state, saveCreds } = await useMultiFileAuthState(authDir);
       if (attemptId !== handshakeAttemptId) return;
 
-      const { connection, lastDisconnect, qr } = update;
+      // Always use a realistic browser signature (helps both QR and pairing)
+      const browser =
+        Browsers && typeof Browsers.windows === "function"
+          ? Browsers.windows("Google Chrome")
+          : ["Windows", "Chrome", "124.0.0.0"];
 
-      // QR flow
-      if (handshakeState.method === "qr" && qr) {
-        const dataUrl = await qrcode.toDataURL(qr);
-        win?.webContents.send("wa:qr", dataUrl);
-        win?.webContents.send("wa:status", {
-          connected: false,
-          text: "Scan QR in WhatsApp",
-          profileId: activeProfileId
-        });
-      }
+      // UI: show something immediately
+      win?.webContents.send("wa:status", {
+        connected: false,
+        text: "Connecting...",
+        profileId: activeProfileId
+      });
 
-      // Pairing code flow
-      if (handshakeState.method === "pairing" && !handshakeState.pairingRequested) {
-        const alreadyRegistered = !!sock?.authState?.creds?.registered;
-        if (alreadyRegistered) {
-          handshakeState.pairingRequested = true;
+      // Ensure only one live socket
+      await stopSocket();
+      if (attemptId !== handshakeAttemptId) return;
+
+      const waVersion = await getLatestWaVersionSafe(fetchLatestBaileysVersion);
+      sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        logger: log,
+        browser,
+        syncFullHistory: true,
+        ...(waVersion ? { version: waVersion } : {})
+      });
+
+      sock.ev.on("creds.update", saveCreds);
+      sock.ev.on("messaging-history.set", (history) => {
+        upsertContactsForProfile(activeProfileId, history?.contacts || []);
+        upsertChatsAsContactsForProfile(activeProfileId, history?.chats || []);
+      });
+      sock.ev.on("contacts.upsert", (contacts) => {
+        upsertContactsForProfile(activeProfileId, contacts || []);
+      });
+      sock.ev.on("contacts.update", (contacts) => {
+        upsertContactsForProfile(activeProfileId, contacts || []);
+      });
+      sock.ev.on("chats.upsert", (chats) => {
+        upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+      });
+      sock.ev.on("chats.update", (chats) => {
+        upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+      });
+
+      sock.ev.on("connection.update", async (update) => {
+        // Ignore late events from old attempts
+        if (attemptId !== handshakeAttemptId) return;
+
+        const { connection, lastDisconnect, qr } = update;
+
+        // QR flow
+        if (handshakeState.method === "qr" && qr) {
+          const dataUrl = await qrcode.toDataURL(qr);
+          win?.webContents.send("wa:qr", dataUrl);
           win?.webContents.send("wa:status", {
             connected: false,
-            text: "Already registered on this profile. Reset session if you want to pair again.",
+            text: "Scan QR in WhatsApp",
             profileId: activeProfileId
           });
-        } else if (connection === "connecting" || !!qr) {
-          handshakeState.pairingRequested = true;
+        }
 
-          try {
-            if (!handshakeState.phoneNumber) throw new Error("Missing phone number for pairing mode");
-            const code = await sock.requestPairingCode(handshakeState.phoneNumber);
-            win?.webContents.send("wa:pairingCode", code);
+        // Pairing code flow
+        if (handshakeState.method === "pairing" && !handshakeState.pairingRequested) {
+          const alreadyRegistered = !!sock?.authState?.creds?.registered;
+          if (alreadyRegistered) {
+            handshakeState.pairingRequested = true;
             win?.webContents.send("wa:status", {
               connected: false,
-              text: "Enter pairing code in WhatsApp",
+              text: "Already registered on this profile. Reset session if you want to pair again.",
               profileId: activeProfileId
             });
-          } catch (e) {
-            handshakeState.pairingRequested = false;
+          } else if (connection === "connecting" || !!qr) {
+            handshakeState.pairingRequested = true;
+
+            try {
+              if (!handshakeState.phoneNumber) throw new Error("Missing phone number for pairing mode");
+              const code = await sock.requestPairingCode(handshakeState.phoneNumber);
+              win?.webContents.send("wa:pairingCode", code);
+              win?.webContents.send("wa:status", {
+                connected: false,
+                text: "Enter pairing code in WhatsApp",
+                profileId: activeProfileId
+              });
+            } catch (e) {
+              handshakeState.pairingRequested = false;
+              win?.webContents.send("wa:status", {
+                connected: false,
+                text: `Pairing failed: ${String(e?.message || e)}`,
+                profileId: activeProfileId
+              });
+            }
+          }
+        }
+
+        if (connection === "open") {
+          isConnected = true;
+          invalidSessionProfiles.delete(activeProfileId);
+          updateConnectedProfileMeta(activeProfileId, sock?.user || {});
+          win?.webContents.send("wa:status", {
+            connected: true,
+            text: "Connected",
+            profileId: activeProfileId
+          });
+        }
+
+        if (connection === "close") {
+          isConnected = false;
+          const code = lastDisconnect?.error?.output?.statusCode;
+          const reason = DisconnectReason?.[code] || code || "unknown";
+
+          win?.webContents.send("wa:status", {
+            connected: false,
+            text: `Disconnected (${reason})`,
+            profileId: activeProfileId
+          });
+
+          // WhatsApp commonly requests one post-login restart after QR scan.
+          // Allow exactly one controlled reconnect for this handshake attempt.
+          if (code === DisconnectReason.restartRequired) {
+            if (!restartRecoveryDoneByAttempt.has(attemptId)) {
+              restartRecoveryDoneByAttempt.add(attemptId);
+              win?.webContents.send("wa:status", {
+                connected: false,
+                text: "Restart required by WhatsApp. Reconnecting once...",
+                profileId: activeProfileId
+              });
+              setTimeout(() => {
+                stopSocket()
+                  .then(() => connectWA(handshakeState.method, attemptId))
+                  .catch(() => {});
+              }, 500);
+              return;
+            }
             win?.webContents.send("wa:status", {
               connected: false,
-              text: `Pairing failed: ${String(e?.message || e)}`,
+              text: "Disconnected (restartRequired). Click Handshake once.",
               profileId: activeProfileId
             });
+            return;
           }
-        }
-      }
 
-      if (connection === "open") {
-        isConnected = true;
-        win?.webContents.send("wa:status", {
-          connected: true,
-          text: "Connected",
-          profileId: activeProfileId
-        });
-      }
-
-      if (connection === "close") {
-        isConnected = false;
-        const code = lastDisconnect?.error?.output?.statusCode;
-        const reason = DisconnectReason?.[code] || code || "unknown";
-
-        win?.webContents.send("wa:status", {
-          connected: false,
-          text: `Disconnected (${reason})`,
-          profileId: activeProfileId
-        });
-
-        // IMPORTANT: WhatsApp often forces a disconnect after scan/pair to restart the socket.
-        // We must reconnect for restartRequired (515).
-        if (code === DisconnectReason.restartRequired) {
-          if (autoRecoverCount < 3) {
-            autoRecoverCount++;
-            await stopSocket();
-            setTimeout(() => {
-              connectWA(handshakeState.method, attemptId).catch(() => {});
-            }, 700);
-          }
-          return;
-        }
-
-        // Recover from transient transport/server issues.
-        const shouldRetry =
-          code === DisconnectReason.connectionClosed ||
-          code === DisconnectReason.connectionLost ||
-          code === DisconnectReason.timedOut ||
-          code === DisconnectReason.unavailableService ||
-          code === 405;
-        if (shouldRetry) {
-          if (autoRecoverCount < 3) {
-            autoRecoverCount++;
-            await stopSocket();
-            setTimeout(() => {
-              connectWA(handshakeState.method, attemptId).catch(() => {});
-            }, 1000);
-          }
-          return;
-        }
-
-        // If the session is invalid, clear auth and present fresh QR / pairing.
-        const needsFreshAuth =
-          code === DisconnectReason.loggedOut ||
-          code === DisconnectReason.badSession ||
-          code === DisconnectReason.multideviceMismatch ||
-          code === DisconnectReason.forbidden;
-
-        if (needsFreshAuth) {
-          if (autoRecoverCount < 2) {
-            autoRecoverCount++;
-            await stopSocket();
-            clearAuthDir(authDir);
-            handshakeState.pairingRequested = false;
-            setTimeout(() => {
-              connectWA(handshakeState.method, attemptId).catch(() => {});
-            }, 700);
-          } else {
+          // Auto-retry is intentionally disabled. If a connect attempt fails once,
+          // we stop immediately and wait for explicit user action.
+          const needsFreshAuth =
+            code === DisconnectReason.loggedOut ||
+            code === DisconnectReason.badSession ||
+            code === DisconnectReason.multideviceMismatch ||
+            code === DisconnectReason.forbidden;
+          if (needsFreshAuth) {
+            invalidSessionProfiles.add(activeProfileId);
             win?.webContents.send("wa:status", {
               connected: false,
-              text: "Session invalid. Please reset the profile session and handshake again.",
+              text: "Session invalid. Click Handshake to reset and generate new QR.",
               profileId: activeProfileId
             });
           }
         }
-      }
-    });
+      });
+    } finally {
+      isConnecting = false;
+    }
+  })();
+
+  connectSetupPromise = run;
+  try {
+    await run;
   } finally {
-    isConnecting = false;
+    if (connectSetupPromise === run) connectSetupPromise = null;
   }
 }
 
 async function startHandshake(payload) {
   const method = payload?.method === "pairing" ? "pairing" : "qr";
   const phoneNumber = payload?.phoneNumber ? normalizeE164NoPlus(payload.phoneNumber) : "";
+  const activeProfileId = getActiveProfileId();
+  const authDir = getProfileAuthDir(activeProfileId);
+
+  // One-shot recovery for invalid creds, without background retry loops.
+  if (invalidSessionProfiles.has(activeProfileId)) {
+    clearAuthDir(authDir);
+    invalidSessionProfiles.delete(activeProfileId);
+  }
+
+  // If profile is not fully registered yet, clear partial auth files first
+  // to force a clean QR/pairing handshake.
+  if (!hasRegisteredSession(activeProfileId)) {
+    clearAuthDir(authDir);
+  }
 
   handshakeAttemptId++;
   handshakeState = { method, phoneNumber, pairingRequested: false };
@@ -928,17 +1304,27 @@ async function autoReconnectActiveProfile() {
   if (!hasRegisteredSession(activeProfileId)) {
     win?.webContents.send("wa:status", {
       connected: false,
-      text: "Not connected",
+      text: "No saved session. Click Handshake to connect.",
       profileId: activeProfileId
     });
-    return { ok: false, skipped: true };
+    return { ok: false, skipped: true, profileId: activeProfileId };
   }
-
   handshakeAttemptId++;
   handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
   await stopSocket();
   await connectWA("qr", handshakeAttemptId);
-  return { ok: true, started: true };
+  return { ok: true, started: true, profileId: activeProfileId };
+}
+
+function getConnectionState() {
+  const activeProfileId = getActiveProfileId();
+  return {
+    ok: true,
+    connected: !!isConnected,
+    connecting: !!isConnecting,
+    profileId: activeProfileId,
+    text: isConnected ? "Connected" : isConnecting ? "Connecting..." : "Not connected"
+  };
 }
 
 async function sendText(msisdn, text) {
@@ -975,9 +1361,17 @@ ipcMain.handle("app:createProfile", async (_evt, name) => {
   return { ok: true, profile };
 });
 
+ipcMain.handle("app:renameProfile", async (_evt, profileId, name) => {
+  const profile = renameProfile(profileId, name);
+  return { ok: true, profile };
+});
+
+ipcMain.handle("app:terminateProfileSession", async (_evt, profileId) => {
+  return await terminateProfileSession(profileId);
+});
+
 ipcMain.handle("app:deleteProfile", async (_evt, profileId) => {
-  const ok = deleteProfile(profileId);
-  return { ok };
+  return await deleteProfile(profileId);
 });
 
 ipcMain.handle("app:setActiveProfile", async (_evt, profileId) => {
@@ -994,9 +1388,17 @@ ipcMain.handle("wa:autoReconnect", async () => {
   return await autoReconnectActiveProfile();
 });
 
-ipcMain.handle("wa:getContacts", async () => {
+ipcMain.handle("wa:getConnectionState", async () => {
+  return getConnectionState();
+});
+
+ipcMain.handle("wa:getContacts", async (_evt, options) => {
   const profileId = getActiveProfileId();
-  const contacts = getContactsForProfile(profileId);
+  const opts = options && typeof options === "object" ? options : {};
+  let contacts = getContactsForProfile(profileId);
+  if (opts.includePhotos && isConnected && sock) {
+    contacts = await enrichContactPhotosForProfile(profileId, opts);
+  }
   return {
     ok: true,
     connected: !!isConnected,
@@ -1204,12 +1606,21 @@ function createWindow() {
     }
   });
 
+  win.webContents.once("did-finish-load", () => {
+    if (startupReconnectScheduled) return;
+    startupReconnectScheduled = true;
+    autoReconnectActiveProfile().catch((e) => {
+      log.warn({ err: e }, "Startup auto reconnect failed");
+    });
+  });
+
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
 app.whenReady().then(() => {
   ensureDataFiles();
   loadProfiles();
+  loadPersistedContactsCache();
   createWindow();
 });
 

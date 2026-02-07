@@ -1,4 +1,4 @@
-let templates = [];
+﻿let templates = [];
 let currentTemplateId = null;
 
 let profiles = [];
@@ -10,6 +10,10 @@ let activityRows = [];
 let batchTotal = 0;
 let batchDone = 0;
 let aiSaveTimer = null;
+let waContactsRows = [];
+let waContactsFiltered = [];
+let waContactSelection = new Set();
+let waContactsLoadToken = 0;
 
 const defaultAiRewriteConfig = {
   enabled: false,
@@ -19,6 +23,7 @@ const defaultAiRewriteConfig = {
   timeoutMs: 30000,
   fallbackToOriginal: true
 };
+const aiRewriteFieldIds = ["aiEndpoint", "aiAuthToken", "aiPrompt", "aiTimeoutMs", "aiFallback"];
 
 function el(id) {
   return document.getElementById(id);
@@ -61,6 +66,38 @@ function setConnectionBadge(connected, text) {
   dot.classList.remove("online", "offline");
   dot.classList.add(connected ? "online" : "offline");
   el("btnSend").disabled = !waConnected;
+}
+
+async function syncConnectionStateFromBackend() {
+  try {
+    const s = await window.api.waGetConnectionState();
+    if (!s?.ok) return;
+    if (s.profileId && activeProfileId && s.profileId !== activeProfileId) return;
+    el("waStatus").textContent = s.text || (s.connected ? "Connected" : s.connecting ? "Connecting..." : "Not connected");
+    setConnectionBadge(!!s.connected, s.text || (s.connected ? "Connected" : "Not connected"));
+  } catch (e) {
+    // ignore state sync errors; live status events still update UI
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForConnectionSync(timeoutMs = 12000, intervalMs = 650) {
+  const endAt = Date.now() + Math.max(1000, Number(timeoutMs || 12000));
+  while (Date.now() < endAt) {
+    const s = await window.api.waGetConnectionState().catch(() => null);
+    if (s?.ok) {
+      if (!s.profileId || !activeProfileId || s.profileId === activeProfileId) {
+        el("waStatus").textContent =
+          s.text || (s.connected ? "Connected" : s.connecting ? "Connecting..." : "Not connected");
+        setConnectionBadge(!!s.connected, s.text || (s.connected ? "Connected" : "Not connected"));
+      }
+      if (s.connected || !s.connecting) return;
+    }
+    await sleep(intervalMs);
+  }
 }
 
 function switchView(viewName) {
@@ -247,6 +284,21 @@ function applyAiRewriteConfigToUi(config) {
   el("aiPrompt").value = cfg.prompt;
   el("aiTimeoutMs").value = String(cfg.timeoutMs);
   el("aiFallback").checked = !!cfg.fallbackToOriginal;
+  setAiRewriteUiEnabled(cfg.enabled);
+}
+
+function setAiRewriteUiEnabled(enabled) {
+  const active = !!enabled;
+  for (const id of aiRewriteFieldIds) {
+    const node = el(id);
+    if (node) node.disabled = !active;
+  }
+  const hint = el("aiRewriteStateText");
+  if (hint) {
+    hint.textContent = active
+      ? "Enabled: AI can rewrite each outgoing message"
+      : "Disabled: send original template message";
+  }
 }
 
 function readAiRewriteConfigFromUi() {
@@ -604,15 +656,18 @@ function renderProfileList() {
   list.innerHTML = "";
 
   for (const p of profiles) {
+    const waLine = p.waMsisdn ? ` - ${escapeHtml(p.waMsisdn)}` : "";
     const item = document.createElement("div");
     item.className = "profileItem";
     item.innerHTML = `
       <div class="profileItemLeft">
         <div class="profileName">${escapeHtml(p.name)}</div>
-        <div class="profileId">${escapeHtml(p.id)}${p.id === activeProfileId ? " (active)" : ""}</div>
+        <div class="profileId">${escapeHtml(p.id)}${p.id === activeProfileId ? " (active)" : ""}${waLine}</div>
       </div>
       <div class="profileBtns">
         <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Use</button>
+        <button class="btnGhost" data-act="rename" data-id="${escapeHtml(p.id)}">Rename</button>
+        <button class="btnGhost" data-act="terminate" data-id="${escapeHtml(p.id)}">Terminate</button>
         <button class="btnGhost" data-act="del" data-id="${escapeHtml(p.id)}">Delete</button>
       </div>
     `;
@@ -623,14 +678,56 @@ function renderProfileList() {
         const id = btn.getAttribute("data-id");
 
         if (act === "use") {
+          setConnectionBadge(false, "Connecting...");
+          el("waStatus").textContent = "Connecting...";
           const res = await window.api.setActiveProfile(id);
           activeProfileId = res.activeProfileId;
           renderProfileSelect();
           renderProfileList();
-          setConnectionBadge(false, "Connecting...");
+          await waitForConnectionSync();
           toast("Profile selected", "Switched profile and attempting reconnect");
         }
 
+        if (act === "rename") {
+          const curr = profiles.find((x) => x.id === id);
+          const nextName = window.prompt("New profile name", curr?.name || "");
+          if (nextName === null) return;
+          try {
+            await window.api.renameProfile(id, nextName);
+            const res2 = await window.api.getProfiles();
+            profiles = res2.profiles || [];
+            activeProfileId = res2.activeProfileId || activeProfileId;
+            renderProfileSelect();
+            renderProfileList();
+            toast("Profile renamed", "Profile name updated");
+          } catch (e) {
+            toast("Cannot rename", String(e?.message || e));
+          }
+        }
+
+
+        if (act === "terminate") {
+          const curr = profiles.find((x) => x.id === id);
+          const ok = window.confirm(
+            `Terminate WhatsApp session for "${curr?.name || id}"?\nYou will need to handshake again for this profile.`
+          );
+          if (!ok) return;
+          try {
+            await window.api.terminateProfileSession(id);
+            const res2 = await window.api.getProfiles();
+            profiles = res2.profiles || [];
+            activeProfileId = res2.activeProfileId || activeProfileId;
+            renderProfileSelect();
+            renderProfileList();
+            if (id === activeProfileId) {
+              setConnectionBadge(false, "Not connected");
+              el("waStatus").textContent = "Session terminated. Handshake required.";
+            }
+            toast("Session terminated", "Handshake is required to reconnect this profile");
+          } catch (e) {
+            toast("Cannot terminate", String(e?.message || e));
+          }
+        }
         if (act === "del") {
           try {
             await window.api.deleteProfile(id);
@@ -757,7 +854,7 @@ function mergeWaContactsIntoRecipients(contacts) {
 
     const row = makeRecipientRow({ phone: msisdn, vars: {} });
     if (includeName) {
-      const name = String(c?.name || "").trim();
+      const name = String(c?.name || c?.notify || c?.verifiedName || "").trim();
       if (name) row.vars.name = name;
     }
 
@@ -768,6 +865,163 @@ function mergeWaContactsIntoRecipients(contacts) {
 
   if (recipientsData.length === 0) recipientsData = [makeRecipientRow()];
   return added;
+}
+
+function normalizeWaContactRecord(c) {
+  const msisdn = normalizeMsisdn(c?.msisdn || c?.phone || "");
+  const jid = String(c?.jid || (msisdn ? `${msisdn}@s.whatsapp.net` : "")).trim();
+  const name = String(c?.name || "").trim();
+  const notify = String(c?.notify || "").trim();
+  const verifiedName = String(c?.verifiedName || "").trim();
+  const displayName = name || notify || verifiedName || msisdn || "Unknown";
+  const imgUrl = String(c?.imgUrl || "").trim();
+  const status = String(c?.status || "").trim();
+  return { msisdn, jid, name, notify, verifiedName, displayName, imgUrl, status };
+}
+
+function openWaContactsModal() {
+  el("waContactsModal").classList.remove("hidden");
+}
+
+function closeWaContactsModal() {
+  el("waContactsModal").classList.add("hidden");
+}
+
+function filterWaContactsRows() {
+  const q = String(el("waContactsSearch").value || "")
+    .trim()
+    .toLowerCase();
+  if (!q) {
+    waContactsFiltered = [...waContactsRows];
+    return;
+  }
+
+  waContactsFiltered = waContactsRows.filter((c) => {
+    const hay = `${c.displayName} ${c.name} ${c.notify} ${c.verifiedName} ${c.msisdn} ${c.jid} ${c.status}`.toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+function renderWaContactsTable() {
+  const body = el("waContactsBody");
+  body.innerHTML = "";
+
+  filterWaContactsRows();
+
+  for (const c of waContactsFiltered) {
+    const tr = document.createElement("tr");
+
+    const tdPick = document.createElement("td");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = waContactSelection.has(c.msisdn);
+    cb.addEventListener("change", () => {
+      if (cb.checked) waContactSelection.add(c.msisdn);
+      else waContactSelection.delete(c.msisdn);
+      updateWaContactsSelectionUi();
+    });
+    tdPick.appendChild(cb);
+    tr.appendChild(tdPick);
+
+    const tdContact = document.createElement("td");
+    tdContact.innerHTML = `
+      <div class="waContactCell">
+        <div class="waAvatar">${c.imgUrl ? `<img src="${escapeHtml(c.imgUrl)}" alt="avatar" />` : escapeHtml((c.displayName || "?").slice(0, 1).toUpperCase())}</div>
+        <div class="waContactText">
+          <div class="waContactName">${escapeHtml(c.displayName)}</div>
+          <div class="waContactMeta">${escapeHtml(c.status || c.verifiedName || c.notify || c.name || "")}</div>
+        </div>
+      </div>
+    `;
+    tr.appendChild(tdContact);
+
+    const tdName = document.createElement("td");
+    tdName.innerHTML = `<span class="waNameText">${escapeHtml(c.name || c.notify || c.verifiedName || "-")}</span>`;
+    tr.appendChild(tdName);
+
+    const tdPhone = document.createElement("td");
+    tdPhone.textContent = c.msisdn || "-";
+    tr.appendChild(tdPhone);
+
+    const tdJid = document.createElement("td");
+    tdJid.innerHTML = `<span class="waJidText">${escapeHtml(c.jid || "-")}</span>`;
+    tr.appendChild(tdJid);
+
+    body.appendChild(tr);
+  }
+
+  if (waContactsFiltered.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td colspan="5" class="smallMuted">No contacts found</td>`;
+    body.appendChild(tr);
+  }
+
+  updateWaContactsSelectionUi();
+}
+
+function updateWaContactsSelectionUi() {
+  const visible = waContactsFiltered.length;
+  let selectedVisible = 0;
+  for (const c of waContactsFiltered) {
+    if (waContactSelection.has(c.msisdn)) selectedVisible++;
+  }
+
+  const selectAll = el("waContactsSelectAll");
+  selectAll.checked = visible > 0 && selectedVisible === visible;
+  selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visible;
+
+  el("waContactsCount").textContent = `${waContactSelection.size} selected (${waContactsRows.length} total)`;
+}
+
+async function loadWaContactsForPicker(options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const forcePhotoRefresh = !!opts.forcePhotoRefresh;
+  const loadToken = ++waContactsLoadToken;
+  const body = el("waContactsBody");
+  body.innerHTML = `<tr><td colspan="5" class="smallMuted">Loading contacts...</td></tr>`;
+  try {
+    // First pass: fast list from local cache/memory, no photo fetch blocking.
+    const res = await window.api.waGetContacts({
+      includePhotos: false
+    });
+    if (loadToken !== waContactsLoadToken) return;
+    if (!res?.ok) throw new Error(res?.error || "Unable to load contacts");
+    if (typeof res.connected === "boolean") {
+      setConnectionBadge(res.connected, res.connected ? "Connected" : "Not connected");
+    }
+
+    waContactsRows = (res.contacts || []).map(normalizeWaContactRecord).filter((c) => c.msisdn);
+    waContactsRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    waContactSelection = new Set();
+    el("waContactsSearch").value = "";
+    renderWaContactsTable();
+
+    if (waContactsRows.length === 0) {
+      toast("Contacts", "No contacts available yet. Open chats or reconnect to sync contacts.");
+    }
+
+    // Second pass: enrich photos in background; table updates when ready.
+    if (res.connected) {
+      window.api
+        .waGetContacts({
+          includePhotos: true,
+          maxPhotoFetch: 60,
+          photoFetchConcurrency: 3,
+          minMinutesBetweenPhotoChecks: forcePhotoRefresh ? 1 : 720
+        })
+        .then((photoRes) => {
+          if (loadToken !== waContactsLoadToken) return;
+          if (!photoRes?.ok) return;
+          waContactsRows = (photoRes.contacts || []).map(normalizeWaContactRecord).filter((c) => c.msisdn);
+          waContactsRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
+          renderWaContactsTable();
+        })
+        .catch(() => {});
+    }
+  } catch (e) {
+    if (loadToken !== waContactsLoadToken) return;
+    body.innerHTML = `<tr><td colspan="5" class="smallMuted">${escapeHtml(String(e?.message || e))}</td></tr>`;
+  }
 }
 
 function csvEscape(v) {
@@ -846,11 +1100,13 @@ async function init() {
 
   el("profileSelect").addEventListener("change", async () => {
     const id = el("profileSelect").value;
+    setConnectionBadge(false, "Connecting...");
+    el("waStatus").textContent = "Connecting...";
     const res = await window.api.setActiveProfile(id);
     activeProfileId = res.activeProfileId;
     renderProfileSelect();
     renderProfileList();
-    setConnectionBadge(false, "Connecting...");
+    await waitForConnectionSync();
     toast("Profile selected", "Switched profile and attempting reconnect");
   });
 
@@ -1032,29 +1288,48 @@ async function init() {
     refreshRecipientCount();
     refreshSendPreview();
   });
+  el("btnClearRecipients").addEventListener("click", () => {
+    recipientsData = [makeRecipientRow()];
+    renderRecipientsTable();
+    refreshRecipientCount();
+    refreshSendPreview();
+    toast("Recipients cleared", "Recipient list reset");
+  });
 
   el("btnImportWaContacts").addEventListener("click", async () => {
-    try {
-      const res = await window.api.waGetContacts();
-      if (!res?.ok) {
-        toast("Contacts", res?.error || "Unable to load WhatsApp contacts");
-        return;
-      }
+    openWaContactsModal();
+    await loadWaContactsForPicker();
+  });
 
-      const added = mergeWaContactsIntoRecipients(res.contacts || []);
-      renderRecipientsTable();
-      refreshRecipientCount();
-      refreshSendPreview();
-
-      if ((res.count || 0) === 0) {
-        toast("Contacts", "No WhatsApp contacts cached yet. Open chats or reconnect to sync more contacts.");
-        return;
-      }
-
-      toast("Contacts loaded", `Added ${added} of ${res.count} contacts from WhatsApp`);
-    } catch (e) {
-      toast("Contacts", String(e?.message || e));
+  el("btnCloseWaContactsModal").addEventListener("click", () => closeWaContactsModal());
+  el("waContactsModalBackdrop").addEventListener("click", () => closeWaContactsModal());
+  el("btnRefreshWaContacts").addEventListener("click", async () => {
+    await loadWaContactsForPicker({ forcePhotoRefresh: true });
+  });
+  el("waContactsSearch").addEventListener("input", () => {
+    renderWaContactsTable();
+  });
+  el("waContactsSelectAll").addEventListener("change", () => {
+    const checked = !!el("waContactsSelectAll").checked;
+    for (const c of waContactsFiltered) {
+      if (checked) waContactSelection.add(c.msisdn);
+      else waContactSelection.delete(c.msisdn);
     }
+    renderWaContactsTable();
+  });
+  el("btnImportSelectedWaContacts").addEventListener("click", () => {
+    const selected = waContactsRows.filter((c) => waContactSelection.has(c.msisdn));
+    if (selected.length === 0) {
+      toast("Contacts", "Please tick at least one contact");
+      return;
+    }
+
+    const added = mergeWaContactsIntoRecipients(selected);
+    renderRecipientsTable();
+    refreshRecipientCount();
+    refreshSendPreview();
+    closeWaContactsModal();
+    toast("Contacts loaded", `Added ${added} selected contacts`);
   });
 
   el("btnDownloadCsvTemplate").addEventListener("click", () => {
@@ -1066,6 +1341,7 @@ async function init() {
     if (!node) return;
     const evName = node.tagName === "INPUT" && node.type === "checkbox" ? "change" : "input";
     node.addEventListener(evName, () => {
+      if (id === "aiEnable") setAiRewriteUiEnabled(!!el("aiEnable").checked);
       scheduleSaveAiRewriteConfig();
     });
   });
@@ -1172,9 +1448,21 @@ async function init() {
   });
 
   window.api.onStatus((s) => {
+    if (s?.profileId && activeProfileId && s.profileId !== activeProfileId) return;
     el("waStatus").textContent = s.text || "Status updated";
     const connected = !!s.connected;
     setConnectionBadge(connected, s.text || (connected ? "Connected" : "Not connected"));
+    if (connected) {
+      window.api
+        .getProfiles()
+        .then((res) => {
+          profiles = res.profiles || [];
+          activeProfileId = res.activeProfileId || activeProfileId;
+          renderProfileSelect();
+          renderProfileList();
+        })
+        .catch(() => {});
+    }
 
     const active = profiles.find((x) => x.id === activeProfileId);
     el("waProfileText").textContent = active ? `${active.name} (${active.id})` : "-";
@@ -1208,14 +1496,12 @@ async function init() {
   refreshSendPolicyText();
   refreshSendPreview();
 
-  try {
-    await window.api.waAutoReconnect();
-  } catch (e) {
-    // ignore startup reconnect errors; user can handshake manually
-  }
+  await syncConnectionStateFromBackend();
+  await waitForConnectionSync();
 }
 
 init().catch((e) => {
   console.error(e);
   toast("Init error", String(e?.message || e));
 });
+
