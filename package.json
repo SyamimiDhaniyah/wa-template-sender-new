@@ -1,0 +1,40 @@
+{
+  "name": "wa-template-sender",
+  "version": "1.2.0",
+  "private": true,
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "electron-store": "^8.2.0",
+    "pino": "^9.3.2",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "electron": "^40.2.1",
+    "electron-builder": "^26.7.0"
+  },
+  "build": {
+    "appId": "com.izz.waTemplateSender",
+    "productName": "WA Template Sender",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "data/**/*"
+    ],
+    "directories": {
+      "buildResources": "assets",
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    }
+  }
+}

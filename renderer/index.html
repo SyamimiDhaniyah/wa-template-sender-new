@@ -1,0 +1,392 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self';"
+    />
+    <title>WA Template Sender</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="logo">WA</div>
+          <div class="brandText">
+            <div class="brandTitle">Template Sender</div>
+            <div class="brandSub">Local desktop tool</div>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="navItem active" data-view="connect"><span class="navDot"></span>Connect</button>
+          <button class="navItem" data-view="templates"><span class="navDot"></span>Templates</button>
+          <button class="navItem" data-view="send"><span class="navDot"></span>Send</button>
+          <button class="navItem" data-view="activity"><span class="navDot"></span>Activity</button>
+        </nav>
+
+        <div class="sidebarFooter">
+          <div class="smallMuted">Tip</div>
+          <div class="smallText">
+            Use this for existing clients who opted in. Keep messages relevant and avoid large blasts.
+          </div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div class="topLeft">
+            <div class="pageTitle" id="pageTitle">Connect</div>
+            <div class="pageHint" id="pageHint">Connect WhatsApp via QR code and choose a profile</div>
+          </div>
+
+          <div class="topRight">
+            <div class="profileBox">
+              <div class="profileLabel">Profile</div>
+              <select class="input compact" id="profileSelect"></select>
+            </div>
+
+            <div class="badge" id="connBadge">
+              <span class="badgeDot offline" id="connDot"></span>
+              <span id="connText">Not connected</span>
+            </div>
+
+            <button class="btnPrimary" id="btnHandshakeTop">Handshake</button>
+          </div>
+        </header>
+
+        <section class="content">
+          <div class="view" id="view-connect">
+            <div class="grid2">
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">WhatsApp Connection</div>
+                    <div class="cardSub">Scan QR using WhatsApp on your phone</div>
+                  </div>
+                  <button class="btnGhost" id="btnHandshake">Handshake</button>
+                </div>
+
+                <div class="row" style="margin-top: 6px;">
+                  <div style="flex:1;">
+                    <label class="label" style="margin-top:0;">Method</label>
+                    <select class="input" id="connectMethod">
+                      <option value="qr" selected>QR Code</option>
+                      <option value="pairing">Pairing Code (Phone Number)</option>
+                    </select>
+                  </div>
+                  <div style="flex:1;" id="pairingPhoneWrap" class="hidden">
+                    <label class="label" style="margin-top:0;">Phone (E.164 digits, no +)</label>
+                    <input class="input" id="pairingPhone" placeholder="60123456789" />
+                  </div>
+                </div>
+
+                <div class="qrArea">
+                  <div class="qrBox">
+                    <img id="qrImg" alt="QR will appear here" />
+                    <div class="pairingBox hidden" id="pairingBox">
+                      <div class="pairingTitle">Pairing code</div>
+                      <div class="pairingCode" id="pairingCode">-</div>
+                      <div class="pairingHint">WhatsApp → Linked devices → Link with phone number</div>
+                    </div>
+                  </div>
+
+                  <div class="qrInfo">
+                    <div class="infoRow">
+                      <div class="infoLabel">Status</div>
+                      <div class="infoValue" id="waStatus">Not connected</div>
+                    </div>
+
+                    <div class="infoRow">
+                      <div class="infoLabel">Active profile</div>
+                      <div class="infoValue" id="waProfileText">-</div>
+                    </div>
+
+                    <div class="infoRow">
+                      <div class="infoLabel">Notes</div>
+                      <div class="infoValue">
+                        Each profile saves a separate WhatsApp session. Use different profiles for different WhatsApp
+                        numbers.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">WhatsApp Profiles</div>
+                    <div class="cardSub">Create, switch, delete profiles</div>
+                  </div>
+                </div>
+
+                <div class="row">
+                  <input class="input" id="newProfileName" placeholder="Example: Sales 1, Admin, Branch Bangi" />
+                  <button class="btnPrimary" id="btnCreateProfile">Create</button>
+                </div>
+
+                <div class="profileList" id="profileList"></div>
+
+                <div class="callout">
+                  <div class="calloutTitle">Important</div>
+                  <div class="calloutBody">
+                    If you delete a profile, its WhatsApp session will be removed and you will need to scan QR again.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="view hidden" id="view-templates">
+            <div class="gridTpl">
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">Template Library</div>
+                    <div class="cardSub">Select a template to edit</div>
+                  </div>
+                  <button class="btnPrimary" id="btnNewTpl">New</button>
+                </div>
+                <div class="tplList" id="tplList"></div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">Editor</div>
+                    <div class="cardSub">Use placeholders like {name} {date} {time}</div>
+                  </div>
+                  <div class="rowRight">
+                    <button class="btnGhost" id="btnDeleteTpl">Delete</button>
+                    <button class="btnPrimary" id="btnSaveTpl">Save</button>
+                  </div>
+                </div>
+
+                <div class="form">
+                  <label class="label">Template name</label>
+                  <input id="tplName" class="input" placeholder="Template name" />
+
+                  <label class="label">Message body</label>
+                  <textarea id="tplBody" class="textarea" rows="10" placeholder="Hi {name}, ..."></textarea>
+
+                  <div class="chips">
+                    <div class="chipTitle">Common placeholders</div>
+                    <div class="chipRow">
+                      <span class="chip">{name}</span>
+                      <span class="chip">{topic}</span>
+                      <span class="chip">{date}</span>
+                      <span class="chip">{time}</span>
+                      <span class="chip">{branch}</span>
+                      <span class="chip">{doctor}</span>
+                    </div>
+                  </div>
+
+                  <div class="previewBox">
+                    <div class="previewTitle">Preview</div>
+                    <div class="previewText" id="tplPreview">Select a template to preview</div>
+                  </div>
+
+                  <div class="row">
+                    <button class="btnGhost" id="btnClearSentMarks">Clear sent marks for this template</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="view hidden" id="view-send">
+            <div class="gridSend">
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">Recipients</div>
+                    <div class="cardSub">One phone number per line</div>
+                  </div>
+                  <button class="btnGhost" id="btnImportCsv">Import CSV</button>
+                </div>
+
+                <textarea id="phones" class="textarea" rows="11" placeholder="60123456789\n0123456789"></textarea>
+
+                <div class="splitRow">
+                  <div class="mini">
+                    <div class="miniLabel">Total</div>
+                    <div class="miniValue" id="totalRecipients">0</div>
+                  </div>
+                  <div class="mini">
+                    <div class="miniLabel">Max safety</div>
+                    <div class="miniValue">200</div>
+                  </div>
+                </div>
+
+                <div class="checkRow">
+                  <label class="check">
+                    <input type="checkbox" id="skipSent" checked />
+                    <span>Skip already sent (same template)</span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHeader">
+                  <div>
+                    <div class="cardTitle">Send Settings</div>
+                    <div class="cardSub">Choose template and pacing</div>
+                  </div>
+                </div>
+
+                <label class="label">Template</label>
+                <select id="tplSelect" class="input"></select>
+
+                <div class="row3">
+                  <div>
+                    <label class="label">Pacing pattern</label>
+                    <select id="pacingPattern" class="input">
+                      <option value="random" selected>Random within range</option>
+                      <option value="cycle">Cycle within range</option>
+                      <option value="fixed">Fixed average</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label class="label">Min seconds</label>
+                    <input id="minSec" type="number" class="input" value="7" />
+                  </div>
+
+                  <div>
+                    <label class="label">Max seconds</label>
+                    <input id="maxSec" type="number" class="input" value="10" />
+                  </div>
+                </div>
+
+                <label class="label">Variables per recipient (optional JSON)</label>
+                <textarea
+                  id="varsJson"
+                  class="textarea"
+                  rows="7"
+                  placeholder='{ "60123456789": { "name": "Ali", "topic": "quotation" }, "0123456789": { "name": "Siti", "date": "10 Feb", "time": "3pm" } }'
+                ></textarea>
+
+                <div class="previewBox">
+                  <div class="previewTitle">First recipient preview</div>
+                  <div class="previewText" id="sendPreview">Enter recipients to preview</div>
+                </div>
+
+                <button class="btnPrimary btnWide" id="btnSend">Send Batch</button>
+
+                <div class="progressWrap">
+                  <div class="progressTop">
+                    <div class="progressText" id="progressText">Idle</div>
+                    <div class="progressPct" id="progressPct">0%</div>
+                  </div>
+                  <div class="progressBar">
+                    <div class="progressFill" id="progressFill"></div>
+                  </div>
+                </div>
+
+                <div class="hintBox">
+                  CSV import supports columns like phone, name, topic, date, time. You can map columns in the next step.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="view hidden" id="view-activity">
+            <div class="card">
+              <div class="cardHeader">
+                <div>
+                  <div class="cardTitle">Activity</div>
+                  <div class="cardSub">Batch results and errors</div>
+                </div>
+                <button class="btnGhost" id="btnClearActivity">Clear</button>
+              </div>
+
+              <div class="tableWrap">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th style="width: 180px;">Time</th>
+                      <th style="width: 180px;">Phone</th>
+                      <th style="width: 120px;">Status</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody id="activityBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <div class="toastWrap" id="toastWrap"></div>
+
+      <div class="modal hidden" id="csvModal">
+        <div class="modalBackdrop" id="csvModalBackdrop"></div>
+        <div class="modalCard">
+          <div class="modalHeader">
+            <div>
+              <div class="modalTitle">CSV Import Mapping</div>
+              <div class="modalSub">Choose which columns to use</div>
+            </div>
+            <button class="btnGhost" id="btnCloseCsvModal">Close</button>
+          </div>
+
+          <div class="form">
+            <label class="label">Has header row?</label>
+            <select class="input" id="csvHasHeader">
+              <option value="true" selected>true</option>
+              <option value="false">false</option>
+            </select>
+
+            <label class="label">Phone column index (0-based)</label>
+            <input class="input" id="csvPhoneCol" type="number" value="0" />
+
+            <div class="gridCols">
+              <div>
+                <label class="label">Name col index</label>
+                <input class="input" id="csvNameCol" type="number" placeholder="Optional" />
+              </div>
+              <div>
+                <label class="label">Topic col index</label>
+                <input class="input" id="csvTopicCol" type="number" placeholder="Optional" />
+              </div>
+              <div>
+                <label class="label">Date col index</label>
+                <input class="input" id="csvDateCol" type="number" placeholder="Optional" />
+              </div>
+              <div>
+                <label class="label">Time col index</label>
+                <input class="input" id="csvTimeCol" type="number" placeholder="Optional" />
+              </div>
+              <div>
+                <label class="label">Branch col index</label>
+                <input class="input" id="csvBranchCol" type="number" placeholder="Optional" />
+              </div>
+              <div>
+                <label class="label">Doctor col index</label>
+                <input class="input" id="csvDoctorCol" type="number" placeholder="Optional" />
+              </div>
+            </div>
+
+            <div class="row">
+              <button class="btnPrimary" id="btnPickCsvAndImport">Pick CSV and Import</button>
+            </div>
+
+            <div class="previewBox">
+              <div class="previewTitle">Tip</div>
+              <div class="previewText">
+                If your CSV has header row, phone column might be "phone" or "mobile". Use 0-based index: first column
+                is 0, second is 1, etc.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
