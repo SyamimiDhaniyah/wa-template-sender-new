@@ -5,9 +5,20 @@ let profiles = [];
 let activeProfileId = null;
 let waConnected = false;
 
+let recipientsData = [];
 let activityRows = [];
 let batchTotal = 0;
 let batchDone = 0;
+let aiSaveTimer = null;
+
+const defaultAiRewriteConfig = {
+  enabled: false,
+  endpoint: "https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM",
+  authToken: "",
+  prompt: "{message}",
+  timeoutMs: 30000,
+  fallbackToOriginal: true
+};
 
 function el(id) {
   return document.getElementById(id);
@@ -70,8 +81,10 @@ function switchView(viewName) {
   if (viewName === "activity") setHeader("Activity", "Batch results and errors");
 
   if (viewName === "send") {
-    refreshSendPreview();
+    renderRecipientsTable();
     refreshRecipientCount();
+    refreshSendPolicyText();
+    refreshSendPreview();
   }
 }
 
@@ -79,13 +92,75 @@ function uuid() {
   return "t_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
 }
 
+function isValidTemplateVarName(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name || ""));
+}
+
+function extractVarsFromBody(body) {
+  const set = new Set();
+  const re = /\{(\w+)\}/g;
+  const text = String(body || "");
+  let m;
+  while ((m = re.exec(text))) {
+    const key = String(m[1] || "");
+    if (isValidTemplateVarName(key)) set.add(key);
+  }
+  return Array.from(set);
+}
+
+function uniqueValidVars(arr) {
+  const set = new Set();
+  for (const x of Array.isArray(arr) ? arr : []) {
+    const key = String(x || "").trim();
+    if (isValidTemplateVarName(key)) set.add(key);
+  }
+  return Array.from(set);
+}
+
+function normalizeTemplate(raw, idx) {
+  const t = raw && typeof raw === "object" ? raw : {};
+  const variables = uniqueValidVars(t.variables);
+  const bodyVars = extractVarsFromBody(t.body || "");
+  for (const v of bodyVars) {
+    if (!variables.includes(v)) variables.push(v);
+  }
+
+  return {
+    id: String(t.id || "t_" + String(idx + 1)),
+    name: String(t.name || "Untitled"),
+    body: String(t.body || ""),
+    variables,
+    sendPolicy: t.sendPolicy === "multiple" ? "multiple" : "once"
+  };
+}
+
+function normalizeTemplates(list) {
+  return (Array.isArray(list) ? list : []).map((t, idx) => normalizeTemplate(t, idx));
+}
+
 function getSelectedTemplate() {
   return templates.find((t) => t.id === currentTemplateId) || null;
 }
 
+function syncTemplateVarsFromBody(template) {
+  if (!template) return;
+  const base = uniqueValidVars(template.variables);
+  const fromBody = extractVarsFromBody(template.body || "");
+  for (const v of fromBody) {
+    if (!base.includes(v)) base.push(v);
+  }
+  template.variables = base;
+}
+
+function getTemplateVariables(template) {
+  const t = template || getSelectedTemplate();
+  if (!t) return [];
+  return uniqueValidVars(t.variables);
+}
+
 function templateSnippet(body) {
   const s = String(body || "").replace(/\s+/g, " ").trim();
-  return s.length > 70 ? s.slice(0, 70) + "..." : s;
+  return s.length > 84 ? s.slice(0, 84) + "..." : s;
 }
 
 function renderTemplate(body, vars) {
@@ -104,35 +179,41 @@ function normalizeMsisdn(input) {
   return s;
 }
 
-function parsePhonesRaw() {
-  const raw = el("phones").value || "";
-  const arr = raw
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return arr;
+function makeRecipientRow(seed) {
+  const src = seed && typeof seed === "object" ? seed : {};
+  return {
+    phone: String(src.phone || ""),
+    vars: src.vars && typeof src.vars === "object" ? { ...src.vars } : {}
+  };
 }
 
-function parsePhonesNormalized() {
-  const raw = parsePhonesRaw();
-  const out = [];
-  for (const p of raw) {
-    const n = normalizeMsisdn(p);
-    if (n && n.length >= 8) out.push(n);
-  }
-  return out;
+function ensureRecipientRows(min = 1) {
+  while (recipientsData.length < min) recipientsData.push(makeRecipientRow());
 }
 
-function parseVarsJson() {
-  const raw = el("varsJson").value.trim();
-  if (!raw) return {};
-  try {
-    const obj = JSON.parse(raw);
-    if (obj && typeof obj === "object") return obj;
-    return {};
-  } catch (e) {
-    throw new Error("Invalid JSON in Variables field");
+function getSendPayload() {
+  const vars = getTemplateVariables();
+  const recipients = [];
+  const varsByPhone = {};
+
+  for (const row of recipientsData) {
+    const norm = normalizeMsisdn(row.phone || "");
+    if (!norm || norm.length < 8) continue;
+
+    recipients.push(norm);
+
+    const rowVars = {};
+    for (const key of vars) {
+      const val = String(row.vars?.[key] || "").trim();
+      if (val) rowVars[key] = val;
+    }
+
+    if (Object.keys(rowVars).length > 0) {
+      varsByPhone[norm] = rowVars;
+    }
   }
+
+  return { recipients, varsByPhone };
 }
 
 function readPacing() {
@@ -142,14 +223,73 @@ function readPacing() {
   return { pattern, minSec, maxSec };
 }
 
+function normalizeAiRewriteConfigClient(input) {
+  const cfg = input && typeof input === "object" ? input : {};
+  const timeoutRaw = Number(cfg.timeoutMs);
+  const timeoutMs = Number.isFinite(timeoutRaw) ? Math.min(120000, Math.max(3000, Math.round(timeoutRaw))) : 30000;
+  const endpoint = String(cfg.endpoint || "").trim() || defaultAiRewriteConfig.endpoint;
+
+  return {
+    enabled: !!cfg.enabled,
+    endpoint,
+    authToken: String(cfg.authToken || "").trim(),
+    prompt: String(cfg.prompt || defaultAiRewriteConfig.prompt).trim(),
+    timeoutMs,
+    fallbackToOriginal: cfg.fallbackToOriginal !== false
+  };
+}
+
+function applyAiRewriteConfigToUi(config) {
+  const cfg = normalizeAiRewriteConfigClient({ ...defaultAiRewriteConfig, ...(config || {}) });
+  el("aiEnable").checked = !!cfg.enabled;
+  el("aiEndpoint").value = cfg.endpoint;
+  el("aiAuthToken").value = cfg.authToken;
+  el("aiPrompt").value = cfg.prompt;
+  el("aiTimeoutMs").value = String(cfg.timeoutMs);
+  el("aiFallback").checked = !!cfg.fallbackToOriginal;
+}
+
+function readAiRewriteConfigFromUi() {
+  return normalizeAiRewriteConfigClient({
+    enabled: !!el("aiEnable").checked,
+    endpoint: el("aiEndpoint").value,
+    authToken: el("aiAuthToken").value,
+    prompt: el("aiPrompt").value,
+    timeoutMs: Number(el("aiTimeoutMs").value || 30000),
+    fallbackToOriginal: !!el("aiFallback").checked
+  });
+}
+
+function scheduleSaveAiRewriteConfig() {
+  if (aiSaveTimer) clearTimeout(aiSaveTimer);
+  aiSaveTimer = setTimeout(async () => {
+    aiSaveTimer = null;
+    try {
+      await window.api.saveAiRewriteConfig(readAiRewriteConfigFromUi());
+    } catch (e) {
+      // do not block sending due to config-save errors
+    }
+  }, 300);
+}
+
 function refreshRecipientCount() {
-  const count = parsePhonesNormalized().length;
+  const count = getSendPayload().recipients.length;
   el("totalRecipients").textContent = String(count);
+}
+
+function refreshSendPolicyText() {
+  const t = getSelectedTemplate();
+  if (!t) {
+    el("sendPolicyText").textContent = "-";
+    return;
+  }
+  el("sendPolicyText").textContent = t.sendPolicy === "multiple" ? "Multiple" : "Once";
 }
 
 function refreshTemplateSelect() {
   const sel = el("tplSelect");
   sel.innerHTML = "";
+
   for (const t of templates) {
     const opt = document.createElement("option");
     opt.value = t.id;
@@ -158,9 +298,13 @@ function refreshTemplateSelect() {
   }
 
   if (templates.length > 0) {
-    if (!currentTemplateId) currentTemplateId = templates[0].id;
+    if (!currentTemplateId || !templates.some((x) => x.id === currentTemplateId)) {
+      currentTemplateId = templates[0].id;
+    }
     sel.value = currentTemplateId;
   }
+
+  refreshSendPolicyText();
 }
 
 function renderTemplateList() {
@@ -180,10 +324,54 @@ function renderTemplateList() {
       renderTemplateList();
       loadTemplateToEditor();
       refreshTemplateSelect();
+      renderRecipientsTable();
+      refreshRecipientCount();
       refreshSendPreview();
     });
 
     list.appendChild(item);
+  }
+}
+
+function renderTemplateVariableList() {
+  const wrap = el("tplVarList");
+  wrap.innerHTML = "";
+
+  const t = getSelectedTemplate();
+  if (!t) return;
+
+  const vars = getTemplateVariables(t);
+  if (vars.length === 0) {
+    const empty = document.createElement("span");
+    empty.className = "smallMuted";
+    empty.textContent = "No variables yet";
+    wrap.appendChild(empty);
+    return;
+  }
+
+  for (const key of vars) {
+    const chip = document.createElement("span");
+    chip.className = "chipBtn";
+
+    const txt = document.createElement("span");
+    txt.textContent = `{${key}}`;
+
+    const del = document.createElement("button");
+    del.className = "chipBtnDel";
+    del.type = "button";
+    del.textContent = "x";
+    del.title = "Remove variable";
+    del.addEventListener("click", () => {
+      t.variables = getTemplateVariables(t).filter((v) => v !== key);
+      renderTemplateVariableList();
+      renderRecipientsTable();
+      refreshSendPreview();
+      renderCsvVariableMapping();
+    });
+
+    chip.appendChild(txt);
+    chip.appendChild(del);
+    wrap.appendChild(chip);
   }
 }
 
@@ -192,12 +380,19 @@ function loadTemplateToEditor() {
   if (!t) {
     el("tplName").value = "";
     el("tplBody").value = "";
+    el("tplSendPolicy").value = "once";
     el("tplPreview").textContent = "Select a template to preview";
+    el("tplVarName").value = "";
+    renderTemplateVariableList();
     return;
   }
 
   el("tplName").value = t.name || "";
   el("tplBody").value = t.body || "";
+  el("tplSendPolicy").value = t.sendPolicy === "multiple" ? "multiple" : "once";
+  el("tplVarName").value = "";
+  syncTemplateVarsFromBody(t);
+  renderTemplateVariableList();
   refreshTemplatePreview();
 }
 
@@ -214,6 +409,12 @@ function refreshTemplatePreview() {
     doctor: "Dr. Ashraf"
   };
 
+  for (const key of getTemplateVariables(t)) {
+    if (!Object.prototype.hasOwnProperty.call(demoVars, key)) {
+      demoVars[key] = `[${key}]`;
+    }
+  }
+
   const preview = renderTemplate(el("tplBody").value, demoVars);
   el("tplPreview").textContent = preview || "Preview will appear here";
 }
@@ -225,25 +426,19 @@ function refreshSendPreview() {
     return;
   }
 
-  const recipients = parsePhonesRaw();
-  if (recipients.length === 0) {
-    el("sendPreview").textContent = "Enter recipients to preview";
+  const row = recipientsData.find((r) => normalizeMsisdn(r.phone || "").length >= 8);
+  if (!row) {
+    el("sendPreview").textContent = "Add at least one recipient to preview";
     return;
   }
 
-  let varsByPhone = {};
-  try {
-    varsByPhone = parseVarsJson();
-  } catch (e) {
-    el("sendPreview").textContent = e.message;
-    return;
+  const vars = { name: "Client" };
+  for (const key of getTemplateVariables(t)) {
+    const val = String(row.vars?.[key] || "").trim();
+    if (val) vars[key] = val;
   }
 
-  const firstRaw = recipients[0];
-  const normalized = normalizeMsisdn(firstRaw);
-  const vars = varsByPhone[firstRaw] || varsByPhone[normalized] || { name: "Client" };
-  const body = t.body || "";
-  const preview = renderTemplate(body, vars);
+  const preview = renderTemplate(t.body || "", vars);
   el("sendPreview").textContent = preview || "Preview will appear here";
 }
 
@@ -298,6 +493,95 @@ function renderActivityTable() {
   }
 }
 
+function renderRecipientsTable() {
+  const t = getSelectedTemplate();
+  const vars = getTemplateVariables(t);
+
+  const head = el("recipientHead");
+  const body = el("recipientBody");
+
+  ensureRecipientRows(1);
+
+  head.innerHTML = "";
+  const hr = document.createElement("tr");
+  const hNo = document.createElement("th");
+  hNo.style.width = "56px";
+  hNo.textContent = "#";
+  hr.appendChild(hNo);
+
+  const hPhone = document.createElement("th");
+  hPhone.style.width = "180px";
+  hPhone.textContent = "Phone";
+  hr.appendChild(hPhone);
+
+  for (const key of vars) {
+    const th = document.createElement("th");
+    th.textContent = key;
+    hr.appendChild(th);
+  }
+
+  const hAct = document.createElement("th");
+  hAct.style.width = "90px";
+  hAct.textContent = "Action";
+  hr.appendChild(hAct);
+  head.appendChild(hr);
+
+  body.innerHTML = "";
+  recipientsData.forEach((row, rowIndex) => {
+    const tr = document.createElement("tr");
+
+    const tdNo = document.createElement("td");
+    tdNo.textContent = String(rowIndex + 1);
+    tr.appendChild(tdNo);
+
+    const tdPhone = document.createElement("td");
+    const phoneInput = document.createElement("input");
+    phoneInput.className = "input";
+    phoneInput.placeholder = "60123456789";
+    phoneInput.value = row.phone || "";
+    phoneInput.addEventListener("input", () => {
+      row.phone = phoneInput.value;
+      refreshRecipientCount();
+      refreshSendPreview();
+    });
+    tdPhone.appendChild(phoneInput);
+    tr.appendChild(tdPhone);
+
+    for (const key of vars) {
+      const td = document.createElement("td");
+      const input = document.createElement("input");
+      input.className = "input";
+      input.placeholder = key;
+      input.value = String(row.vars?.[key] || "");
+      input.addEventListener("input", () => {
+        if (!row.vars || typeof row.vars !== "object") row.vars = {};
+        row.vars[key] = input.value;
+        refreshSendPreview();
+      });
+      td.appendChild(input);
+      tr.appendChild(td);
+    }
+
+    const tdAct = document.createElement("td");
+    const delBtn = document.createElement("button");
+    delBtn.className = "btnDanger";
+    delBtn.type = "button";
+    delBtn.textContent = "Delete";
+    delBtn.disabled = recipientsData.length <= 1;
+    delBtn.addEventListener("click", () => {
+      if (recipientsData.length <= 1) return;
+      recipientsData.splice(rowIndex, 1);
+      renderRecipientsTable();
+      refreshRecipientCount();
+      refreshSendPreview();
+    });
+    tdAct.appendChild(delBtn);
+    tr.appendChild(tdAct);
+
+    body.appendChild(tr);
+  });
+}
+
 /* --------------------------- Profiles UI ---------------------------- */
 function renderProfileSelect() {
   const sel = el("profileSelect");
@@ -343,8 +627,8 @@ function renderProfileList() {
           activeProfileId = res.activeProfileId;
           renderProfileSelect();
           renderProfileList();
-          setConnectionBadge(false, "Not connected");
-          toast("Profile selected", "Click Connect and scan QR if needed");
+          setConnectionBadge(false, "Connecting...");
+          toast("Profile selected", "Switched profile and attempting reconnect");
         }
 
         if (act === "del") {
@@ -367,8 +651,9 @@ function renderProfileList() {
   }
 }
 
-/* --------------------------- CSV Modal ---------------------------- */
+/* --------------------------- CSV ---------------------------- */
 function openCsvModal() {
+  renderCsvVariableMapping();
   el("csvModal").classList.remove("hidden");
 }
 
@@ -376,49 +661,161 @@ function closeCsvModal() {
   el("csvModal").classList.add("hidden");
 }
 
+function renderCsvVariableMapping() {
+  const wrap = el("csvVarCols");
+  wrap.innerHTML = "";
+
+  const vars = getTemplateVariables();
+  if (vars.length === 0) {
+    const block = document.createElement("div");
+    block.innerHTML = `<label class="label">No template variables selected</label>`;
+    wrap.appendChild(block);
+    return;
+  }
+
+  for (const key of vars) {
+    const block = document.createElement("div");
+
+    const label = document.createElement("label");
+    label.className = "label";
+    label.textContent = `${key} col index`;
+
+    const input = document.createElement("input");
+    input.className = "input";
+    input.type = "number";
+    input.placeholder = "Optional";
+    input.setAttribute("data-var-col", key);
+
+    block.appendChild(label);
+    block.appendChild(input);
+    wrap.appendChild(block);
+  }
+}
+
 function readCsvMappingFromModal() {
   const hasHeader = el("csvHasHeader").value === "true";
   const phoneCol = Number(el("csvPhoneCol").value || 0);
 
-  const readOpt = (id) => {
-    const v = el(id).value;
-    if (v === "" || v === null || v === undefined) return null;
-    const n = Number(v);
-    if (!Number.isFinite(n)) return null;
-    return n;
-  };
-
   const varCols = {};
-  const nameCol = readOpt("csvNameCol");
-  const topicCol = readOpt("csvTopicCol");
-  const dateCol = readOpt("csvDateCol");
-  const timeCol = readOpt("csvTimeCol");
-  const branchCol = readOpt("csvBranchCol");
-  const doctorCol = readOpt("csvDoctorCol");
-
-  if (nameCol !== null) varCols.name = nameCol;
-  if (topicCol !== null) varCols.topic = topicCol;
-  if (dateCol !== null) varCols.date = dateCol;
-  if (timeCol !== null) varCols.time = timeCol;
-  if (branchCol !== null) varCols.branch = branchCol;
-  if (doctorCol !== null) varCols.doctor = doctorCol;
+  document.querySelectorAll("[data-var-col]").forEach((node) => {
+    const key = node.getAttribute("data-var-col");
+    const valueRaw = String(node.value || "").trim();
+    if (!key || !valueRaw) return;
+    const idx = Number(valueRaw);
+    if (!Number.isFinite(idx)) return;
+    varCols[key] = idx;
+  });
 
   return { hasHeader, phoneCol, varCols };
 }
 
-function mergeVarsJson(existingJsonText, varsByPhoneNew) {
-  let base = {};
-  try {
-    base = existingJsonText.trim() ? JSON.parse(existingJsonText) : {};
-  } catch (e) {
-    base = {};
+function mergeImportedRecipients(recipients, varsByPhone) {
+  const out = [];
+  for (const msisdn of Array.isArray(recipients) ? recipients : []) {
+    const key = String(msisdn || "").trim();
+    if (!key) continue;
+    out.push(
+      makeRecipientRow({
+        phone: key,
+        vars: varsByPhone && typeof varsByPhone === "object" ? varsByPhone[key] || {} : {}
+      })
+    );
   }
 
-  const merged = { ...base };
-  for (const k of Object.keys(varsByPhoneNew || {})) {
-    merged[k] = { ...(merged[k] || {}), ...(varsByPhoneNew[k] || {}) };
+  recipientsData = out.length > 0 ? out : [makeRecipientRow()];
+}
+
+function isRecipientRowEmpty(row) {
+  if (!row || typeof row !== "object") return true;
+  const phone = String(row.phone || "").trim();
+  if (phone) return false;
+  const vars = row.vars && typeof row.vars === "object" ? row.vars : {};
+  return Object.values(vars).every((v) => String(v || "").trim() === "");
+}
+
+function mergeWaContactsIntoRecipients(contacts) {
+  const list = Array.isArray(contacts) ? contacts : [];
+  const templateVars = getTemplateVariables();
+  const includeName = templateVars.includes("name");
+
+  // If table is still in initial blank state, replace it instead of appending.
+  if (recipientsData.length === 1 && isRecipientRowEmpty(recipientsData[0])) {
+    recipientsData = [];
   }
-  return JSON.stringify(merged, null, 2);
+
+  const seen = new Set();
+  for (const row of recipientsData) {
+    const n = normalizeMsisdn(row.phone || "");
+    if (n.length >= 8) seen.add(n);
+  }
+
+  let added = 0;
+  for (const c of list) {
+    const msisdn = normalizeMsisdn(c?.msisdn || "");
+    if (msisdn.length < 8) continue;
+    if (seen.has(msisdn)) continue;
+
+    const row = makeRecipientRow({ phone: msisdn, vars: {} });
+    if (includeName) {
+      const name = String(c?.name || "").trim();
+      if (name) row.vars.name = name;
+    }
+
+    recipientsData.push(row);
+    seen.add(msisdn);
+    added++;
+  }
+
+  if (recipientsData.length === 0) recipientsData = [makeRecipientRow()];
+  return added;
+}
+
+function csvEscape(v) {
+  const s = String(v ?? "");
+  if (s.includes('"') || s.includes(",") || s.includes("\n")) {
+    return `"${s.replaceAll('"', '""')}"`;
+  }
+  return s;
+}
+
+function csvSampleValue(key) {
+  const k = String(key || "").toLowerCase();
+  if (k === "name") return "Ali";
+  if (k === "branch") return "Bangi";
+  if (k === "date") return "10 Feb";
+  if (k === "time") return "3:00 PM";
+  if (k === "topic") return "quotation";
+  if (k === "doctor") return "Dr. Ashraf";
+  return "";
+}
+
+function downloadCsvTemplate() {
+  const t = getSelectedTemplate();
+  if (!t) {
+    toast("No template", "Select a template first");
+    return;
+  }
+
+  const vars = getTemplateVariables(t);
+  const header = ["phone", ...vars];
+  const sample = ["60123456789", ...vars.map((k) => csvSampleValue(k))];
+
+  const content = [header.map(csvEscape).join(","), sample.map(csvEscape).join(",")].join("\n");
+  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+
+  const safeName = String(t.name || "template")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "template";
+
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `${safeName}_recipients_template.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 /* --------------------------- Init ---------------------------- */
@@ -427,9 +824,12 @@ async function init() {
   profiles = profileRes.profiles || [];
   activeProfileId = profileRes.activeProfileId || null;
 
-  templates = await window.api.getTemplates();
-  if (!Array.isArray(templates)) templates = [];
+  templates = normalizeTemplates(await window.api.getTemplates());
   currentTemplateId = templates[0]?.id || null;
+  const aiRes = await window.api.getAiRewriteConfig();
+  applyAiRewriteConfigToUi(aiRes?.config || defaultAiRewriteConfig);
+
+  recipientsData = [makeRecipientRow()];
 
   renderProfileSelect();
   renderProfileList();
@@ -437,6 +837,7 @@ async function init() {
   refreshTemplateSelect();
   renderTemplateList();
   loadTemplateToEditor();
+  renderRecipientsTable();
   setProgress(0, 0);
 
   document.querySelectorAll(".navItem").forEach((btn) => {
@@ -449,15 +850,14 @@ async function init() {
     activeProfileId = res.activeProfileId;
     renderProfileSelect();
     renderProfileList();
-    setConnectionBadge(false, "Not connected");
-    toast("Profile selected", "Click Connect and scan QR if needed");
+    setConnectionBadge(false, "Connecting...");
+    toast("Profile selected", "Switched profile and attempting reconnect");
   });
 
   function setConnectUiMode() {
     const method = el("connectMethod")?.value || "qr";
     const isPairing = method === "pairing";
     el("pairingPhoneWrap")?.classList.toggle("hidden", !isPairing);
-    // QR image vs pairing code overlay
     el("pairingBox")?.classList.toggle("hidden", !isPairing);
     el("qrImg")?.classList.toggle("hidden", isPairing);
   }
@@ -466,14 +866,12 @@ async function init() {
     const method = el("connectMethod")?.value || "qr";
     const phoneNumber = (el("pairingPhone")?.value || "").trim();
 
-    // reset UI placeholders
     el("qrImg").src = "";
     el("pairingCode").textContent = "-";
 
     try {
       await window.api.waHandshake({ method, phoneNumber });
-      toast("Handshake", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR..."
-      );
+      toast("Handshake", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR...");
     } catch (e) {
       toast("Handshake failed", String(e?.message || e));
     }
@@ -504,17 +902,20 @@ async function init() {
     el("newProfileName").value = "";
     renderProfileSelect();
     renderProfileList();
-    toast("Profile created", "Select it and click Connect");
+    toast("Profile created", "Select it and connect");
   });
 
   el("btnNewTpl").addEventListener("click", () => {
     const id = uuid();
-    const t = { id, name: "New template", body: "Hi {name}," };
-    templates.push(t);
+    const t = { id, name: "New template", body: "Hi {name},", variables: ["name"], sendPolicy: "once" };
+    templates.push(normalizeTemplate(t, templates.length));
     currentTemplateId = id;
     renderTemplateList();
     loadTemplateToEditor();
     refreshTemplateSelect();
+    renderRecipientsTable();
+    refreshSendPolicyText();
+    refreshSendPreview();
     toast("Template created", "A new template has been added");
   });
 
@@ -524,12 +925,17 @@ async function init() {
 
     t.name = el("tplName").value.trim() || "Untitled";
     t.body = el("tplBody").value || "";
+    t.sendPolicy = el("tplSendPolicy").value === "multiple" ? "multiple" : "once";
+    syncTemplateVarsFromBody(t);
 
+    templates = normalizeTemplates(templates);
     await window.api.saveTemplates(templates);
 
     renderTemplateList();
     refreshTemplateSelect();
-    refreshTemplatePreview();
+    loadTemplateToEditor();
+    renderRecipientsTable();
+    refreshSendPolicyText();
     refreshSendPreview();
 
     toast("Saved", "Templates saved successfully");
@@ -546,6 +952,8 @@ async function init() {
     refreshTemplateSelect();
     renderTemplateList();
     loadTemplateToEditor();
+    renderRecipientsTable();
+    refreshSendPolicyText();
     refreshSendPreview();
 
     toast("Deleted", "Template deleted");
@@ -570,7 +978,41 @@ async function init() {
   });
 
   el("tplBody").addEventListener("input", () => {
+    const t = getSelectedTemplate();
+    if (!t) return;
+    t.body = el("tplBody").value || "";
+    syncTemplateVarsFromBody(t);
+    renderTemplateVariableList();
     refreshTemplatePreview();
+    renderRecipientsTable();
+    renderCsvVariableMapping();
+    refreshSendPreview();
+  });
+
+  el("tplSendPolicy").addEventListener("change", () => {
+    const t = getSelectedTemplate();
+    if (!t) return;
+    t.sendPolicy = el("tplSendPolicy").value === "multiple" ? "multiple" : "once";
+    refreshSendPolicyText();
+  });
+
+  el("btnAddTplVar").addEventListener("click", () => {
+    const t = getSelectedTemplate();
+    if (!t) return;
+
+    const raw = String(el("tplVarName").value || "").trim();
+    if (!isValidTemplateVarName(raw)) {
+      toast("Invalid variable", "Use letters/numbers/underscore, and start with a letter");
+      return;
+    }
+
+    const vars = getTemplateVariables(t);
+    if (!vars.includes(raw)) vars.push(raw);
+    t.variables = vars;
+    el("tplVarName").value = "";
+    renderTemplateVariableList();
+    renderRecipientsTable();
+    renderCsvVariableMapping();
     refreshSendPreview();
   });
 
@@ -578,16 +1020,54 @@ async function init() {
     currentTemplateId = el("tplSelect").value;
     renderTemplateList();
     loadTemplateToEditor();
+    renderRecipientsTable();
+    refreshSendPolicyText();
+    renderCsvVariableMapping();
     refreshSendPreview();
   });
 
-  el("phones").addEventListener("input", () => {
+  el("btnAddRecipientRow").addEventListener("click", () => {
+    recipientsData.push(makeRecipientRow());
+    renderRecipientsTable();
     refreshRecipientCount();
     refreshSendPreview();
   });
 
-  el("varsJson").addEventListener("input", () => {
-    refreshSendPreview();
+  el("btnImportWaContacts").addEventListener("click", async () => {
+    try {
+      const res = await window.api.waGetContacts();
+      if (!res?.ok) {
+        toast("Contacts", res?.error || "Unable to load WhatsApp contacts");
+        return;
+      }
+
+      const added = mergeWaContactsIntoRecipients(res.contacts || []);
+      renderRecipientsTable();
+      refreshRecipientCount();
+      refreshSendPreview();
+
+      if ((res.count || 0) === 0) {
+        toast("Contacts", "No WhatsApp contacts cached yet. Open chats or reconnect to sync more contacts.");
+        return;
+      }
+
+      toast("Contacts loaded", `Added ${added} of ${res.count} contacts from WhatsApp`);
+    } catch (e) {
+      toast("Contacts", String(e?.message || e));
+    }
+  });
+
+  el("btnDownloadCsvTemplate").addEventListener("click", () => {
+    downloadCsvTemplate();
+  });
+
+  ["aiEnable", "aiEndpoint", "aiAuthToken", "aiPrompt", "aiTimeoutMs", "aiFallback"].forEach((id) => {
+    const node = el(id);
+    if (!node) return;
+    const evName = node.tagName === "INPUT" && node.type === "checkbox" ? "change" : "input";
+    node.addEventListener(evName, () => {
+      scheduleSaveAiRewriteConfig();
+    });
   });
 
   el("pacingPattern").addEventListener("change", () => refreshSendPreview());
@@ -600,7 +1080,6 @@ async function init() {
     toast("Cleared", "Activity table cleared");
   });
 
-  // CSV modal controls
   el("btnImportCsv").addEventListener("click", () => openCsvModal());
   el("btnCloseCsvModal").addEventListener("click", () => closeCsvModal());
   el("csvModalBackdrop").addEventListener("click", () => closeCsvModal());
@@ -618,18 +1097,12 @@ async function init() {
         return;
       }
 
-      // Fill recipients (normalized from backend)
-      const recipients = res.recipients || [];
-      el("phones").value = recipients.join("\n");
-
-      // Merge vars
-      const varsNew = res.varsByPhone || {};
-      el("varsJson").value = mergeVarsJson(el("varsJson").value || "", varsNew);
-
+      mergeImportedRecipients(res.recipients || [], res.varsByPhone || {});
+      renderRecipientsTable();
       refreshRecipientCount();
       refreshSendPreview();
       closeCsvModal();
-      toast("Imported", `Loaded ${recipients.length} recipients`);
+      toast("Imported", `Loaded ${res.recipients?.length || 0} recipients`);
     } catch (e) {
       toast("CSV import failed", String(e?.message || e));
     }
@@ -649,40 +1122,42 @@ async function init() {
       return;
     }
 
-    const recipients = parsePhonesNormalized();
-    if (recipients.length === 0) {
-      toast("No recipients", "Please enter at least one phone number");
-      return;
-    }
-
-    let varsByPhone = {};
-    try {
-      varsByPhone = parseVarsJson();
-    } catch (e) {
-      toast("Invalid JSON", e.message);
+    const payloadData = getSendPayload();
+    if (payloadData.recipients.length === 0) {
+      toast("No recipients", "Please add at least one valid phone number");
       return;
     }
 
     const pacing = readPacing();
-    const skipAlreadySent = el("skipSent").checked;
+    const skipAlreadySent = t.sendPolicy !== "multiple";
+    const aiRewrite = readAiRewriteConfigFromUi();
+    if (aiRewrite.enabled && !aiRewrite.endpoint) {
+      toast("AI rewrite", "Please set backend endpoint URL or disable AI rewrite");
+      return;
+    }
+    if (aiRewrite.enabled && !aiRewrite.prompt) {
+      toast("AI rewrite", "Please set rewrite prompt or disable AI rewrite");
+      return;
+    }
 
-    setProgress(0, recipients.length);
-    toast("Batch started", `Processing ${recipients.length} recipients`);
+    setProgress(0, payloadData.recipients.length);
+    toast("Batch started", `Processing ${payloadData.recipients.length} recipients`);
     switchView("activity");
 
     try {
       const res = await window.api.waSendBatch({
         templateId: t.id,
         templateBody: t.body,
-        recipients,
-        varsByPhone,
+        recipients: payloadData.recipients,
+        varsByPhone: payloadData.varsByPhone,
+        aiRewrite,
         pacing,
         safety: { maxRecipients: 200 },
         skipAlreadySent
       });
 
       toast("Batch finished", `Sent: ${res.sent}, Skipped: ${res.skipped}, Failed: ${res.failed}`);
-      setProgress(recipients.length, recipients.length);
+      setProgress(payloadData.recipients.length, payloadData.recipients.length);
     } catch (e) {
       toast("Batch error", String(e?.message || e));
     }
@@ -726,11 +1201,18 @@ async function init() {
     }
   });
 
-  setConnectionBadge(false, "Not connected");
+  setConnectionBadge(false, "Connecting...");
   switchView("connect");
   refreshRecipientCount();
   refreshTemplatePreview();
+  refreshSendPolicyText();
   refreshSendPreview();
+
+  try {
+    await window.api.waAutoReconnect();
+  } catch (e) {
+    // ignore startup reconnect errors; user can handshake manually
+  }
 }
 
 init().catch((e) => {

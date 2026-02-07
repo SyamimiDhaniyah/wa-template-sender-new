@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("api", {
   getTemplates: () => ipcRenderer.invoke("app:getTemplates"),
   saveTemplates: (templates) => ipcRenderer.invoke("app:saveTemplates", templates),
+  getAiRewriteConfig: () => ipcRenderer.invoke("app:getAiRewriteConfig"),
+  saveAiRewriteConfig: (config) => ipcRenderer.invoke("app:saveAiRewriteConfig", config),
 
   getProfiles: () => ipcRenderer.invoke("app:getProfiles"),
   createProfile: (name) => ipcRenderer.invoke("app:createProfile", name),
@@ -11,6 +13,8 @@ contextBridge.exposeInMainWorld("api", {
 
   // Start a WhatsApp handshake (QR or pairing code)
   waHandshake: (payload) => ipcRenderer.invoke("wa:handshake", payload),
+  waAutoReconnect: () => ipcRenderer.invoke("wa:autoReconnect"),
+  waGetContacts: () => ipcRenderer.invoke("wa:getContacts"),
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
 
   clearSentForTemplate: (templateId) => ipcRenderer.invoke("wa:clearSentForTemplate", templateId),

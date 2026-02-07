@@ -172,6 +172,21 @@
                   <label class="label">Message body</label>
                   <textarea id="tplBody" class="textarea" rows="10" placeholder="Hi {name}, ..."></textarea>
 
+                  <label class="label">Send policy</label>
+                  <select id="tplSendPolicy" class="input">
+                    <option value="once">Once per recipient (skip if already sent)</option>
+                    <option value="multiple">Allow multiple sends</option>
+                  </select>
+
+                  <div class="chips">
+                    <div class="chipTitle">Template variables</div>
+                    <div class="row" style="margin-top: 0;">
+                      <input id="tplVarName" class="input" placeholder="Example: name, branch, date" />
+                      <button class="btnGhost" id="btnAddTplVar">Add Variable</button>
+                    </div>
+                    <div class="chipRow" id="tplVarList" style="margin-top: 8px;"></div>
+                  </div>
+
                   <div class="chips">
                     <div class="chipTitle">Common placeholders</div>
                     <div class="chipRow">
@@ -203,12 +218,22 @@
                 <div class="cardHeader">
                   <div>
                     <div class="cardTitle">Recipients</div>
-                    <div class="cardSub">One phone number per line</div>
+                    <div class="cardSub">Add recipients and per-recipient variable values</div>
                   </div>
-                  <button class="btnGhost" id="btnImportCsv">Import CSV</button>
+                  <div class="rowRight">
+                    <button class="btnGhost" id="btnAddRecipientRow">Add row</button>
+                    <button class="btnGhost" id="btnImportWaContacts">WA Contacts</button>
+                    <button class="btnGhost" id="btnDownloadCsvTemplate">CSV template</button>
+                    <button class="btnGhost" id="btnImportCsv">Import CSV</button>
+                  </div>
                 </div>
 
-                <textarea id="phones" class="textarea" rows="11" placeholder="60123456789\n0123456789"></textarea>
+                <div class="tableWrap recipientTableWrap">
+                  <table class="table recipientTable">
+                    <thead id="recipientHead"></thead>
+                    <tbody id="recipientBody"></tbody>
+                  </table>
+                </div>
 
                 <div class="splitRow">
                   <div class="mini">
@@ -216,16 +241,9 @@
                     <div class="miniValue" id="totalRecipients">0</div>
                   </div>
                   <div class="mini">
-                    <div class="miniLabel">Max safety</div>
-                    <div class="miniValue">200</div>
+                    <div class="miniLabel">Template policy</div>
+                    <div class="miniValue" id="sendPolicyText">-</div>
                   </div>
-                </div>
-
-                <div class="checkRow">
-                  <label class="check">
-                    <input type="checkbox" id="skipSent" checked />
-                    <span>Skip already sent (same template)</span>
-                  </label>
                 </div>
               </div>
 
@@ -261,13 +279,43 @@
                   </div>
                 </div>
 
-                <label class="label">Variables per recipient (optional JSON)</label>
-                <textarea
-                  id="varsJson"
-                  class="textarea"
-                  rows="7"
-                  placeholder='{ "60123456789": { "name": "Ali", "topic": "quotation" }, "0123456789": { "name": "Siti", "date": "10 Feb", "time": "3pm" } }'
-                ></textarea>
+                <div class="previewBox">
+                  <div class="previewTitle">AI Rewrite (Optional)</div>
+                  <div class="checkRow" style="margin-top: 0;">
+                    <label class="check">
+                      <input type="checkbox" id="aiEnable" />
+                      <span>Rewrite each message via backend AI before sending</span>
+                    </label>
+                  </div>
+
+                  <label class="label">Backend endpoint URL</label>
+                  <input id="aiEndpoint" class="input" placeholder="https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM" />
+
+                  <label class="label">Auth token (optional)</label>
+                  <input id="aiAuthToken" class="input" type="password" placeholder="Bearer token or raw token" />
+
+                  <label class="label">Rewrite prompt</label>
+                  <textarea
+                    id="aiPrompt"
+                    class="textarea"
+                    rows="4"
+                    placeholder="Prompt text sent to backend as input field: prompt. Use {message} for the original message. You can also use {name}, {date}, {branch}, {phone}."
+                  ></textarea>
+
+                  <div class="row3" style="margin-top: 0;">
+                    <div>
+                      <label class="label">Timeout (ms)</label>
+                      <input id="aiTimeoutMs" type="number" class="input" value="30000" />
+                    </div>
+                    <div style="grid-column: span 2;">
+                      <label class="label">On AI error</label>
+                      <label class="check" style="margin-top: 8px;">
+                        <input type="checkbox" id="aiFallback" checked />
+                        <span>Fallback to original template message</span>
+                      </label>
+                    </div>
+                  </div>
+                </div>
 
                 <div class="previewBox">
                   <div class="previewTitle">First recipient preview</div>
@@ -344,32 +392,7 @@
             <label class="label">Phone column index (0-based)</label>
             <input class="input" id="csvPhoneCol" type="number" value="0" />
 
-            <div class="gridCols">
-              <div>
-                <label class="label">Name col index</label>
-                <input class="input" id="csvNameCol" type="number" placeholder="Optional" />
-              </div>
-              <div>
-                <label class="label">Topic col index</label>
-                <input class="input" id="csvTopicCol" type="number" placeholder="Optional" />
-              </div>
-              <div>
-                <label class="label">Date col index</label>
-                <input class="input" id="csvDateCol" type="number" placeholder="Optional" />
-              </div>
-              <div>
-                <label class="label">Time col index</label>
-                <input class="input" id="csvTimeCol" type="number" placeholder="Optional" />
-              </div>
-              <div>
-                <label class="label">Branch col index</label>
-                <input class="input" id="csvBranchCol" type="number" placeholder="Optional" />
-              </div>
-              <div>
-                <label class="label">Doctor col index</label>
-                <input class="input" id="csvDoctorCol" type="number" placeholder="Optional" />
-              </div>
-            </div>
+            <div id="csvVarCols" class="gridCols"></div>
 
             <div class="row">
               <button class="btnPrimary" id="btnPickCsvAndImport">Pick CSV and Import</button>

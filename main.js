@@ -4,16 +4,22 @@ const fs = require("fs");
 const qrcode = require("qrcode");
 const Store = require("electron-store");
 const pino = require("pino");
+
 // Baileys is ESM-only in newer versions; load it via dynamic import from CommonJS
 let _baileys = null;
 async function getBaileys() {
   if (_baileys) return _baileys;
   const mod = await import("@whiskeysockets/baileys");
+  const makeWASocket = mod.makeWASocket || mod.default;
+  if (typeof makeWASocket !== "function") {
+    throw new Error("Baileys makeWASocket export not found");
+  }
   _baileys = {
-    makeWASocket: mod.default,
+    makeWASocket,
     useMultiFileAuthState: mod.useMultiFileAuthState,
     DisconnectReason: mod.DisconnectReason,
-    Browsers: mod.Browsers
+    Browsers: mod.Browsers,
+    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion
   };
   return _baileys;
 }
@@ -23,6 +29,10 @@ const log = pino({ level: "info" });
 let win = null;
 let sock = null;
 let isConnecting = false;
+let isConnected = false;
+
+// Used to ignore late events from old sockets
+let handshakeAttemptId = 0;
 
 const store = new Store();
 
@@ -36,6 +46,48 @@ function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
 }
 
+function isValidTemplateVarName(name) {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name || ""));
+}
+
+function extractTemplateVars(body) {
+  const set = new Set();
+  const re = /\{(\w+)\}/g;
+  const text = String(body || "");
+  let m;
+  while ((m = re.exec(text))) {
+    if (isValidTemplateVarName(m[1])) set.add(m[1]);
+  }
+  return Array.from(set);
+}
+
+function normalizeTemplateRecord(raw, idx) {
+  const t = raw && typeof raw === "object" ? raw : {};
+  const body = String(t.body || "");
+
+  const vars = new Set();
+  for (const v of Array.isArray(t.variables) ? t.variables : []) {
+    if (isValidTemplateVarName(v)) vars.add(String(v));
+  }
+  for (const v of extractTemplateVars(body)) vars.add(v);
+
+  const sendPolicy = t.sendPolicy === "multiple" ? "multiple" : "once";
+  const fallbackId = "t_" + String(idx + 1);
+
+  return {
+    id: String(t.id || fallbackId),
+    name: String(t.name || "Untitled"),
+    body,
+    variables: Array.from(vars),
+    sendPolicy
+  };
+}
+
+function normalizeTemplatesList(input) {
+  const list = Array.isArray(input) ? input : [];
+  return list.map((t, idx) => normalizeTemplateRecord(t, idx));
+}
+
 function ensureDataFiles() {
   ensureDir(dataDir);
   if (!fs.existsSync(templatesFile)) {
@@ -46,12 +98,16 @@ function ensureDataFiles() {
           {
             id: "t1",
             name: "Follow up quotation",
-            body: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?"
+            body: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?",
+            variables: ["name", "topic"],
+            sendPolicy: "once"
           },
           {
             id: "t2",
             name: "Appointment reminder",
-            body: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya."
+            body: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya.",
+            variables: ["name", "date", "time"],
+            sendPolicy: "once"
           }
         ],
         null,
@@ -64,12 +120,15 @@ function ensureDataFiles() {
 
 function readTemplates() {
   ensureDataFiles();
-  return JSON.parse(fs.readFileSync(templatesFile, "utf-8"));
+  const raw = JSON.parse(fs.readFileSync(templatesFile, "utf-8"));
+  const normalized = normalizeTemplatesList(raw);
+  return normalized;
 }
 
 function saveTemplates(templates) {
   ensureDataFiles();
-  fs.writeFileSync(templatesFile, JSON.stringify(templates, null, 2), "utf-8");
+  const normalized = normalizeTemplatesList(templates);
+  fs.writeFileSync(templatesFile, JSON.stringify(normalized, null, 2), "utf-8");
 }
 
 function nowIsoShort() {
@@ -78,6 +137,18 @@ function nowIsoShort() {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(
     d.getMinutes()
   )}:${pad(d.getSeconds())}`;
+}
+
+function normalizeJidForContact(jid) {
+  return String(jid || "").split(":")[0].trim();
+}
+
+function msisdnFromUserJid(jid) {
+  const j = normalizeJidForContact(jid);
+  if (!j.endsWith("@s.whatsapp.net")) return "";
+  const raw = j.slice(0, j.indexOf("@"));
+  if (!/^\d{6,}$/.test(raw)) return "";
+  return raw;
 }
 
 function normalizeMsisdn(input) {
@@ -211,6 +282,266 @@ function clearSentForTemplate(templateId) {
   return true;
 }
 
+/* --------------------------- WhatsApp Contacts Cache (per profile) ---------------------------- */
+function getContactsStoreObj() {
+  const v = store.get("waContactsByProfile");
+  if (v && typeof v === "object") return v;
+  store.set("waContactsByProfile", {});
+  return {};
+}
+
+function sanitizeContactName(v) {
+  return String(v || "").trim();
+}
+
+function upsertContactsForProfile(profileId, contacts) {
+  if (!profileId || !Array.isArray(contacts) || contacts.length === 0) return 0;
+
+  const root = getContactsStoreObj();
+  const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
+  let changed = 0;
+
+  for (const c of contacts) {
+    const jid = normalizeJidForContact(c?.jid || c?.id || "");
+    const msisdn = msisdnFromUserJid(jid);
+    if (!msisdn) continue;
+
+    const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
+    const nameCandidate =
+      sanitizeContactName(c?.name) ||
+      sanitizeContactName(c?.notify) ||
+      sanitizeContactName(c?.verifiedName) ||
+      sanitizeContactName(existing?.name);
+
+    const next = {
+      msisdn,
+      jid: jid || existing?.jid || `${msisdn}@s.whatsapp.net`,
+      name: nameCandidate,
+      updatedAt: nowIsoShort()
+    };
+
+    const prev = byPhone[msisdn];
+    const same =
+      prev &&
+      prev.msisdn === next.msisdn &&
+      prev.jid === next.jid &&
+      String(prev.name || "") === String(next.name || "");
+
+    if (!same) {
+      byPhone[msisdn] = next;
+      changed++;
+    }
+  }
+
+  if (changed > 0) {
+    root[profileId] = byPhone;
+    store.set("waContactsByProfile", root);
+  }
+
+  return changed;
+}
+
+function upsertChatsAsContactsForProfile(profileId, chats) {
+  if (!profileId || !Array.isArray(chats) || chats.length === 0) return 0;
+
+  const contacts = [];
+  for (const chat of chats) {
+    const jid = normalizeJidForContact(chat?.id || chat?.jid || "");
+    const msisdn = msisdnFromUserJid(jid);
+    if (!msisdn) continue;
+
+    const name =
+      sanitizeContactName(chat?.name) ||
+      sanitizeContactName(chat?.notify) ||
+      sanitizeContactName(chat?.pushName) ||
+      "";
+    contacts.push({ id: jid, jid, name, notify: name });
+  }
+
+  return upsertContactsForProfile(profileId, contacts);
+}
+
+function getContactsForProfile(profileId) {
+  const root = getContactsStoreObj();
+  const byPhone = root[profileId] && typeof root[profileId] === "object" ? root[profileId] : {};
+  const rows = Object.values(byPhone).filter((x) => x && typeof x === "object");
+
+  rows.sort((a, b) => {
+    const an = String(a?.name || "").toLowerCase();
+    const bn = String(b?.name || "").toLowerCase();
+    if (an && bn) return an.localeCompare(bn);
+    if (an) return -1;
+    if (bn) return 1;
+    return String(a?.msisdn || "").localeCompare(String(b?.msisdn || ""));
+  });
+
+  return rows;
+}
+
+/* --------------------------- AI Rewrite (via external backend) ---------------------------- */
+const DEFAULT_AI_REWRITE_CONFIG = {
+  enabled: false,
+  endpoint: "https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM",
+  authToken: "",
+  prompt: "{message}",
+  timeoutMs: 30000,
+  fallbackToOriginal: true
+};
+
+function normalizeAiRewriteConfig(input) {
+  const cfg = input && typeof input === "object" ? input : {};
+  const timeoutRaw = Number(cfg.timeoutMs);
+  const timeoutMs = Number.isFinite(timeoutRaw) ? Math.min(120000, Math.max(3000, Math.round(timeoutRaw))) : 30000;
+  const endpoint = String(cfg.endpoint || "").trim() || DEFAULT_AI_REWRITE_CONFIG.endpoint;
+
+  return {
+    enabled: !!cfg.enabled,
+    endpoint,
+    authToken: String(cfg.authToken || "").trim(),
+    prompt: String(cfg.prompt || DEFAULT_AI_REWRITE_CONFIG.prompt).trim(),
+    timeoutMs,
+    fallbackToOriginal: cfg.fallbackToOriginal !== false
+  };
+}
+
+function getAiRewriteConfig() {
+  const raw = store.get("aiRewriteConfig");
+  const cfg = normalizeAiRewriteConfig({ ...DEFAULT_AI_REWRITE_CONFIG, ...(raw || {}) });
+  return cfg;
+}
+
+function setAiRewriteConfig(input) {
+  const cfg = normalizeAiRewriteConfig({ ...getAiRewriteConfig(), ...(input || {}) });
+  store.set("aiRewriteConfig", cfg);
+  return cfg;
+}
+
+function extractTextFromAnyContent(content) {
+  if (typeof content === "string") return content.trim();
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const item of content) {
+      if (typeof item === "string") {
+        if (item.trim()) parts.push(item.trim());
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const txt = String(item.text || item.content || "").trim();
+        if (txt) parts.push(txt);
+      }
+    }
+    return parts.join("\n").trim();
+  }
+  return "";
+}
+
+function extractAssistantTextFromApiResponse(data) {
+  if (!data) return "";
+
+  if (typeof data === "string") return data.trim();
+
+  // Xano custom shape
+  const xanoReply = String(data?.reply || data?.data?.reply || "").trim();
+  if (xanoReply) return xanoReply;
+
+  // Chat Completions style (OpenAI/DeepSeek compatible)
+  const chatContent = data?.choices?.[0]?.message?.content;
+  const fromChatContent = extractTextFromAnyContent(chatContent);
+  if (fromChatContent) return fromChatContent;
+
+  const chatText = String(data?.choices?.[0]?.text || "").trim();
+  if (chatText) return chatText;
+
+  // Responses API / custom wrappers
+  const outputText = String(data?.output_text || data?.response?.output_text || "").trim();
+  if (outputText) return outputText;
+
+  const nested = data?.output?.[0]?.content?.[0]?.text;
+  const nestedText = String(nested || "").trim();
+  if (nestedText) return nestedText;
+
+  return "";
+}
+
+async function rewriteMessageViaBackend({
+  endpoint,
+  authToken,
+  prompt,
+  message,
+  variables,
+  msisdn,
+  templateId,
+  timeoutMs
+}) {
+  if (!endpoint) throw new Error("AI rewrite endpoint is not set");
+  const finalPrompt = renderTemplate(String(prompt || "{message}"), {
+    ...(variables && typeof variables === "object" ? variables : {}),
+    message: String(message || ""),
+    msisdn: String(msisdn || ""),
+    phone: String(msisdn || ""),
+    templateId: String(templateId || "")
+  }).trim();
+  if (!finalPrompt) throw new Error("AI rewrite prompt is empty");
+
+  const controller = new AbortController();
+  const timeoutValue = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 30000;
+  const timeout = setTimeout(() => controller.abort(), timeoutValue);
+  try {
+    const headers = { "Content-Type": "application/json" };
+    if (authToken) {
+      headers.Authorization = authToken.startsWith("Bearer ") ? authToken : `Bearer ${authToken}`;
+    }
+
+    // Xano contract: one input field named "prompt"
+    const payload = { prompt: finalPrompt };
+
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+
+    const raw = await res.text();
+    let data = null;
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+      throw new Error(`AI backend returned non-JSON response (${res.status})`);
+    }
+
+    if (!res.ok) {
+      const msg =
+        extractAssistantTextFromApiResponse(data) ||
+        String(data?.error || "").trim() ||
+        String(data?.error?.message || data?.message || data?.error || "").trim() ||
+        `HTTP ${res.status}`;
+      throw new Error(`AI backend error: ${msg}`);
+    }
+
+    if (String(data?.status || "").toLowerCase() === "error") {
+      const msg =
+        String(data?.message || data?.error || "").trim() ||
+        "Xano returned error status";
+      throw new Error(`AI backend error: ${msg}`);
+    }
+
+    const rewritten = extractAssistantTextFromApiResponse(data);
+    if (!rewritten) {
+      throw new Error("AI backend response missing rewritten message text");
+    }
+
+    return rewritten;
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      throw new Error("AI rewrite timeout");
+    }
+    throw e;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 /* --------------------------- CSV Import Basic CSV parser that supports commas and quotes. ---------------------------- */
 function parseCsvText(text) {
   const rows = [];
@@ -325,7 +656,54 @@ function normalizeE164NoPlus(input) {
   return s;
 }
 
-async function connectWA(method) {
+async function stopSocket() {
+  const s = sock;
+  sock = null;
+  if (!s) return;
+
+  try {
+    try {
+      s.ev?.removeAllListeners?.();
+    } catch (e) {
+      // ignore
+    }
+    try {
+      s.ws?.close?.();
+    } catch (e) {
+      // ignore
+    }
+    try {
+      s.end?.();
+    } catch (e) {
+      // ignore
+    }
+  } finally {
+    isConnected = false;
+  }
+}
+
+function clearAuthDir(authDir) {
+  try {
+    fs.rmSync(authDir, { recursive: true, force: true });
+  } catch (e) {
+    // ignore
+  }
+  ensureDir(authDir);
+}
+
+function hasRegisteredSession(profileId) {
+  try {
+    const authDir = getProfileAuthDir(profileId);
+    const credsPath = path.join(authDir, "creds.json");
+    if (!fs.existsSync(credsPath)) return false;
+    const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8"));
+    return !!creds?.registered;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function connectWA(method, attemptId) {
   if (isConnecting) return;
   isConnecting = true;
 
@@ -334,21 +712,75 @@ async function connectWA(method) {
     const authDir = getProfileAuthDir(activeProfileId);
     ensureDir(authDir);
 
-    const { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = await getBaileys();
-
+    const {
+      makeWASocket,
+      useMultiFileAuthState,
+      DisconnectReason,
+      Browsers,
+      fetchLatestBaileysVersion
+    } = await getBaileys();
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
 
-    // Pairing-code login is more strict about browser config
+    // Always use a realistic browser signature (helps both QR and pairing)
     const browser =
-      method === "pairing" && Browsers && typeof Browsers.windows === "function"
+      Browsers && typeof Browsers.windows === "function"
         ? Browsers.windows("Google Chrome")
-        : ["WA Template Sender", "Chrome", "1.0.0"];
+        : ["Windows", "Chrome", "124.0.0.0"];
 
-    sock = makeWASocket({ auth: state, printQRInTerminal: false, logger: log, browser });
+    // UI: show something immediately
+    win?.webContents.send("wa:status", {
+      connected: false,
+      text: "Connecting...",
+      profileId: activeProfileId
+    });
+
+    // Ensure only one live socket
+    await stopSocket();
+
+    let waVersion;
+    try {
+      const latest = await fetchLatestBaileysVersion();
+      if (Array.isArray(latest?.version) && latest.version.length === 3) {
+        waVersion = latest.version;
+      }
+    } catch (e) {
+      log.warn({ err: e }, "Unable to fetch latest WA Web version, continuing with Baileys default");
+    }
+
+    sock = makeWASocket({
+      auth: state,
+      printQRInTerminal: false,
+      logger: log,
+      browser,
+      syncFullHistory: true,
+      ...(waVersion ? { version: waVersion } : {})
+    });
 
     sock.ev.on("creds.update", saveCreds);
+    sock.ev.on("messaging-history.set", (history) => {
+      upsertContactsForProfile(activeProfileId, history?.contacts || []);
+      upsertChatsAsContactsForProfile(activeProfileId, history?.chats || []);
+    });
+    sock.ev.on("contacts.upsert", (contacts) => {
+      upsertContactsForProfile(activeProfileId, contacts || []);
+    });
+    sock.ev.on("contacts.update", (contacts) => {
+      upsertContactsForProfile(activeProfileId, contacts || []);
+    });
+    sock.ev.on("chats.upsert", (chats) => {
+      upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+    });
+    sock.ev.on("chats.update", (chats) => {
+      upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+    });
+
+    // Limit auto recovery loops per handshake attempt
+    let autoRecoverCount = 0;
 
     sock.ev.on("connection.update", async (update) => {
+      // Ignore late events from old attempts
+      if (attemptId !== handshakeAttemptId) return;
+
       const { connection, lastDisconnect, qr } = update;
 
       // QR flow
@@ -364,9 +796,19 @@ async function connectWA(method) {
 
       // Pairing code flow
       if (handshakeState.method === "pairing" && !handshakeState.pairingRequested) {
-        if (connection === "connecting" || !!qr) {
+        const alreadyRegistered = !!sock?.authState?.creds?.registered;
+        if (alreadyRegistered) {
           handshakeState.pairingRequested = true;
+          win?.webContents.send("wa:status", {
+            connected: false,
+            text: "Already registered on this profile. Reset session if you want to pair again.",
+            profileId: activeProfileId
+          });
+        } else if (connection === "connecting" || !!qr) {
+          handshakeState.pairingRequested = true;
+
           try {
+            if (!handshakeState.phoneNumber) throw new Error("Missing phone number for pairing mode");
             const code = await sock.requestPairingCode(handshakeState.phoneNumber);
             win?.webContents.send("wa:pairingCode", code);
             win?.webContents.send("wa:status", {
@@ -386,23 +828,79 @@ async function connectWA(method) {
       }
 
       if (connection === "open") {
-        win?.webContents.send("wa:status", { connected: true, text: "Connected", profileId: activeProfileId });
+        isConnected = true;
+        win?.webContents.send("wa:status", {
+          connected: true,
+          text: "Connected",
+          profileId: activeProfileId
+        });
       }
 
       if (connection === "close") {
+        isConnected = false;
         const code = lastDisconnect?.error?.output?.statusCode;
-        const reason = code || "unknown";
+        const reason = DisconnectReason?.[code] || code || "unknown";
+
         win?.webContents.send("wa:status", {
           connected: false,
           text: `Disconnected (${reason})`,
           profileId: activeProfileId
         });
 
-        // Do NOT auto-retry handshakes. User must click Handshake again.
-        // This prevents infinite loops when WhatsApp rejects the session.
-        const shouldReconnect = false;
-        if (shouldReconnect) {
-          setTimeout(() => connectWA(handshakeState.method).catch(() => {}), 1500);
+        // IMPORTANT: WhatsApp often forces a disconnect after scan/pair to restart the socket.
+        // We must reconnect for restartRequired (515).
+        if (code === DisconnectReason.restartRequired) {
+          if (autoRecoverCount < 3) {
+            autoRecoverCount++;
+            await stopSocket();
+            setTimeout(() => {
+              connectWA(handshakeState.method, attemptId).catch(() => {});
+            }, 700);
+          }
+          return;
+        }
+
+        // Recover from transient transport/server issues.
+        const shouldRetry =
+          code === DisconnectReason.connectionClosed ||
+          code === DisconnectReason.connectionLost ||
+          code === DisconnectReason.timedOut ||
+          code === DisconnectReason.unavailableService ||
+          code === 405;
+        if (shouldRetry) {
+          if (autoRecoverCount < 3) {
+            autoRecoverCount++;
+            await stopSocket();
+            setTimeout(() => {
+              connectWA(handshakeState.method, attemptId).catch(() => {});
+            }, 1000);
+          }
+          return;
+        }
+
+        // If the session is invalid, clear auth and present fresh QR / pairing.
+        const needsFreshAuth =
+          code === DisconnectReason.loggedOut ||
+          code === DisconnectReason.badSession ||
+          code === DisconnectReason.multideviceMismatch ||
+          code === DisconnectReason.forbidden;
+
+        if (needsFreshAuth) {
+          if (autoRecoverCount < 2) {
+            autoRecoverCount++;
+            await stopSocket();
+            clearAuthDir(authDir);
+            handshakeState.pairingRequested = false;
+            setTimeout(() => {
+              connectWA(handshakeState.method, attemptId).catch(() => {});
+            }, 700);
+          } else {
+            win?.webContents.send("wa:status", {
+              connected: false,
+              text: "Session invalid. Please reset the profile session and handshake again.",
+              profileId: activeProfileId
+            });
+          }
         }
       }
     });
@@ -415,13 +913,32 @@ async function startHandshake(payload) {
   const method = payload?.method === "pairing" ? "pairing" : "qr";
   const phoneNumber = payload?.phoneNumber ? normalizeE164NoPlus(payload.phoneNumber) : "";
 
+  handshakeAttemptId++;
   handshakeState = { method, phoneNumber, pairingRequested: false };
 
-  // drop existing socket (forces new handshake)
-  sock = null;
+  // Close any existing socket cleanly
+  await stopSocket();
 
-  await connectWA(method);
+  await connectWA(method, handshakeAttemptId);
   return { ok: true, method };
+}
+
+async function autoReconnectActiveProfile() {
+  const activeProfileId = getActiveProfileId();
+  if (!hasRegisteredSession(activeProfileId)) {
+    win?.webContents.send("wa:status", {
+      connected: false,
+      text: "Not connected",
+      profileId: activeProfileId
+    });
+    return { ok: false, skipped: true };
+  }
+
+  handshakeAttemptId++;
+  handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
+  await stopSocket();
+  await connectWA("qr", handshakeAttemptId);
+  return { ok: true, started: true };
 }
 
 async function sendText(msisdn, text) {
@@ -436,6 +953,15 @@ ipcMain.handle("app:getTemplates", async () => readTemplates());
 ipcMain.handle("app:saveTemplates", async (_evt, templates) => {
   saveTemplates(Array.isArray(templates) ? templates : []);
   return { ok: true };
+});
+
+ipcMain.handle("app:getAiRewriteConfig", async () => {
+  return { ok: true, config: getAiRewriteConfig() };
+});
+
+ipcMain.handle("app:saveAiRewriteConfig", async (_evt, config) => {
+  const saved = setAiRewriteConfig(config);
+  return { ok: true, config: saved };
 });
 
 ipcMain.handle("app:getProfiles", async () => {
@@ -456,13 +982,28 @@ ipcMain.handle("app:deleteProfile", async (_evt, profileId) => {
 
 ipcMain.handle("app:setActiveProfile", async (_evt, profileId) => {
   setActiveProfileId(profileId);
-  // Disconnect current socket so user can reconnect with selected profile
-  sock = null;
+  await autoReconnectActiveProfile();
   return { ok: true, activeProfileId: getActiveProfileId() };
 });
 
 ipcMain.handle("wa:handshake", async (_evt, payload) => {
   return await startHandshake(payload);
+});
+
+ipcMain.handle("wa:autoReconnect", async () => {
+  return await autoReconnectActiveProfile();
+});
+
+ipcMain.handle("wa:getContacts", async () => {
+  const profileId = getActiveProfileId();
+  const contacts = getContactsForProfile(profileId);
+  return {
+    ok: true,
+    connected: !!isConnected,
+    profileId,
+    contacts,
+    count: contacts.length
+  };
 });
 
 ipcMain.handle("wa:clearSentForTemplate", async (_evt, templateId) => {
@@ -507,6 +1048,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     templateBody,
     recipients,
     varsByPhone,
+    aiRewrite,
     pacing = { pattern: "cycle", minSec: 7, maxSec: 10 },
     safety = { maxRecipients: 200 },
     skipAlreadySent = true
@@ -521,6 +1063,13 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const pattern = pacing.pattern || "cycle";
   const minSec = pacing.minSec ?? 7;
   const maxSec = pacing.maxSec ?? 10;
+  const aiCfg = normalizeAiRewriteConfig({ ...getAiRewriteConfig(), ...(aiRewrite || {}) });
+  if (aiCfg.enabled && !aiCfg.endpoint) {
+    throw new Error("AI rewrite is enabled but backend endpoint is empty");
+  }
+  if (aiCfg.enabled && !aiCfg.prompt) {
+    throw new Error("AI rewrite is enabled but prompt is empty");
+  }
 
   let sent = 0;
   let failed = 0;
@@ -565,7 +1114,40 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
     try {
       const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
-      const text = renderTemplate(templateBody, vars);
+      const baseText = renderTemplate(templateBody, vars);
+      let text = baseText;
+
+      if (aiCfg.enabled) {
+        const promptVars = { ...(vars || {}), msisdn, phone: msisdn, templateId };
+        const promptText = renderTemplate(aiCfg.prompt, promptVars);
+
+        try {
+          text = await rewriteMessageViaBackend({
+            endpoint: aiCfg.endpoint,
+            authToken: aiCfg.authToken,
+            prompt: promptText,
+            message: baseText,
+            variables: vars,
+            msisdn,
+            templateId,
+            timeoutMs: aiCfg.timeoutMs
+          });
+        } catch (aiErr) {
+          if (!aiCfg.fallbackToOriginal) {
+            throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
+          }
+
+          text = baseText;
+          win?.webContents.send("batch:progress", {
+            ts: nowIsoShort(),
+            index: i + 1,
+            total: recipients.length,
+            phone: msisdn,
+            status: "sending",
+            error: `AI fallback: ${String(aiErr?.message || aiErr)}`
+          });
+        }
+      }
 
       win?.webContents.send("batch:progress", {
         ts: nowIsoShort(),
