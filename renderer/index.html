@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html>
   <head>
     <meta charset="UTF-8" />
@@ -6,458 +6,508 @@
       http-equiv="Content-Security-Policy"
       content="default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self';"
     />
-    <title>WA Template Sender</title>
+    <title>Dentabay WhatsApp Console</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body>
-    <div class="app">
-      <aside class="sidebar">
-        <div class="brand">
-          <div class="logo">WA</div>
-          <div class="brandText">
-            <div class="brandTitle">Template Sender</div>
-            <div class="brandSub">Local desktop tool</div>
+    <div class="loginScreen" id="loginScreen">
+      <div class="loginCard">
+        <div class="loginBrand">
+          <div class="loginLogo">DB</div>
+          <div>
+            <div class="loginTitle">Dentabay WhatsApp Console</div>
+            <div class="loginSub">Staff login required</div>
           </div>
         </div>
 
-        <nav class="nav">
-          <button class="navItem active" data-view="connect"><span class="navDot"></span>Connect</button>
-          <button class="navItem" data-view="templates"><span class="navDot"></span>Templates</button>
-          <button class="navItem" data-view="send"><span class="navDot"></span>Send</button>
-          <button class="navItem" data-view="activity"><span class="navDot"></span>Activity</button>
+        <form id="loginForm" class="formStack" autocomplete="on">
+          <label class="fieldLabel" for="loginEmail">Email</label>
+          <input id="loginEmail" class="fieldInput" type="email" placeholder="staff@dentabay.com" required />
+
+          <label class="fieldLabel" for="loginPassword">Password</label>
+          <input id="loginPassword" class="fieldInput" type="password" placeholder="Enter password" required />
+
+          <button id="btnLogin" class="btnPrimary" type="submit">Log In</button>
+        </form>
+
+        <div class="loginFoot" id="loginStatus">Use your clinic account to continue.</div>
+      </div>
+    </div>
+
+    <div class="appShell hidden" id="appShell">
+      <aside class="sidebar">
+        <div class="brandBlock">
+          <div class="brandDot"></div>
+          <div>
+            <div class="brandMain">Dentabay WA</div>
+            <div class="brandSub">Simple staff mode</div>
+          </div>
+        </div>
+
+        <nav class="tabNav">
+          <button class="tabBtn active" data-tab="appointment">Appointment</button>
+          <button class="tabBtn" data-tab="marketing">Marketing</button>
+          <button class="tabBtn" data-tab="templates">Template</button>
+          <button class="tabBtn" data-tab="connect">Connect</button>
+          <button class="tabBtn" data-tab="settings">Setting</button>
         </nav>
 
-        <div class="sidebarFooter">
-          <div class="smallMuted">Tip</div>
-          <div class="smallText">
-            Use this for existing clients who opted in. Keep messages relevant and avoid large blasts.
-          </div>
+        <div class="sidebarNote">
+          Times are shown in
+          <strong>Asia/Kuala_Lumpur</strong>.
         </div>
       </aside>
 
-      <main class="main">
-        <header class="topbar">
-          <div class="topLeft">
-            <div class="pageTitle" id="pageTitle">Connect</div>
-            <div class="pageHint" id="pageHint">Connect WhatsApp via QR code and choose a profile</div>
+      <main class="mainArea">
+        <header class="topBar">
+          <div>
+            <div class="hello" id="helloText">Hello</div>
+            <div class="helloMeta" id="helloMeta">-</div>
           </div>
 
-          <div class="topRight">
-            <div class="profileBox">
-              <div class="profileLabel">Profile</div>
-              <select class="input compact" id="profileSelect"></select>
-            </div>
-
-            <div class="badge" id="connBadge">
-              <span class="badgeDot offline" id="connDot"></span>
+          <div class="topActions">
+            <div class="connPill">
+              <span class="dot offline" id="connDot"></span>
               <span id="connText">Not connected</span>
             </div>
-
-            <button class="btnPrimary" id="btnHandshakeTop">Handshake</button>
+            <button class="btnGhost" id="btnLogout">Log Out</button>
           </div>
         </header>
 
-        <section class="content">
-          <div class="view" id="view-connect">
-            <div class="grid2">
+        <section class="tabWrap">
+          <div class="tabPanel" id="tab-appointment">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Appointments</h2>
+                <p>Select patients and send reminders/follow-up/review in one place.</p>
+              </div>
+              <div class="inlineRow">
+                <label class="fieldLabel">Branch</label>
+                <select id="apptBranchSelect" class="fieldInput compact"></select>
+                <label class="fieldLabel">Date</label>
+                <input id="apptDateInput" class="fieldInput compact" type="date" />
+                <button class="btnGhost" id="btnLoadAppointments">Load</button>
+              </div>
+            </div>
+
+            <div class="appointmentLayout">
               <div class="card">
-                <div class="cardHeader">
+                <div class="cardHead">
                   <div>
-                    <div class="cardTitle">WhatsApp Connection</div>
-                    <div class="cardSub">Scan QR using WhatsApp on your phone</div>
+                    <h3>Appointment List</h3>
+                    <div class="smallText" id="apptSummary">0 records</div>
+                  </div>
+                  <div class="inlineRow">
+                    <button class="btnGhost" id="btnApptSelectAll">Select All</button>
+                    <button class="btnGhost" id="btnApptClearSelection">Clear</button>
+                  </div>
+                </div>
+
+                <div class="tableWrap tall">
+                  <table class="dataTable" id="apptTable">
+                    <thead>
+                      <tr>
+                        <th style="width: 44px;"></th>
+                        <th style="width: 110px;">Time</th>
+                        <th style="width: 220px;">Patient</th>
+                        <th style="width: 180px;">Dentist</th>
+                        <th>Treatment</th>
+                        <th style="width: 80px;">Came</th>
+                      </tr>
+                    </thead>
+                    <tbody id="apptTableBody"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Quick Actions</h3>
+                    <div class="smallText">Use Select Patients to auto-pick by rule.</div>
+                  </div>
+                </div>
+
+                <div class="actionGrid">
+                  <section class="actionCard">
+                    <h4>Remind Appointment</h4>
+                    <p>Selects appointments where start time has not passed yet.</p>
+                    <button class="btnGhost" id="btnSelectRemind">Select Patients</button>
+                    <label class="fieldLabel">Language</label>
+                    <select class="fieldInput compact" id="langRemind">
+                      <option value="bahasa">Bahasa</option>
+                      <option value="english">English</option>
+                    </select>
+                    <label class="checkLine">
+                      <input type="checkbox" id="aiRemind" />
+                      <span>Varied with AI</span>
+                    </label>
+                    <button class="btnPrimary" id="btnSendRemind">Send</button>
+                  </section>
+
+                  <section class="actionCard">
+                    <h4>Follow Up</h4>
+                    <p>Selects appointments where start time has passed and patient came.</p>
+                    <button class="btnGhost" id="btnSelectFollow">Select Patients</button>
+                    <label class="fieldLabel">Language</label>
+                    <select class="fieldInput compact" id="langFollow">
+                      <option value="bahasa">Bahasa</option>
+                      <option value="english">English</option>
+                    </select>
+                    <label class="checkLine">
+                      <input type="checkbox" id="aiFollow" />
+                      <span>Varied with AI</span>
+                    </label>
+                    <button class="btnPrimary" id="btnSendFollow">Send</button>
+                  </section>
+
+                  <section class="actionCard">
+                    <h4>Request Review</h4>
+                    <p>Selects appointments where start time has passed and patient came.</p>
+                    <button class="btnGhost" id="btnSelectReview">Select Patients</button>
+                    <label class="fieldLabel">Language</label>
+                    <select class="fieldInput compact" id="langReview">
+                      <option value="bahasa">Bahasa</option>
+                      <option value="english">English</option>
+                    </select>
+                    <label class="checkLine">
+                      <input type="checkbox" id="aiReview" />
+                      <span>Varied with AI</span>
+                    </label>
+                    <button class="btnPrimary" id="btnSendReview">Send</button>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" id="tab-marketing">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Marketing</h2>
+                <p>Simple number list + template selection for campaign sends.</p>
+              </div>
+            </div>
+
+            <div class="marketingLayout">
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Recipients</h3>
+                    <div class="smallText" id="marketingSummary">0 selected</div>
+                  </div>
+                  <div class="inlineRow">
+                    <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
+                    <button class="btnGhost" id="btnClearMarketingRecipients">Clear</button>
+                  </div>
+                </div>
+
+                <div class="subCard">
+                  <div class="subHead">Manual Add</div>
+                  <div class="smallText">One line each: <code>phone,name</code> or just <code>phone</code></div>
+                  <textarea id="marketingPasteInput" class="fieldInput" rows="4" placeholder="0131231231,Ali&#10;01188888888,Nina"></textarea>
+                  <button class="btnGhost" id="btnAddMarketingFromText">Add to list</button>
+                </div>
+
+                <div class="subCard">
+                  <div class="subHead">Existing Patients</div>
+                  <div class="smallText">Load patients from the full month of N months ago.</div>
+                  <div class="inlineRow wrap">
+                    <label class="fieldLabel">Months ago</label>
+                    <input id="marketingMonthsAgo" class="fieldInput compact small" type="number" min="1" max="24" value="6" />
+                    <label class="fieldLabel">Branch</label>
+                    <select id="marketingBranchSelect" class="fieldInput compact"></select>
+                    <button class="btnGhost" id="btnLoadPastPatients">Load Existing Patients</button>
+                  </div>
+                  <div class="smallText" id="pastPatientRangeText">-</div>
+                </div>
+
+                <div class="tableWrap tall">
+                  <table class="dataTable">
+                    <thead>
+                      <tr>
+                        <th style="width: 44px;"><input type="checkbox" id="marketingSelectAll" /></th>
+                        <th style="width: 180px;">Phone</th>
+                        <th style="width: 220px;">Name</th>
+                        <th>Dentist</th>
+                        <th style="width: 70px;">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="marketingRecipientsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Send</h3>
+                    <div class="smallText">Choose one template and send to selected numbers.</div>
+                  </div>
+                </div>
+
+                <label class="fieldLabel">Template</label>
+                <select id="marketingTemplateSelect" class="fieldInput"></select>
+
+                <label class="checkLine">
+                  <input type="checkbox" id="aiMarketing" />
+                  <span>Varied with AI</span>
+                </label>
+
+                <div class="previewBox">
+                  <div class="previewTitle">Message Preview</div>
+                  <div class="previewBody" id="marketingPreview">Select a template and recipients.</div>
+                </div>
+
+                <button class="btnPrimary" id="btnSendMarketing">Send Marketing Messages</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" id="tab-templates">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Templates</h2>
+                <p>Manage marketing templates and appointment message templates.</p>
+              </div>
+              <div class="inlineRow">
+                <button class="btnGhost" id="btnImportTemplates">Import</button>
+                <button class="btnGhost" id="btnExportTemplates">Export</button>
+              </div>
+            </div>
+
+            <div class="templateLayout">
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Marketing Templates</h3>
+                    <div class="smallText">Used in Marketing tab.</div>
+                  </div>
+                  <div class="inlineRow">
+                    <button class="btnGhost" id="btnNewTemplate">New</button>
+                    <button class="btnGhost" id="btnDeleteTemplate">Delete</button>
+                  </div>
+                </div>
+
+                <div class="templateManager">
+                  <div class="templateList" id="templateList"></div>
+
+                  <div class="templateEditor">
+                    <label class="fieldLabel">Template Name</label>
+                    <input id="templateName" class="fieldInput" />
+
+                    <label class="fieldLabel">Message Body</label>
+                    <textarea id="templateBody" class="fieldInput" rows="7"></textarea>
+
+                    <label class="fieldLabel">Send Policy</label>
+                    <select id="templateSendPolicy" class="fieldInput compact">
+                      <option value="once">Once per recipient</option>
+                      <option value="multiple">Allow multiple sends</option>
+                    </select>
+
+                    <div class="smallText" id="templateVariablesText">Variables: -</div>
+                    <button class="btnPrimary" id="btnSaveTemplate">Save Marketing Templates</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Appointment Templates</h3>
+                    <div class="smallText">Editable by branch preference.</div>
+                  </div>
+                </div>
+
+                <div class="apptTemplateEditor">
+                  <section class="subCard">
+                    <div class="subHead">Remind Appointment</div>
+                    <label class="fieldLabel">Bahasa</label>
+                    <textarea id="tplRemindBahasa" class="fieldInput" rows="6"></textarea>
+                    <label class="fieldLabel">English</label>
+                    <textarea id="tplRemindEnglish" class="fieldInput" rows="6"></textarea>
+                  </section>
+
+                  <section class="subCard">
+                    <div class="subHead">Follow Up</div>
+                    <label class="fieldLabel">Bahasa</label>
+                    <textarea id="tplFollowBahasa" class="fieldInput" rows="5"></textarea>
+                    <label class="fieldLabel">English</label>
+                    <textarea id="tplFollowEnglish" class="fieldInput" rows="5"></textarea>
+                  </section>
+
+                  <section class="subCard">
+                    <div class="subHead">Request Review</div>
+                    <label class="fieldLabel">Bahasa</label>
+                    <textarea id="tplReviewBahasa" class="fieldInput" rows="5"></textarea>
+                    <label class="fieldLabel">English</label>
+                    <textarea id="tplReviewEnglish" class="fieldInput" rows="5"></textarea>
+                  </section>
+                </div>
+
+                <div class="smallText">Common placeholders: {name}, {branch}, {dentist}, {date}, {weekday}, {time}, {address}, {branch_phone}, {google_direction}, {waze_direction}, {google_review_link}, {title_bm}, {title_en}</div>
+                <button class="btnPrimary" id="btnSaveAppointmentTemplates">Save Appointment Templates</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" id="tab-connect">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Connect</h2>
+                <p>Manage WhatsApp sessions and profiles.</p>
+              </div>
+            </div>
+
+            <div class="connectLayout">
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>WhatsApp Connection</h3>
+                    <div class="smallText" id="waStatusText">Not connected</div>
                   </div>
                   <button class="btnGhost" id="btnHandshake">Handshake</button>
                 </div>
 
-                <div class="row" style="margin-top: 6px;">
-                  <div style="flex:1;">
-                    <label class="label" style="margin-top:0;">Method</label>
-                    <select class="input" id="connectMethod">
-                      <option value="qr" selected>QR Code</option>
-                      <option value="pairing">Pairing Code (Phone Number)</option>
-                    </select>
-                  </div>
-                  <div style="flex:1;" id="pairingPhoneWrap" class="hidden">
-                    <label class="label" style="margin-top:0;">Phone (E.164 digits, no +)</label>
-                    <input class="input" id="pairingPhone" placeholder="60123456789" />
-                  </div>
-                </div>
-
-                <div class="qrArea">
-                  <div class="qrBox">
-                    <img id="qrImg" alt="QR will appear here" />
-                    <div class="pairingBox hidden" id="pairingBox">
-                      <div class="pairingTitle">Pairing code</div>
-                      <div class="pairingCode" id="pairingCode">-</div>
-                      <div class="pairingHint">WhatsApp → Linked devices → Link with phone number</div>
-                    </div>
-                  </div>
-
-                  <div class="qrInfo">
-                    <div class="infoRow">
-                      <div class="infoLabel">Status</div>
-                      <div class="infoValue" id="waStatus">Not connected</div>
-                    </div>
-
-                    <div class="infoRow">
-                      <div class="infoLabel">Active profile</div>
-                      <div class="infoValue" id="waProfileText">-</div>
-                    </div>
-
-                    <div class="infoRow">
-                      <div class="infoLabel">Notes</div>
-                      <div class="infoValue">
-                        Each profile saves a separate WhatsApp session. Use different profiles for different WhatsApp
-                        numbers.
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="card">
-                <div class="cardHeader">
-                  <div>
-                    <div class="cardTitle">WhatsApp Profiles</div>
-                    <div class="cardSub">Create, switch, delete profiles</div>
-                  </div>
-                </div>
-
-                <div class="row">
-                  <input class="input" id="newProfileName" placeholder="Example: Sales 1, Admin, Branch Bangi" />
-                  <button class="btnPrimary" id="btnCreateProfile">Create</button>
-                </div>
-
-                <div class="profileList" id="profileList"></div>
-
-                <div class="callout">
-                  <div class="calloutTitle">Important</div>
-                  <div class="calloutBody">
-                    If you delete a profile, its WhatsApp session will be removed and you will need to scan QR again.
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="view hidden" id="view-templates">
-            <div class="gridTpl">
-              <div class="card">
-                <div class="cardHeader">
-                  <div>
-                    <div class="cardTitle">Template Library</div>
-                    <div class="cardSub">Select a template to edit</div>
-                  </div>
-                  <button class="btnPrimary" id="btnNewTpl">New</button>
-                </div>
-                <div class="tplList" id="tplList"></div>
-              </div>
-
-              <div class="card">
-                <div class="cardHeader">
-                  <div>
-                    <div class="cardTitle">Editor</div>
-                    <div class="cardSub">Use placeholders like {name} {date} {time}</div>
-                  </div>
-                  <div class="rowRight">
-                    <button class="btnGhost" id="btnDeleteTpl">Delete</button>
-                    <button class="btnPrimary" id="btnSaveTpl">Save</button>
-                  </div>
-                </div>
-
-                <div class="form">
-                  <label class="label">Template name</label>
-                  <input id="tplName" class="input" placeholder="Template name" />
-
-                  <label class="label">Message body</label>
-                  <textarea id="tplBody" class="textarea" rows="10" placeholder="Hi {name}, ..."></textarea>
-
-                  <label class="label">Send policy</label>
-                  <select id="tplSendPolicy" class="input">
-                    <option value="once">Once per recipient (skip if already sent)</option>
-                    <option value="multiple">Allow multiple sends</option>
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Method</label>
+                  <select class="fieldInput compact" id="connectMethod">
+                    <option value="qr">QR Code</option>
+                    <option value="pairing">Pairing Code</option>
                   </select>
 
-                  <div class="chips">
-                    <div class="chipTitle">Template variables</div>
-                    <div class="row" style="margin-top: 0;">
-                      <input id="tplVarName" class="input" placeholder="Example: name, branch, date" />
-                      <button class="btnGhost" id="btnAddTplVar">Add Variable</button>
-                    </div>
-                    <div class="chipRow" id="tplVarList" style="margin-top: 8px;"></div>
-                  </div>
-
-                  <div class="chips">
-                    <div class="chipTitle">Common placeholders</div>
-                    <div class="chipRow">
-                      <span class="chip">{name}</span>
-                      <span class="chip">{topic}</span>
-                      <span class="chip">{date}</span>
-                      <span class="chip">{time}</span>
-                      <span class="chip">{branch}</span>
-                      <span class="chip">{doctor}</span>
-                    </div>
-                  </div>
-
-                  <div class="previewBox">
-                    <div class="previewTitle">Preview</div>
-                    <div class="previewText" id="tplPreview">Select a template to preview</div>
-                  </div>
-
-                  <div class="row">
-                    <button class="btnGhost" id="btnClearSentMarks">Clear sent marks for this template</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="view hidden" id="view-send">
-            <div class="gridSend">
-              <div class="card">
-                <div class="cardHeader">
-                  <div>
-                    <div class="cardTitle">Recipients</div>
-                    <div class="cardSub">Add recipients and per-recipient variable values</div>
-                  </div>
-                  <div class="rowRight">
-                    <button class="btnGhost" id="btnAddRecipientRow">Add row</button>
-                    <button class="btnGhost" id="btnClearRecipients">Clear all</button>
-                    <button class="btnGhost" id="btnImportWaContacts">WA Contacts</button>
-                    <button class="btnGhost" id="btnDownloadCsvTemplate">CSV template</button>
-                    <button class="btnGhost" id="btnImportCsv">Import CSV</button>
+                  <div id="pairingPhoneWrap" class="hidden inlineRow">
+                    <label class="fieldLabel">Phone</label>
+                    <input class="fieldInput compact" id="pairingPhone" placeholder="60123456789" />
                   </div>
                 </div>
 
-                <div class="tableWrap recipientTableWrap">
-                  <table class="table recipientTable">
-                    <thead id="recipientHead"></thead>
-                    <tbody id="recipientBody"></tbody>
-                  </table>
-                </div>
-
-                <div class="splitRow">
-                  <div class="mini">
-                    <div class="miniLabel">Total</div>
-                    <div class="miniValue" id="totalRecipients">0</div>
-                  </div>
-                  <div class="mini">
-                    <div class="miniLabel">Template policy</div>
-                    <div class="miniValue" id="sendPolicyText">-</div>
+                <div class="qrPanel">
+                  <img id="qrImg" alt="QR" />
+                  <div id="pairingCodeBox" class="hidden pairingCodeBox">
+                    <div class="smallText">Pairing code</div>
+                    <div id="pairingCodeText" class="pairingCodeText">-</div>
                   </div>
                 </div>
               </div>
 
               <div class="card">
-                <div class="cardHeader">
+                <div class="cardHead">
                   <div>
-                    <div class="cardTitle">Send Settings</div>
-                    <div class="cardSub">Choose template and pacing</div>
+                    <h3>Profiles</h3>
+                    <div class="smallText">Separate WhatsApp sessions for each account.</div>
                   </div>
                 </div>
 
-                <label class="label">Template</label>
-                <select id="tplSelect" class="input"></select>
-
-                <div class="row3">
-                  <div>
-                    <label class="label">Pacing pattern</label>
-                    <select id="pacingPattern" class="input">
-                      <option value="random" selected>Random within range</option>
-                      <option value="cycle">Cycle within range</option>
-                      <option value="fixed">Fixed average</option>
-                    </select>
-                  </div>
-
-                  <div>
-                    <label class="label">Min seconds</label>
-                    <input id="minSec" type="number" class="input" value="7" />
-                  </div>
-
-                  <div>
-                    <label class="label">Max seconds</label>
-                    <input id="maxSec" type="number" class="input" value="10" />
-                  </div>
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Active</label>
+                  <select id="profileSelect" class="fieldInput compact"></select>
                 </div>
 
-                <div class="previewBox">
-                  <div class="previewTitle">AI Rewrite (Optional)</div>
-                  <div class="checkRow" style="margin-top: 0;">
-                    <label class="check">
-                      <input type="checkbox" id="aiEnable" />
-                      <span>Rewrite each message via backend AI before sending</span>
-                    </label>
-                  </div>
-                  <div class="smallMuted" id="aiRewriteStateText">Disabled: send original template message</div>
-
-                  <label class="label">Backend endpoint URL</label>
-                  <input id="aiEndpoint" class="input" placeholder="https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM" />
-
-                  <label class="label">Auth token (optional)</label>
-                  <input id="aiAuthToken" class="input" type="password" placeholder="Bearer token or raw token" />
-
-                  <label class="label">Rewrite prompt</label>
-                  <textarea
-                    id="aiPrompt"
-                    class="textarea"
-                    rows="4"
-                    placeholder="Prompt text sent to backend as input field: prompt. Use {message} for the original message. You can also use {name}, {date}, {branch}, {phone}."
-                  ></textarea>
-
-                  <div class="row3" style="margin-top: 0;">
-                    <div>
-                      <label class="label">Timeout (ms)</label>
-                      <input id="aiTimeoutMs" type="number" class="input" value="30000" />
-                    </div>
-                    <div style="grid-column: span 2;">
-                      <label class="label">On AI error</label>
-                      <label class="check" style="margin-top: 8px;">
-                        <input type="checkbox" id="aiFallback" checked />
-                        <span>Fallback to original template message</span>
-                      </label>
-                    </div>
-                  </div>
+                <div class="inlineRow wrap">
+                  <input id="newProfileName" class="fieldInput compact" placeholder="New profile name" />
+                  <button class="btnGhost" id="btnCreateProfile">Create</button>
                 </div>
 
-                <div class="previewBox">
-                  <div class="previewTitle">First recipient preview</div>
-                  <div class="previewText" id="sendPreview">Enter recipients to preview</div>
-                </div>
-
-                <button class="btnPrimary btnWide" id="btnSend">Send Batch</button>
-
-                <div class="progressWrap">
-                  <div class="progressTop">
-                    <div class="progressText" id="progressText">Idle</div>
-                    <div class="progressPct" id="progressPct">0%</div>
-                  </div>
-                  <div class="progressBar">
-                    <div class="progressFill" id="progressFill"></div>
-                  </div>
-                </div>
-
-                <div class="hintBox">
-                  CSV import supports columns like phone, name, topic, date, time. You can map columns in the next step.
-                </div>
+                <div id="profileList" class="profileList"></div>
               </div>
             </div>
           </div>
 
-          <div class="view hidden" id="view-activity">
-            <div class="card">
-              <div class="cardHeader">
-                <div>
-                  <div class="cardTitle">Activity</div>
-                  <div class="cardSub">Batch results and errors</div>
-                </div>
-                <button class="btnGhost" id="btnClearActivity">Clear</button>
-              </div>
-
-              <div class="tableWrap">
-                <table class="table">
-                  <thead>
-                    <tr>
-                      <th style="width: 180px;">Time</th>
-                      <th style="width: 180px;">Phone</th>
-                      <th style="width: 120px;">Status</th>
-                      <th>Error</th>
-                    </tr>
-                  </thead>
-                  <tbody id="activityBody"></tbody>
-                </table>
+          <div class="tabPanel hidden" id="tab-settings">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Settings</h2>
+                <p>Advanced settings for sending pace and defaults.</p>
               </div>
             </div>
+
+            <div class="settingsLayout">
+              <div class="card">
+                <h3>Message Gap Range</h3>
+                <p class="smallText">Applied to appointment and marketing sends.</p>
+
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Min seconds</label>
+                  <input id="settingGapMin" class="fieldInput compact small" type="number" min="7" max="45" />
+
+                  <label class="fieldLabel">Max seconds</label>
+                  <input id="settingGapMax" class="fieldInput compact small" type="number" min="7" max="45" />
+                </div>
+              </div>
+
+              <div class="card">
+                <h3>Marketing Default</h3>
+                <p class="smallText">Default month offset for Existing Patients loader.</p>
+
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Months ago</label>
+                  <input id="settingMarketingMonths" class="fieldInput compact small" type="number" min="1" max="24" />
+                </div>
+              </div>
+
+              <div class="card">
+                <h3>Timezone</h3>
+                <p class="smallText">All date/time logic is fixed to:</p>
+                <div class="pill">Asia/Kuala_Lumpur</div>
+              </div>
+            </div>
+
+            <button class="btnPrimary" id="btnSaveSettings">Save Settings</button>
+          </div>
+        </section>
+
+        <section class="activityBar">
+          <div class="activityHead">
+            <h3>Send Activity</h3>
+            <button class="btnGhost" id="btnClearActivity">Clear</button>
+          </div>
+          <div class="tableWrap short">
+            <table class="dataTable">
+              <thead>
+                <tr>
+                  <th style="width: 170px;">Time</th>
+                  <th style="width: 160px;">Phone</th>
+                  <th style="width: 110px;">Status</th>
+                  <th>Error</th>
+                </tr>
+              </thead>
+              <tbody id="activityBody"></tbody>
+            </table>
           </div>
         </section>
       </main>
+    </div>
 
-      <div class="toastWrap" id="toastWrap"></div>
-
-      <div class="modal hidden" id="waContactsModal">
-        <div class="modalBackdrop" id="waContactsModalBackdrop"></div>
-        <div class="modalCard waContactsCard">
-          <div class="modalHeader">
-            <div>
-              <div class="modalTitle">WhatsApp Contacts</div>
-              <div class="modalSub">Tick contacts to add into recipients</div>
-            </div>
-            <button class="btnGhost" id="btnCloseWaContactsModal">Close</button>
-          </div>
-
-          <div class="form">
-            <div class="row" style="margin-top: 0;">
-              <input class="input" id="waContactsSearch" placeholder="Search by name, phone, or jid" />
-              <button class="btnGhost" id="btnRefreshWaContacts">Refresh</button>
-            </div>
-
-            <div class="row" style="margin-top: 0; justify-content: space-between;">
-              <label class="check">
-                <input type="checkbox" id="waContactsSelectAll" />
-                <span>Select all visible</span>
-              </label>
-              <div class="smallMuted" id="waContactsCount">0 selected</div>
-            </div>
-
-            <div class="tableWrap waContactsTableWrap">
-              <table class="table waContactsTable">
-                <thead>
-                  <tr>
-                    <th style="width: 52px;">Pick</th>
-                    <th style="width: 300px;">Contact</th>
-                    <th style="width: 220px;">Name</th>
-                    <th style="width: 170px;">Phone</th>
-                    <th>JID</th>
-                  </tr>
-                </thead>
-                <tbody id="waContactsBody"></tbody>
-              </table>
-            </div>
-
-            <div class="row" style="justify-content: flex-end;">
-              <button class="btnGhost" id="btnImportSelectedWaContacts">Add selected contacts</button>
-            </div>
+    <div class="modal hidden" id="confirmModal">
+      <div class="modalBackdrop" id="confirmModalBackdrop"></div>
+      <div class="modalCard">
+        <div class="cardHead">
+          <div>
+            <h3 id="confirmTitle">Confirm Send</h3>
+            <div class="smallText" id="confirmSubtitle">-</div>
           </div>
         </div>
-      </div>
 
-      <div class="modal hidden" id="csvModal">
-        <div class="modalBackdrop" id="csvModalBackdrop"></div>
-        <div class="modalCard">
-          <div class="modalHeader">
-            <div>
-              <div class="modalTitle">CSV Import Mapping</div>
-              <div class="modalSub">Choose which columns to use</div>
-            </div>
-            <button class="btnGhost" id="btnCloseCsvModal">Close</button>
+        <div class="confirmBody">
+          <div class="confirmColumn">
+            <div class="subHead">Recipients</div>
+            <pre id="confirmRecipients"></pre>
           </div>
-
-          <div class="form">
-            <label class="label">Has header row?</label>
-            <select class="input" id="csvHasHeader">
-              <option value="true" selected>true</option>
-              <option value="false">false</option>
-            </select>
-
-            <label class="label">Phone column index (0-based)</label>
-            <input class="input" id="csvPhoneCol" type="number" value="0" />
-
-            <div id="csvVarCols" class="gridCols"></div>
-
-            <div class="row">
-              <button class="btnPrimary" id="btnPickCsvAndImport">Pick CSV and Import</button>
-            </div>
-
-            <div class="previewBox">
-              <div class="previewTitle">Tip</div>
-              <div class="previewText">
-                If your CSV has header row, phone column might be "phone" or "mobile". Use 0-based index: first column
-                is 0, second is 1, etc.
-              </div>
-            </div>
+          <div class="confirmColumn">
+            <div class="subHead">Sample Message</div>
+            <pre id="confirmSample"></pre>
           </div>
+        </div>
+
+        <div class="inlineRow right">
+          <button class="btnGhost" id="btnCancelConfirm">Cancel</button>
+          <button class="btnPrimary" id="btnConfirmSend">Confirm & Send</button>
         </div>
       </div>
     </div>
+
+    <div class="toastWrap" id="toastWrap"></div>
 
     <script src="./renderer.js"></script>
   </body>

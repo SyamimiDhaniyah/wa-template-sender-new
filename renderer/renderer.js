@@ -1,36 +1,38 @@
-﻿let templates = [];
-let currentTemplateId = null;
-
-let profiles = [];
-let activeProfileId = null;
-let waConnected = false;
-
-let recipientsData = [];
-let activityRows = [];
-let batchTotal = 0;
-let batchDone = 0;
-let aiSaveTimer = null;
-let waContactsRows = [];
-let waContactsFiltered = [];
-let waContactSelection = new Set();
-let waContactsLoadToken = 0;
-
-const defaultAiRewriteConfig = {
-  enabled: false,
-  endpoint: "https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv/LLM",
-  authToken: "",
-  prompt: "{message}",
-  timeoutMs: 30000,
-  fallbackToOriginal: true
+﻿
+const TIMEZONE = "Asia/Kuala_Lumpur";
+const AI_VARIATION_PROMPT =
+  "Rewrite this WhatsApp clinic message naturally for Malaysian audience, keep meaning and all facts unchanged, keep it polite and concise: {message}";
+const DEFAULT_CLINIC_SETTINGS = { timezone: TIMEZONE, gapMinSec: 7, gapMaxSec: 45, marketingMonthsAgoDefault: 6 };
+const DEFAULT_APPOINTMENT_TEMPLATES = {
+  remindAppointment: { bahasa: "", english: "" },
+  followUp: { bahasa: "", english: "" },
+  requestReview: { bahasa: "", english: "" }
 };
-const aiRewriteFieldIds = ["aiEndpoint", "aiAuthToken", "aiPrompt", "aiTimeoutMs", "aiFallback"];
+
+const state = {
+  session: { authToken: "", user: {} },
+  settings: { ...DEFAULT_CLINIC_SETTINGS },
+  templates: [],
+  appointmentTemplates: { ...DEFAULT_APPOINTMENT_TEMPLATES },
+  branches: [],
+  appointments: [],
+  selectedAppointmentIds: new Set(),
+  marketingRecipients: [],
+  waConnected: false,
+  activeTab: "appointment",
+  profiles: [],
+  activeProfileId: null,
+  activityRows: [],
+  currentTemplateId: null,
+  confirmResolver: null
+};
 
 function el(id) {
   return document.getElementById(id);
 }
 
-function escapeHtml(s) {
-  return String(s || "")
+function escapeHtml(text) {
+  return String(text || "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -40,1468 +42,1362 @@ function escapeHtml(s) {
 
 function toast(title, body) {
   const wrap = el("toastWrap");
-  const t = document.createElement("div");
-  t.className = "toast";
-  t.innerHTML = `<div class="toastTitle">${escapeHtml(title)}</div><div class="toastBody">${escapeHtml(
-    body || ""
-  )}</div>`;
-  wrap.appendChild(t);
-
+  if (!wrap) return;
+  const node = document.createElement("div");
+  node.className = "toast";
+  node.innerHTML = `<div class="toastTitle">${escapeHtml(title)}</div><div class="toastBody">${escapeHtml(body || "")}</div>`;
+  wrap.appendChild(node);
   setTimeout(() => {
-    t.style.opacity = "0";
-    t.style.transition = "opacity 180ms ease";
-    setTimeout(() => t.remove(), 220);
-  }, 2400);
+    node.style.opacity = "0";
+    node.style.transition = "opacity 180ms ease";
+    setTimeout(() => node.remove(), 220);
+  }, 2600);
 }
 
-function setHeader(title, hint) {
-  el("pageTitle").textContent = title;
-  el("pageHint").textContent = hint;
+function toInt(v, fallback = 0) {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.round(n) : fallback;
 }
 
-function setConnectionBadge(connected, text) {
-  waConnected = !!connected;
-  el("connText").textContent = text || (connected ? "Connected" : "Not connected");
-  const dot = el("connDot");
-  dot.classList.remove("online", "offline");
-  dot.classList.add(connected ? "online" : "offline");
-  el("btnSend").disabled = !waConnected;
+function clamp(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  const r = Math.round(n);
+  return Math.min(max, Math.max(min, r));
 }
 
-async function syncConnectionStateFromBackend() {
-  try {
-    const s = await window.api.waGetConnectionState();
-    if (!s?.ok) return;
-    if (s.profileId && activeProfileId && s.profileId !== activeProfileId) return;
-    el("waStatus").textContent = s.text || (s.connected ? "Connected" : s.connecting ? "Connecting..." : "Not connected");
-    setConnectionBadge(!!s.connected, s.text || (s.connected ? "Connected" : "Not connected"));
-  } catch (e) {
-    // ignore state sync errors; live status events still update UI
-  }
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForConnectionSync(timeoutMs = 12000, intervalMs = 650) {
-  const endAt = Date.now() + Math.max(1000, Number(timeoutMs || 12000));
-  while (Date.now() < endAt) {
-    const s = await window.api.waGetConnectionState().catch(() => null);
-    if (s?.ok) {
-      if (!s.profileId || !activeProfileId || s.profileId === activeProfileId) {
-        el("waStatus").textContent =
-          s.text || (s.connected ? "Connected" : s.connecting ? "Connecting..." : "Not connected");
-        setConnectionBadge(!!s.connected, s.text || (s.connected ? "Connected" : "Not connected"));
-      }
-      if (s.connected || !s.connecting) return;
-    }
-    await sleep(intervalMs);
-  }
-}
-
-function switchView(viewName) {
-  const views = ["connect", "templates", "send", "activity"];
-  for (const v of views) {
-    const viewEl = el(`view-${v}`);
-    if (v === viewName) viewEl.classList.remove("hidden");
-    else viewEl.classList.add("hidden");
-  }
-
-  document.querySelectorAll(".navItem").forEach((btn) => {
-    btn.classList.toggle("active", btn.dataset.view === viewName);
-  });
-
-  if (viewName === "connect") setHeader("Connect", "Connect WhatsApp via QR code and choose a profile");
-  if (viewName === "templates") setHeader("Templates", "Manage templates and sent marks");
-  if (viewName === "send") setHeader("Send", "Import recipients, preview, and send safely");
-  if (viewName === "activity") setHeader("Activity", "Batch results and errors");
-
-  if (viewName === "send") {
-    renderRecipientsTable();
-    refreshRecipientCount();
-    refreshSendPolicyText();
-    refreshSendPreview();
-  }
-}
-
-function uuid() {
-  return "t_" + Math.random().toString(16).slice(2) + "_" + Date.now().toString(16);
-}
-
-function isValidTemplateVarName(name) {
-  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(String(name || ""));
-}
-
-function extractVarsFromBody(body) {
-  const set = new Set();
-  const re = /\{(\w+)\}/g;
-  const text = String(body || "");
-  let m;
-  while ((m = re.exec(text))) {
-    const key = String(m[1] || "");
-    if (isValidTemplateVarName(key)) set.add(key);
-  }
-  return Array.from(set);
-}
-
-function uniqueValidVars(arr) {
-  const set = new Set();
-  for (const x of Array.isArray(arr) ? arr : []) {
-    const key = String(x || "").trim();
-    if (isValidTemplateVarName(key)) set.add(key);
-  }
-  return Array.from(set);
-}
-
-function normalizeTemplate(raw, idx) {
-  const t = raw && typeof raw === "object" ? raw : {};
-  const variables = uniqueValidVars(t.variables);
-  const bodyVars = extractVarsFromBody(t.body || "");
-  for (const v of bodyVars) {
-    if (!variables.includes(v)) variables.push(v);
-  }
-
-  return {
-    id: String(t.id || "t_" + String(idx + 1)),
-    name: String(t.name || "Untitled"),
-    body: String(t.body || ""),
-    variables,
-    sendPolicy: t.sendPolicy === "multiple" ? "multiple" : "once"
-  };
-}
-
-function normalizeTemplates(list) {
-  return (Array.isArray(list) ? list : []).map((t, idx) => normalizeTemplate(t, idx));
-}
-
-function getSelectedTemplate() {
-  return templates.find((t) => t.id === currentTemplateId) || null;
-}
-
-function syncTemplateVarsFromBody(template) {
-  if (!template) return;
-  const base = uniqueValidVars(template.variables);
-  const fromBody = extractVarsFromBody(template.body || "");
-  for (const v of fromBody) {
-    if (!base.includes(v)) base.push(v);
-  }
-  template.variables = base;
-}
-
-function getTemplateVariables(template) {
-  const t = template || getSelectedTemplate();
-  if (!t) return [];
-  return uniqueValidVars(t.variables);
-}
-
-function templateSnippet(body) {
-  const s = String(body || "").replace(/\s+/g, " ").trim();
-  return s.length > 84 ? s.slice(0, 84) + "..." : s;
-}
-
-function renderTemplate(body, vars) {
-  return String(body || "").replace(/\{(\w+)\}/g, (_, key) => {
-    const v = vars && Object.prototype.hasOwnProperty.call(vars, key) ? String(vars[key]) : "";
-    return v;
-  });
-}
-
-function normalizeMsisdn(input) {
+function normalizePhone(input) {
   let s = String(input || "").trim();
   s = s.replace(/\s+/g, "").replace(/-/g, "");
   if (s.startsWith("+")) s = s.slice(1);
-  if (s.startsWith("0")) s = "60" + s.slice(1);
   s = s.replace(/\D/g, "");
+  if (s.startsWith("01")) s = `6${s}`;
+  if (s.startsWith("0") && !s.startsWith("01")) s = `60${s.slice(1)}`;
   return s;
 }
 
-function makeRecipientRow(seed) {
-  const src = seed && typeof seed === "object" ? seed : {};
-  return {
-    phone: String(src.phone || ""),
-    vars: src.vars && typeof src.vars === "object" ? { ...src.vars } : {}
-  };
+function isValidPhone(input) {
+  return /^\d{8,}$/.test(normalizePhone(input));
 }
 
-function ensureRecipientRows(min = 1) {
-  while (recipientsData.length < min) recipientsData.push(makeRecipientRow());
+function templateSnippet(text) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > 90 ? `${s.slice(0, 90)}...` : s;
 }
 
-function getSendPayload() {
-  const vars = getTemplateVariables();
-  const recipients = [];
-  const varsByPhone = {};
-
-  for (const row of recipientsData) {
-    const norm = normalizeMsisdn(row.phone || "");
-    if (!norm || norm.length < 8) continue;
-
-    recipients.push(norm);
-
-    const rowVars = {};
-    for (const key of vars) {
-      const val = String(row.vars?.[key] || "").trim();
-      if (val) rowVars[key] = val;
-    }
-
-    if (Object.keys(rowVars).length > 0) {
-      varsByPhone[norm] = rowVars;
-    }
-  }
-
-  return { recipients, varsByPhone };
-}
-
-function readPacing() {
-  const pattern = el("pacingPattern").value;
-  const minSec = Number(el("minSec").value || 7);
-  const maxSec = Number(el("maxSec").value || 10);
-  return { pattern, minSec, maxSec };
-}
-
-function normalizeAiRewriteConfigClient(input) {
-  const cfg = input && typeof input === "object" ? input : {};
-  const timeoutRaw = Number(cfg.timeoutMs);
-  const timeoutMs = Number.isFinite(timeoutRaw) ? Math.min(120000, Math.max(3000, Math.round(timeoutRaw))) : 30000;
-  const endpoint = String(cfg.endpoint || "").trim() || defaultAiRewriteConfig.endpoint;
-
-  return {
-    enabled: !!cfg.enabled,
-    endpoint,
-    authToken: String(cfg.authToken || "").trim(),
-    prompt: String(cfg.prompt || defaultAiRewriteConfig.prompt).trim(),
-    timeoutMs,
-    fallbackToOriginal: cfg.fallbackToOriginal !== false
-  };
-}
-
-function applyAiRewriteConfigToUi(config) {
-  const cfg = normalizeAiRewriteConfigClient({ ...defaultAiRewriteConfig, ...(config || {}) });
-  el("aiEnable").checked = !!cfg.enabled;
-  el("aiEndpoint").value = cfg.endpoint;
-  el("aiAuthToken").value = cfg.authToken;
-  el("aiPrompt").value = cfg.prompt;
-  el("aiTimeoutMs").value = String(cfg.timeoutMs);
-  el("aiFallback").checked = !!cfg.fallbackToOriginal;
-  setAiRewriteUiEnabled(cfg.enabled);
-}
-
-function setAiRewriteUiEnabled(enabled) {
-  const active = !!enabled;
-  for (const id of aiRewriteFieldIds) {
-    const node = el(id);
-    if (node) node.disabled = !active;
-  }
-  const hint = el("aiRewriteStateText");
-  if (hint) {
-    hint.textContent = active
-      ? "Enabled: AI can rewrite each outgoing message"
-      : "Disabled: send original template message";
-  }
-}
-
-function readAiRewriteConfigFromUi() {
-  return normalizeAiRewriteConfigClient({
-    enabled: !!el("aiEnable").checked,
-    endpoint: el("aiEndpoint").value,
-    authToken: el("aiAuthToken").value,
-    prompt: el("aiPrompt").value,
-    timeoutMs: Number(el("aiTimeoutMs").value || 30000),
-    fallbackToOriginal: !!el("aiFallback").checked
+function renderTemplate(template, vars) {
+  return String(template || "").replace(/\{(\w+)\}/g, (_m, key) => {
+    const value = vars && Object.prototype.hasOwnProperty.call(vars, key) ? vars[key] : "";
+    return String(value ?? "");
   });
 }
 
-function scheduleSaveAiRewriteConfig() {
-  if (aiSaveTimer) clearTimeout(aiSaveTimer);
-  aiSaveTimer = setTimeout(async () => {
-    aiSaveTimer = null;
-    try {
-      await window.api.saveAiRewriteConfig(readAiRewriteConfigFromUi());
-    } catch (e) {
-      // do not block sending due to config-save errors
-    }
-  }, 300);
+function extractTemplateVariables(body) {
+  const set = new Set();
+  const re = /\{(\w+)\}/g;
+  const text = String(body || "");
+  let m = null;
+  while ((m = re.exec(text))) set.add(String(m[1]));
+  return Array.from(set);
 }
 
-function refreshRecipientCount() {
-  const count = getSendPayload().recipients.length;
-  el("totalRecipients").textContent = String(count);
+function ymdToKlMidnightTs(ymd) {
+  const m = String(ymd || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return 0;
+  const y = Number(m[1]);
+  const month = Number(m[2]);
+  const d = Number(m[3]);
+  if (!y || !month || !d) return 0;
+  return Date.UTC(y, month - 1, d, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
 }
 
-function refreshSendPolicyText() {
-  const t = getSelectedTemplate();
-  if (!t) {
-    el("sendPolicyText").textContent = "-";
-    return;
-  }
-  el("sendPolicyText").textContent = t.sendPolicy === "multiple" ? "Multiple" : "Once";
+function getTodayYmdKl() {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
 }
 
-function refreshTemplateSelect() {
-  const sel = el("tplSelect");
-  sel.innerHTML = "";
-
-  for (const t of templates) {
-    const opt = document.createElement("option");
-    opt.value = t.id;
-    opt.textContent = t.name;
-    sel.appendChild(opt);
-  }
-
-  if (templates.length > 0) {
-    if (!currentTemplateId || !templates.some((x) => x.id === currentTemplateId)) {
-      currentTemplateId = templates[0].id;
-    }
-    sel.value = currentTemplateId;
-  }
-
-  refreshSendPolicyText();
+function formatDateForMessage(ts, lang) {
+  const locale = lang === "bahasa" ? "ms-MY" : "en-GB";
+  return new Intl.DateTimeFormat(locale, {
+    timeZone: TIMEZONE,
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric"
+  }).format(new Date(Number(ts || Date.now())));
 }
 
-function renderTemplateList() {
-  const list = el("tplList");
-  list.innerHTML = "";
-
-  for (const t of templates) {
-    const item = document.createElement("div");
-    item.className = "tplItem" + (t.id === currentTemplateId ? " active" : "");
-    item.innerHTML = `
-      <div class="tplName">${escapeHtml(t.name || "Untitled")}</div>
-      <div class="tplMeta">${escapeHtml(templateSnippet(t.body))}</div>
-    `;
-
-    item.addEventListener("click", () => {
-      currentTemplateId = t.id;
-      renderTemplateList();
-      loadTemplateToEditor();
-      refreshTemplateSelect();
-      renderRecipientsTable();
-      refreshRecipientCount();
-      refreshSendPreview();
-    });
-
-    list.appendChild(item);
-  }
+function formatWeekdayForMessage(ts, lang) {
+  const locale = lang === "bahasa" ? "ms-MY" : "en-US";
+  return new Intl.DateTimeFormat(locale, { timeZone: TIMEZONE, weekday: "long" }).format(
+    new Date(Number(ts || Date.now()))
+  );
 }
 
-function renderTemplateVariableList() {
-  const wrap = el("tplVarList");
-  wrap.innerHTML = "";
-
-  const t = getSelectedTemplate();
-  if (!t) return;
-
-  const vars = getTemplateVariables(t);
-  if (vars.length === 0) {
-    const empty = document.createElement("span");
-    empty.className = "smallMuted";
-    empty.textContent = "No variables yet";
-    wrap.appendChild(empty);
-    return;
-  }
-
-  for (const key of vars) {
-    const chip = document.createElement("span");
-    chip.className = "chipBtn";
-
-    const txt = document.createElement("span");
-    txt.textContent = `{${key}}`;
-
-    const del = document.createElement("button");
-    del.className = "chipBtnDel";
-    del.type = "button";
-    del.textContent = "x";
-    del.title = "Remove variable";
-    del.addEventListener("click", () => {
-      t.variables = getTemplateVariables(t).filter((v) => v !== key);
-      renderTemplateVariableList();
-      renderRecipientsTable();
-      refreshSendPreview();
-      renderCsvVariableMapping();
-    });
-
-    chip.appendChild(txt);
-    chip.appendChild(del);
-    wrap.appendChild(chip);
-  }
+function formatTimeForMessage(ts) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true
+  })
+    .format(new Date(Number(ts || Date.now())))
+    .toLowerCase();
 }
 
-function loadTemplateToEditor() {
-  const t = getSelectedTemplate();
-  if (!t) {
-    el("tplName").value = "";
-    el("tplBody").value = "";
-    el("tplSendPolicy").value = "once";
-    el("tplPreview").textContent = "Select a template to preview";
-    el("tplVarName").value = "";
-    renderTemplateVariableList();
-    return;
-  }
-
-  el("tplName").value = t.name || "";
-  el("tplBody").value = t.body || "";
-  el("tplSendPolicy").value = t.sendPolicy === "multiple" ? "multiple" : "once";
-  el("tplVarName").value = "";
-  syncTemplateVarsFromBody(t);
-  renderTemplateVariableList();
-  refreshTemplatePreview();
-}
-
-function refreshTemplatePreview() {
-  const t = getSelectedTemplate();
-  if (!t) return;
-
-  const demoVars = {
-    name: "Ali",
-    topic: "quotation",
-    date: "10 Feb",
-    time: "3:00 PM",
-    branch: "Bangi",
-    doctor: "Dr. Ashraf"
-  };
-
-  for (const key of getTemplateVariables(t)) {
-    if (!Object.prototype.hasOwnProperty.call(demoVars, key)) {
-      demoVars[key] = `[${key}]`;
-    }
-  }
-
-  const preview = renderTemplate(el("tplBody").value, demoVars);
-  el("tplPreview").textContent = preview || "Preview will appear here";
-}
-
-function refreshSendPreview() {
-  const t = getSelectedTemplate();
-  if (!t) {
-    el("sendPreview").textContent = "No template selected";
-    return;
-  }
-
-  const row = recipientsData.find((r) => normalizeMsisdn(r.phone || "").length >= 8);
-  if (!row) {
-    el("sendPreview").textContent = "Add at least one recipient to preview";
-    return;
-  }
-
-  const vars = { name: "Client" };
-  for (const key of getTemplateVariables(t)) {
-    const val = String(row.vars?.[key] || "").trim();
-    if (val) vars[key] = val;
-  }
-
-  const preview = renderTemplate(t.body || "", vars);
-  el("sendPreview").textContent = preview || "Preview will appear here";
-}
-
-function setProgress(done, total) {
-  batchDone = done;
-  batchTotal = total;
-  const pct = total > 0 ? Math.round((done / total) * 100) : 0;
-  el("progressPct").textContent = `${pct}%`;
-  el("progressFill").style.width = `${pct}%`;
-
-  if (total === 0) {
-    el("progressText").textContent = "Idle";
-    return;
-  }
-
-  if (done >= total) el("progressText").textContent = `Completed ${done}/${total}`;
-  else el("progressText").textContent = `Processing ${done}/${total}`;
-}
-
-function addActivityRow(row) {
-  activityRows.unshift(row);
-  if (activityRows.length > 800) activityRows = activityRows.slice(0, 800);
-  renderActivityTable();
+function formatTimeRange(startTs, endTs) {
+  return `${formatTimeForMessage(startTs)} - ${formatTimeForMessage(endTs)}`;
 }
 
 function statusPill(status) {
-  if (status === "sent") {
-    return `<span class="statusPill pillSent"><span class="pillDot"></span>Sent</span>`;
-  }
-  if (status === "sending") {
-    return `<span class="statusPill pillSending"><span class="pillDot"></span>Sending</span>`;
-  }
-  if (status === "skipped") {
-    return `<span class="statusPill pillSkipped"><span class="pillDot"></span>Skipped</span>`;
-  }
-  return `<span class="statusPill pillFailed"><span class="pillDot"></span>Failed</span>`;
+  const s = String(status || "failed");
+  return `<span class="statusPill status-${escapeHtml(s)}">${escapeHtml(s)}</span>`;
 }
 
-function renderActivityTable() {
-  const body = el("activityBody");
-  body.innerHTML = "";
+function setConnectionBadge(connected, text) {
+  state.waConnected = !!connected;
+  const dot = el("connDot");
+  if (dot) {
+    dot.classList.remove("online", "offline");
+    dot.classList.add(connected ? "online" : "offline");
+  }
+  const msg = text || (connected ? "Connected" : "Not connected");
+  el("connText").textContent = msg;
+  el("waStatusText").textContent = msg;
+}
 
-  for (const r of activityRows) {
+function setActiveTab(tabName) {
+  const tab = String(tabName || "appointment");
+  state.activeTab = tab;
+  document.querySelectorAll(".tabBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
+  document.querySelectorAll(".tabPanel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `tab-${tab}`));
+}
+
+function normalizeTemplate(raw, idx) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const body = String(src.body || "");
+  const vars = new Set(Array.isArray(src.variables) ? src.variables.map((v) => String(v)) : []);
+  for (const key of extractTemplateVariables(body)) vars.add(key);
+  return {
+    id: String(src.id || `t_${idx + 1}`),
+    name: String(src.name || "Untitled"),
+    body,
+    variables: Array.from(vars),
+    sendPolicy: src.sendPolicy === "multiple" ? "multiple" : "once"
+  };
+}
+
+function getSelectedMarketingTemplate() {
+  return state.templates.find((t) => t.id === state.currentTemplateId) || null;
+}
+
+function getBranchByName(branchName) {
+  const key = String(branchName || "").trim().toLowerCase();
+  if (!key) return null;
+  return state.branches.find((b) => String(b.label || "").trim().toLowerCase() === key) || null;
+}
+
+function getGreetingName() {
+  const user = state.session.user || {};
+  return String(user.nickname || user.name || user.email || "Staff");
+}
+
+function updateHeaderGreeting() {
+  const user = state.session.user || {};
+  const role = String(user.Role || "").trim();
+  const branch = String(user.Branch || "").trim();
+  el("helloText").textContent = `Hello, ${getGreetingName()}`;
+  el("helloMeta").textContent = [branch, role, TIMEZONE].filter(Boolean).join(" | ");
+}
+function renderActivity() {
+  const tbody = el("activityBody");
+  tbody.innerHTML = "";
+  for (const row of state.activityRows) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td>${escapeHtml(r.ts || "")}</td>
-      <td>${escapeHtml(r.phone || "")}</td>
-      <td>${statusPill(r.status)}</td>
-      <td>${escapeHtml(r.error || "")}</td>
+      <td>${escapeHtml(row.ts || "")}</td>
+      <td>${escapeHtml(row.phone || "")}</td>
+      <td>${statusPill(row.status)}</td>
+      <td>${escapeHtml(row.error || "")}</td>
     `;
-    body.appendChild(tr);
+    tbody.appendChild(tr);
   }
 }
 
-function renderRecipientsTable() {
-  const t = getSelectedTemplate();
-  const vars = getTemplateVariables(t);
-
-  const head = el("recipientHead");
-  const body = el("recipientBody");
-
-  ensureRecipientRows(1);
-
-  head.innerHTML = "";
-  const hr = document.createElement("tr");
-  const hNo = document.createElement("th");
-  hNo.style.width = "56px";
-  hNo.textContent = "#";
-  hr.appendChild(hNo);
-
-  const hPhone = document.createElement("th");
-  hPhone.style.width = "180px";
-  hPhone.textContent = "Phone";
-  hr.appendChild(hPhone);
-
-  for (const key of vars) {
-    const th = document.createElement("th");
-    th.textContent = key;
-    hr.appendChild(th);
-  }
-
-  const hAct = document.createElement("th");
-  hAct.style.width = "90px";
-  hAct.textContent = "Action";
-  hr.appendChild(hAct);
-  head.appendChild(hr);
-
-  body.innerHTML = "";
-  recipientsData.forEach((row, rowIndex) => {
-    const tr = document.createElement("tr");
-
-    const tdNo = document.createElement("td");
-    tdNo.textContent = String(rowIndex + 1);
-    tr.appendChild(tdNo);
-
-    const tdPhone = document.createElement("td");
-    const phoneInput = document.createElement("input");
-    phoneInput.className = "input";
-    phoneInput.placeholder = "60123456789";
-    phoneInput.value = row.phone || "";
-    phoneInput.addEventListener("input", () => {
-      row.phone = phoneInput.value;
-      refreshRecipientCount();
-      refreshSendPreview();
-    });
-    tdPhone.appendChild(phoneInput);
-    tr.appendChild(tdPhone);
-
-    for (const key of vars) {
-      const td = document.createElement("td");
-      const input = document.createElement("input");
-      input.className = "input";
-      input.placeholder = key;
-      input.value = String(row.vars?.[key] || "");
-      input.addEventListener("input", () => {
-        if (!row.vars || typeof row.vars !== "object") row.vars = {};
-        row.vars[key] = input.value;
-        refreshSendPreview();
-      });
-      td.appendChild(input);
-      tr.appendChild(td);
-    }
-
-    const tdAct = document.createElement("td");
-    const delBtn = document.createElement("button");
-    delBtn.className = "btnDanger";
-    delBtn.type = "button";
-    delBtn.textContent = "Delete";
-    delBtn.disabled = recipientsData.length <= 1;
-    delBtn.addEventListener("click", () => {
-      if (recipientsData.length <= 1) return;
-      recipientsData.splice(rowIndex, 1);
-      renderRecipientsTable();
-      refreshRecipientCount();
-      refreshSendPreview();
-    });
-    tdAct.appendChild(delBtn);
-    tr.appendChild(tdAct);
-
-    body.appendChild(tr);
-  });
+function pushActivity(row) {
+  state.activityRows.unshift(row);
+  if (state.activityRows.length > 500) state.activityRows = state.activityRows.slice(0, 500);
+  renderActivity();
 }
 
-/* --------------------------- Profiles UI ---------------------------- */
-function renderProfileSelect() {
-  const sel = el("profileSelect");
-  sel.innerHTML = "";
-
-  for (const p of profiles) {
+function renderBranchesToSelect(selectId, defaultBranch) {
+  const select = el(selectId);
+  if (!select) return;
+  select.innerHTML = "";
+  for (const branch of state.branches) {
     const opt = document.createElement("option");
-    opt.value = p.id;
-    opt.textContent = p.name;
-    sel.appendChild(opt);
+    opt.value = branch.label;
+    opt.textContent = branch.label;
+    select.appendChild(opt);
   }
-
-  if (activeProfileId) sel.value = activeProfileId;
-  const active = profiles.find((x) => x.id === activeProfileId);
-  el("waProfileText").textContent = active ? `${active.name} (${active.id})` : "-";
+  if (state.branches.length === 0) return;
+  const preferred = defaultBranch && state.branches.some((b) => b.label === defaultBranch) ? defaultBranch : state.branches[0].label;
+  select.value = preferred;
 }
 
-function renderProfileList() {
-  const list = el("profileList");
-  list.innerHTML = "";
+function getAppointmentById(id) {
+  return state.appointments.find((a) => String(a.id) === String(id)) || null;
+}
 
-  for (const p of profiles) {
-    const waLine = p.waMsisdn ? ` - ${escapeHtml(p.waMsisdn)}` : "";
-    const item = document.createElement("div");
-    item.className = "profileItem";
-    item.innerHTML = `
-      <div class="profileItemLeft">
-        <div class="profileName">${escapeHtml(p.name)}</div>
-        <div class="profileId">${escapeHtml(p.id)}${p.id === activeProfileId ? " (active)" : ""}${waLine}</div>
-      </div>
-      <div class="profileBtns">
-        <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Use</button>
-        <button class="btnGhost" data-act="rename" data-id="${escapeHtml(p.id)}">Rename</button>
-        <button class="btnGhost" data-act="terminate" data-id="${escapeHtml(p.id)}">Terminate</button>
-        <button class="btnGhost" data-act="del" data-id="${escapeHtml(p.id)}">Delete</button>
-      </div>
-    `;
+function refreshAppointmentSummary() {
+  el("apptSummary").textContent = `${state.selectedAppointmentIds.size} selected / ${state.appointments.length} records`;
+}
 
-    item.querySelectorAll("button").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const act = btn.getAttribute("data-act");
-        const id = btn.getAttribute("data-id");
+function renderAppointmentTable() {
+  const body = el("apptTableBody");
+  body.innerHTML = "";
+  const sorted = [...state.appointments].sort((a, b) => toInt(a.Appt_Start_Time) - toInt(b.Appt_Start_Time));
+  for (const appt of sorted) {
+    const id = String(appt.id);
+    const tr = document.createElement("tr");
+    tr.className = state.selectedAppointmentIds.has(id) ? "rowSelected" : "";
 
-        if (act === "use") {
-          setConnectionBadge(false, "Connecting...");
-          el("waStatus").textContent = "Connecting...";
-          const res = await window.api.setActiveProfile(id);
-          activeProfileId = res.activeProfileId;
-          renderProfileSelect();
-          renderProfileList();
-          await waitForConnectionSync();
-          toast("Profile selected", "Switched profile and attempting reconnect");
-        }
-
-        if (act === "rename") {
-          const curr = profiles.find((x) => x.id === id);
-          const nextName = window.prompt("New profile name", curr?.name || "");
-          if (nextName === null) return;
-          try {
-            await window.api.renameProfile(id, nextName);
-            const res2 = await window.api.getProfiles();
-            profiles = res2.profiles || [];
-            activeProfileId = res2.activeProfileId || activeProfileId;
-            renderProfileSelect();
-            renderProfileList();
-            toast("Profile renamed", "Profile name updated");
-          } catch (e) {
-            toast("Cannot rename", String(e?.message || e));
-          }
-        }
-
-
-        if (act === "terminate") {
-          const curr = profiles.find((x) => x.id === id);
-          const ok = window.confirm(
-            `Terminate WhatsApp session for "${curr?.name || id}"?\nYou will need to handshake again for this profile.`
-          );
-          if (!ok) return;
-          try {
-            await window.api.terminateProfileSession(id);
-            const res2 = await window.api.getProfiles();
-            profiles = res2.profiles || [];
-            activeProfileId = res2.activeProfileId || activeProfileId;
-            renderProfileSelect();
-            renderProfileList();
-            if (id === activeProfileId) {
-              setConnectionBadge(false, "Not connected");
-              el("waStatus").textContent = "Session terminated. Handshake required.";
-            }
-            toast("Session terminated", "Handshake is required to reconnect this profile");
-          } catch (e) {
-            toast("Cannot terminate", String(e?.message || e));
-          }
-        }
-        if (act === "del") {
-          try {
-            await window.api.deleteProfile(id);
-            const res2 = await window.api.getProfiles();
-            profiles = res2.profiles || [];
-            activeProfileId = res2.activeProfileId || null;
-            renderProfileSelect();
-            renderProfileList();
-            toast("Profile deleted", "Profile removed");
-          } catch (e) {
-            toast("Cannot delete", String(e?.message || e));
-          }
-        }
-      });
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = state.selectedAppointmentIds.has(id);
+    cb.addEventListener("change", () => {
+      if (cb.checked) state.selectedAppointmentIds.add(id);
+      else state.selectedAppointmentIds.delete(id);
+      renderAppointmentTable();
+      refreshAppointmentSummary();
     });
 
-    list.appendChild(item);
-  }
-}
-
-/* --------------------------- CSV ---------------------------- */
-function openCsvModal() {
-  renderCsvVariableMapping();
-  el("csvModal").classList.remove("hidden");
-}
-
-function closeCsvModal() {
-  el("csvModal").classList.add("hidden");
-}
-
-function renderCsvVariableMapping() {
-  const wrap = el("csvVarCols");
-  wrap.innerHTML = "";
-
-  const vars = getTemplateVariables();
-  if (vars.length === 0) {
-    const block = document.createElement("div");
-    block.innerHTML = `<label class="label">No template variables selected</label>`;
-    wrap.appendChild(block);
-    return;
+    const tdCb = document.createElement("td");
+    tdCb.appendChild(cb);
+    const tdTime = document.createElement("td");
+    tdTime.textContent = formatTimeRange(appt.Appt_Start_Time, appt.Appt_End_Time);
+    const tdPatient = document.createElement("td");
+    tdPatient.innerHTML = `<strong>${escapeHtml(appt.Patient_Name)}</strong><br/><span class="smallText">${escapeHtml(
+      appt.Patient_Phone_No || "-"
+    )}</span>`;
+    const tdDentist = document.createElement("td");
+    tdDentist.textContent = appt.Dentist_Name || "-";
+    const tdTreatment = document.createElement("td");
+    tdTreatment.textContent = appt.Treatment || "-";
+    const tdStatus = document.createElement("td");
+    tdStatus.innerHTML = appt.Status ? '<span class="badgeYes">Yes</span>' : '<span class="badgeNo">No</span>';
+    tr.append(tdCb, tdTime, tdPatient, tdDentist, tdTreatment, tdStatus);
+    body.appendChild(tr);
   }
 
-  for (const key of vars) {
-    const block = document.createElement("div");
-
-    const label = document.createElement("label");
-    label.className = "label";
-    label.textContent = `${key} col index`;
-
-    const input = document.createElement("input");
-    input.className = "input";
-    input.type = "number";
-    input.placeholder = "Optional";
-    input.setAttribute("data-var-col", key);
-
-    block.appendChild(label);
-    block.appendChild(input);
-    wrap.appendChild(block);
+  if (sorted.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="6" class="smallText">No appointments found for this branch/date.</td>';
+    body.appendChild(tr);
   }
+
+  refreshAppointmentSummary();
 }
 
-function readCsvMappingFromModal() {
-  const hasHeader = el("csvHasHeader").value === "true";
-  const phoneCol = Number(el("csvPhoneCol").value || 0);
-
-  const varCols = {};
-  document.querySelectorAll("[data-var-col]").forEach((node) => {
-    const key = node.getAttribute("data-var-col");
-    const valueRaw = String(node.value || "").trim();
-    if (!key || !valueRaw) return;
-    const idx = Number(valueRaw);
-    if (!Number.isFinite(idx)) return;
-    varCols[key] = idx;
-  });
-
-  return { hasHeader, phoneCol, varCols };
+function appointmentIsRemindEligible(appt) {
+  return toInt(appt.Appt_Start_Time) >= Date.now();
 }
 
-function mergeImportedRecipients(recipients, varsByPhone) {
-  const out = [];
-  for (const msisdn of Array.isArray(recipients) ? recipients : []) {
-    const key = String(msisdn || "").trim();
-    if (!key) continue;
-    out.push(
-      makeRecipientRow({
-        phone: key,
-        vars: varsByPhone && typeof varsByPhone === "object" ? varsByPhone[key] || {} : {}
+function appointmentIsFollowEligible(appt) {
+  return toInt(appt.Appt_Start_Time) < Date.now() && appt.Status === true;
+}
+
+function selectAppointmentsByRule(ruleFn) {
+  state.selectedAppointmentIds = new Set(
+    state.appointments
+      .filter((appt) => {
+        try {
+          return !!ruleFn(appt);
+        } catch {
+          return false;
+        }
       })
-    );
+      .map((appt) => String(appt.id))
+  );
+  renderAppointmentTable();
+}
+
+function monthRangeMonthsAgo(monthsAgoRaw) {
+  const monthsAgo = clamp(monthsAgoRaw, 1, 24, state.settings.marketingMonthsAgoDefault || 6);
+  const now = new Date();
+  const nowParts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  })
+    .formatToParts(now)
+    .reduce((acc, p) => {
+      acc[p.type] = p.value;
+      return acc;
+    }, {});
+
+  const currentYear = Number(nowParts.year);
+  const currentMonthIndex = Number(nowParts.month) - 1;
+  const targetIndex = currentYear * 12 + currentMonthIndex - monthsAgo;
+  const targetYear = Math.floor(targetIndex / 12);
+  const targetMonth = (targetIndex % 12) + 1;
+
+  const startTs = Date.UTC(targetYear, targetMonth - 1, 1, 0, 0, 0, 0) - 8 * 60 * 60 * 1000;
+  const endTs = Date.UTC(targetYear, targetMonth, 1, 0, 0, 0, 0) - 8 * 60 * 60 * 1000 - 1;
+  const monthName = new Intl.DateTimeFormat("en-US", { timeZone: TIMEZONE, month: "long", year: "numeric" }).format(
+    new Date(startTs)
+  );
+
+  return { monthsAgo, startTs, endTs, label: monthName };
+}
+
+function upsertMarketingRecipient(input) {
+  const src = input && typeof input === "object" ? input : {};
+  const phone = normalizePhone(src.phone);
+  if (!isValidPhone(phone)) return false;
+
+  const existing = state.marketingRecipients.find((x) => x.phone === phone);
+  if (existing) {
+    if (!existing.name && src.name) existing.name = String(src.name);
+    if (!existing.dentist && src.dentist) existing.dentist = String(src.dentist);
+    if (!existing.apptDate && src.apptDate) existing.apptDate = Number(src.apptDate);
+    return false;
   }
 
-  recipientsData = out.length > 0 ? out : [makeRecipientRow()];
-}
-
-function isRecipientRowEmpty(row) {
-  if (!row || typeof row !== "object") return true;
-  const phone = String(row.phone || "").trim();
-  if (phone) return false;
-  const vars = row.vars && typeof row.vars === "object" ? row.vars : {};
-  return Object.values(vars).every((v) => String(v || "").trim() === "");
-}
-
-function mergeWaContactsIntoRecipients(contacts) {
-  const list = Array.isArray(contacts) ? contacts : [];
-  const templateVars = getTemplateVariables();
-  const includeName = templateVars.includes("name");
-
-  // If table is still in initial blank state, replace it instead of appending.
-  if (recipientsData.length === 1 && isRecipientRowEmpty(recipientsData[0])) {
-    recipientsData = [];
-  }
-
-  const seen = new Set();
-  for (const row of recipientsData) {
-    const n = normalizeMsisdn(row.phone || "");
-    if (n.length >= 8) seen.add(n);
-  }
-
-  let added = 0;
-  for (const c of list) {
-    const msisdn = normalizeMsisdn(c?.msisdn || "");
-    if (msisdn.length < 8) continue;
-    if (seen.has(msisdn)) continue;
-
-    const row = makeRecipientRow({ phone: msisdn, vars: {} });
-    if (includeName) {
-      const name = String(c?.name || c?.notify || c?.verifiedName || "").trim();
-      if (name) row.vars.name = name;
-    }
-
-    recipientsData.push(row);
-    seen.add(msisdn);
-    added++;
-  }
-
-  if (recipientsData.length === 0) recipientsData = [makeRecipientRow()];
-  return added;
-}
-
-function normalizeWaContactRecord(c) {
-  const msisdn = normalizeMsisdn(c?.msisdn || c?.phone || "");
-  const jid = String(c?.jid || (msisdn ? `${msisdn}@s.whatsapp.net` : "")).trim();
-  const name = String(c?.name || "").trim();
-  const notify = String(c?.notify || "").trim();
-  const verifiedName = String(c?.verifiedName || "").trim();
-  const displayName = name || notify || verifiedName || msisdn || "Unknown";
-  const imgUrl = String(c?.imgUrl || "").trim();
-  const status = String(c?.status || "").trim();
-  return { msisdn, jid, name, notify, verifiedName, displayName, imgUrl, status };
-}
-
-function openWaContactsModal() {
-  el("waContactsModal").classList.remove("hidden");
-}
-
-function closeWaContactsModal() {
-  el("waContactsModal").classList.add("hidden");
-}
-
-function filterWaContactsRows() {
-  const q = String(el("waContactsSearch").value || "")
-    .trim()
-    .toLowerCase();
-  if (!q) {
-    waContactsFiltered = [...waContactsRows];
-    return;
-  }
-
-  waContactsFiltered = waContactsRows.filter((c) => {
-    const hay = `${c.displayName} ${c.name} ${c.notify} ${c.verifiedName} ${c.msisdn} ${c.jid} ${c.status}`.toLowerCase();
-    return hay.includes(q);
+  state.marketingRecipients.push({
+    id: `m_${phone}_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 7)}`,
+    phone,
+    name: String(src.name || "").trim(),
+    dentist: String(src.dentist || "").trim(),
+    apptDate: toInt(src.apptDate, 0),
+    selected: src.selected !== false
   });
+  return true;
 }
 
-function renderWaContactsTable() {
-  const body = el("waContactsBody");
-  body.innerHTML = "";
+function getSelectedMarketingRecipients() {
+  return state.marketingRecipients.filter((x) => x.selected);
+}
 
-  filterWaContactsRows();
+function refreshMarketingSummary() {
+  el("marketingSummary").textContent = `${getSelectedMarketingRecipients().length} selected / ${state.marketingRecipients.length} total`;
+}
 
-  for (const c of waContactsFiltered) {
+function syncMarketingSelectAll() {
+  const all = el("marketingSelectAll");
+  const total = state.marketingRecipients.length;
+  const selected = getSelectedMarketingRecipients().length;
+  all.checked = total > 0 && selected === total;
+  all.indeterminate = selected > 0 && selected < total;
+}
+
+function renderMarketingRecipients() {
+  const tbody = el("marketingRecipientsBody");
+  tbody.innerHTML = "";
+
+  for (const row of state.marketingRecipients) {
     const tr = document.createElement("tr");
 
     const tdPick = document.createElement("td");
     const cb = document.createElement("input");
     cb.type = "checkbox";
-    cb.checked = waContactSelection.has(c.msisdn);
+    cb.checked = !!row.selected;
     cb.addEventListener("change", () => {
-      if (cb.checked) waContactSelection.add(c.msisdn);
-      else waContactSelection.delete(c.msisdn);
-      updateWaContactsSelectionUi();
+      row.selected = !!cb.checked;
+      refreshMarketingSummary();
+      refreshMarketingPreview();
+      syncMarketingSelectAll();
     });
     tdPick.appendChild(cb);
-    tr.appendChild(tdPick);
-
-    const tdContact = document.createElement("td");
-    tdContact.innerHTML = `
-      <div class="waContactCell">
-        <div class="waAvatar">${c.imgUrl ? `<img src="${escapeHtml(c.imgUrl)}" alt="avatar" />` : escapeHtml((c.displayName || "?").slice(0, 1).toUpperCase())}</div>
-        <div class="waContactText">
-          <div class="waContactName">${escapeHtml(c.displayName)}</div>
-          <div class="waContactMeta">${escapeHtml(c.status || c.verifiedName || c.notify || c.name || "")}</div>
-        </div>
-      </div>
-    `;
-    tr.appendChild(tdContact);
-
-    const tdName = document.createElement("td");
-    tdName.innerHTML = `<span class="waNameText">${escapeHtml(c.name || c.notify || c.verifiedName || "-")}</span>`;
-    tr.appendChild(tdName);
 
     const tdPhone = document.createElement("td");
-    tdPhone.textContent = c.msisdn || "-";
-    tr.appendChild(tdPhone);
+    tdPhone.textContent = row.phone;
+    const tdName = document.createElement("td");
+    tdName.textContent = row.name || "-";
+    const tdDentist = document.createElement("td");
+    tdDentist.textContent = row.dentist || "-";
 
-    const tdJid = document.createElement("td");
-    tdJid.innerHTML = `<span class="waJidText">${escapeHtml(c.jid || "-")}</span>`;
-    tr.appendChild(tdJid);
-
-    body.appendChild(tr);
-  }
-
-  if (waContactsFiltered.length === 0) {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `<td colspan="5" class="smallMuted">No contacts found</td>`;
-    body.appendChild(tr);
-  }
-
-  updateWaContactsSelectionUi();
-}
-
-function updateWaContactsSelectionUi() {
-  const visible = waContactsFiltered.length;
-  let selectedVisible = 0;
-  for (const c of waContactsFiltered) {
-    if (waContactSelection.has(c.msisdn)) selectedVisible++;
-  }
-
-  const selectAll = el("waContactsSelectAll");
-  selectAll.checked = visible > 0 && selectedVisible === visible;
-  selectAll.indeterminate = selectedVisible > 0 && selectedVisible < visible;
-
-  el("waContactsCount").textContent = `${waContactSelection.size} selected (${waContactsRows.length} total)`;
-}
-
-async function loadWaContactsForPicker(options) {
-  const opts = options && typeof options === "object" ? options : {};
-  const forcePhotoRefresh = !!opts.forcePhotoRefresh;
-  const loadToken = ++waContactsLoadToken;
-  const body = el("waContactsBody");
-  body.innerHTML = `<tr><td colspan="5" class="smallMuted">Loading contacts...</td></tr>`;
-  try {
-    // First pass: fast list from local cache/memory, no photo fetch blocking.
-    const res = await window.api.waGetContacts({
-      includePhotos: false
+    const tdAction = document.createElement("td");
+    const btnDel = document.createElement("button");
+    btnDel.className = "btnGhost";
+    btnDel.textContent = "Del";
+    btnDel.addEventListener("click", () => {
+      state.marketingRecipients = state.marketingRecipients.filter((x) => x.id !== row.id);
+      renderMarketingRecipients();
+      refreshMarketingPreview();
+      toast("Recipient", "Removed from list");
     });
-    if (loadToken !== waContactsLoadToken) return;
-    if (!res?.ok) throw new Error(res?.error || "Unable to load contacts");
-    if (typeof res.connected === "boolean") {
-      setConnectionBadge(res.connected, res.connected ? "Connected" : "Not connected");
-    }
+    tdAction.appendChild(btnDel);
 
-    waContactsRows = (res.contacts || []).map(normalizeWaContactRecord).filter((c) => c.msisdn);
-    waContactsRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
-    waContactSelection = new Set();
-    el("waContactsSearch").value = "";
-    renderWaContactsTable();
+    tr.append(tdPick, tdPhone, tdName, tdDentist, tdAction);
+    tbody.appendChild(tr);
+  }
 
-    if (waContactsRows.length === 0) {
-      toast("Contacts", "No contacts available yet. Open chats or reconnect to sync contacts.");
-    }
+  if (state.marketingRecipients.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="5" class="smallText">No recipients yet.</td>';
+    tbody.appendChild(tr);
+  }
 
-    // Second pass: enrich photos in background; table updates when ready.
-    if (res.connected) {
-      window.api
-        .waGetContacts({
-          includePhotos: true,
-          maxPhotoFetch: 60,
-          photoFetchConcurrency: 3,
-          minMinutesBetweenPhotoChecks: forcePhotoRefresh ? 1 : 720
-        })
-        .then((photoRes) => {
-          if (loadToken !== waContactsLoadToken) return;
-          if (!photoRes?.ok) return;
-          waContactsRows = (photoRes.contacts || []).map(normalizeWaContactRecord).filter((c) => c.msisdn);
-          waContactsRows.sort((a, b) => a.displayName.localeCompare(b.displayName));
-          renderWaContactsTable();
-        })
-        .catch(() => {});
-    }
-  } catch (e) {
-    if (loadToken !== waContactsLoadToken) return;
-    body.innerHTML = `<tr><td colspan="5" class="smallMuted">${escapeHtml(String(e?.message || e))}</td></tr>`;
+  refreshMarketingSummary();
+  syncMarketingSelectAll();
+}
+
+function renderTemplateList() {
+  const list = el("templateList");
+  list.innerHTML = "";
+
+  for (const t of state.templates) {
+    const item = document.createElement("div");
+    item.className = `templateItem${state.currentTemplateId === t.id ? " active" : ""}`;
+    item.innerHTML = `<div class="templateItemName">${escapeHtml(t.name)}</div><div class="templateItemMeta">${escapeHtml(
+      templateSnippet(t.body)
+    )}</div>`;
+    item.addEventListener("click", () => {
+      state.currentTemplateId = t.id;
+      renderTemplateList();
+      loadTemplateEditor();
+      renderMarketingTemplateSelect();
+      refreshMarketingPreview();
+    });
+    list.appendChild(item);
+  }
+
+  if (state.templates.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "smallText";
+    empty.textContent = "No marketing templates.";
+    list.appendChild(empty);
   }
 }
 
-function csvEscape(v) {
-  const s = String(v ?? "");
-  if (s.includes('"') || s.includes(",") || s.includes("\n")) {
-    return `"${s.replaceAll('"', '""')}"`;
-  }
-  return s;
-}
-
-function csvSampleValue(key) {
-  const k = String(key || "").toLowerCase();
-  if (k === "name") return "Ali";
-  if (k === "branch") return "Bangi";
-  if (k === "date") return "10 Feb";
-  if (k === "time") return "3:00 PM";
-  if (k === "topic") return "quotation";
-  if (k === "doctor") return "Dr. Ashraf";
-  return "";
-}
-
-function downloadCsvTemplate() {
-  const t = getSelectedTemplate();
+function loadTemplateEditor() {
+  const t = getSelectedMarketingTemplate();
   if (!t) {
-    toast("No template", "Select a template first");
+    el("templateName").value = "";
+    el("templateBody").value = "";
+    el("templateSendPolicy").value = "once";
+    el("templateVariablesText").textContent = "Variables: -";
     return;
   }
 
-  const vars = getTemplateVariables(t);
-  const header = ["phone", ...vars];
-  const sample = ["60123456789", ...vars.map((k) => csvSampleValue(k))];
-
-  const content = [header.map(csvEscape).join(","), sample.map(csvEscape).join(",")].join("\n");
-  const blob = new Blob([content], { type: "text/csv;charset=utf-8;" });
-  const url = URL.createObjectURL(blob);
-
-  const safeName = String(t.name || "template")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "template";
-
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${safeName}_recipients_template.csv`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  el("templateName").value = t.name;
+  el("templateBody").value = t.body;
+  el("templateSendPolicy").value = t.sendPolicy;
+  const vars = extractTemplateVariables(t.body);
+  el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
 }
 
-/* --------------------------- Init ---------------------------- */
-async function init() {
-  const profileRes = await window.api.getProfiles();
-  profiles = profileRes.profiles || [];
-  activeProfileId = profileRes.activeProfileId || null;
+function renderMarketingTemplateSelect() {
+  const select = el("marketingTemplateSelect");
+  select.innerHTML = "";
 
-  templates = normalizeTemplates(await window.api.getTemplates());
-  currentTemplateId = templates[0]?.id || null;
-  const aiRes = await window.api.getAiRewriteConfig();
-  applyAiRewriteConfigToUi(aiRes?.config || defaultAiRewriteConfig);
+  for (const t of state.templates) {
+    const opt = document.createElement("option");
+    opt.value = t.id;
+    opt.textContent = t.name;
+    select.appendChild(opt);
+  }
 
-  recipientsData = [makeRecipientRow()];
+  if (state.templates.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No template";
+    select.appendChild(opt);
+    select.value = "";
+    return;
+  }
 
-  renderProfileSelect();
-  renderProfileList();
+  if (!state.currentTemplateId || !state.templates.some((x) => x.id === state.currentTemplateId)) {
+    state.currentTemplateId = state.templates[0].id;
+  }
 
-  refreshTemplateSelect();
+  select.value = state.currentTemplateId;
+}
+
+function refreshMarketingPreview() {
+  const template = getSelectedMarketingTemplate();
+  const recipient = getSelectedMarketingRecipients()[0];
+  if (!template) return (el("marketingPreview").textContent = "No marketing template selected.");
+  if (!recipient) return (el("marketingPreview").textContent = "Select at least one recipient to preview.");
+
+  const branch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
+  const vars = {
+    name: recipient.name || "Patient",
+    branch,
+    dentist: recipient.dentist || "",
+    date: recipient.apptDate ? formatDateForMessage(recipient.apptDate, "english") : "",
+    time: recipient.apptDate ? formatTimeForMessage(recipient.apptDate) : ""
+  };
+
+  el("marketingPreview").textContent = renderTemplate(template.body, vars);
+}
+function applySettingsToUi() {
+  const s = state.settings;
+  el("settingGapMin").value = String(s.gapMinSec || 7);
+  el("settingGapMax").value = String(s.gapMaxSec || 45);
+  el("settingMarketingMonths").value = String(s.marketingMonthsAgoDefault || 6);
+  el("marketingMonthsAgo").value = String(s.marketingMonthsAgoDefault || 6);
+}
+
+function applyAppointmentTemplatesToUi() {
+  const t = state.appointmentTemplates;
+  el("tplRemindBahasa").value = t.remindAppointment?.bahasa || "";
+  el("tplRemindEnglish").value = t.remindAppointment?.english || "";
+  el("tplFollowBahasa").value = t.followUp?.bahasa || "";
+  el("tplFollowEnglish").value = t.followUp?.english || "";
+  el("tplReviewBahasa").value = t.requestReview?.bahasa || "";
+  el("tplReviewEnglish").value = t.requestReview?.english || "";
+}
+
+function readAppointmentTemplatesFromUi() {
+  return {
+    remindAppointment: { bahasa: el("tplRemindBahasa").value, english: el("tplRemindEnglish").value },
+    followUp: { bahasa: el("tplFollowBahasa").value, english: el("tplFollowEnglish").value },
+    requestReview: { bahasa: el("tplReviewBahasa").value, english: el("tplReviewEnglish").value }
+  };
+}
+
+function normalizeGenderTitles(genderRaw) {
+  const g = String(genderRaw || "").toLowerCase();
+  if (g.includes("male") || g === "m" || g === "lelaki") return { title_bm: "Encik", title_en: "Mr" };
+  if (g.includes("female") || g === "f" || g === "perempuan") return { title_bm: "Cik", title_en: "Ms" };
+  return { title_bm: "Encik / Cik", title_en: "Mr / Mrs" };
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const arr = Array.isArray(items) ? items : [];
+  const lim = Math.max(1, Number(limit || 4));
+  const out = new Array(arr.length);
+  let cursor = 0;
+
+  async function worker() {
+    while (cursor < arr.length) {
+      const idx = cursor++;
+      try {
+        out[idx] = await mapper(arr[idx], idx);
+      } catch (e) {
+        out[idx] = { error: e };
+      }
+    }
+  }
+
+  const jobs = [];
+  for (let i = 0; i < lim; i++) jobs.push(worker());
+  await Promise.all(jobs);
+  return out;
+}
+
+async function prepareAppointmentSendItems(purposeKey, language) {
+  const selected = Array.from(state.selectedAppointmentIds).map((id) => getAppointmentById(id)).filter(Boolean);
+  if (selected.length === 0) throw new Error("Please select at least one appointment first");
+
+  const templateText = state.appointmentTemplates?.[purposeKey]?.[language] || "";
+  if (!String(templateText || "").trim()) throw new Error("Template text is empty. Update it in Template tab.");
+
+  const prepared = await mapWithConcurrency(selected, 5, async (appt) => {
+    let patient = null;
+    if (appt.ic_number) {
+      try {
+        const res = await window.api.clinicGetPatient({ ic_number: appt.ic_number });
+        patient = res?.patient || null;
+      } catch {
+        patient = null;
+      }
+    }
+
+    const branchInfo = getBranchByName(appt.Branch_Name) || {};
+    const titles = normalizeGenderTitles(patient?.gender);
+    const name = String(patient?.name || appt.Patient_Name || "Patient");
+    const phone = normalizePhone(patient?.phone || appt.Patient_Phone_No || "");
+
+    if (!isValidPhone(phone)) return { skip: true, reason: "Invalid or missing phone", name, phone };
+
+    const vars = {
+      name,
+      branch: appt.Branch_Name || branchInfo.label || "",
+      dentist: appt.Dentist_Name || "",
+      date: formatDateForMessage(appt.Appt_Date || appt.Appt_Start_Time, language),
+      weekday: formatWeekdayForMessage(appt.Appt_Date || appt.Appt_Start_Time, language),
+      time: formatTimeForMessage(appt.Appt_Start_Time),
+      address: branchInfo.address || "",
+      branch_phone: branchInfo.branch_phone || "",
+      google_direction: branchInfo.google_direction || "",
+      waze_direction: branchInfo.waze_direction || "",
+      google_review_link: branchInfo.Google_Review || "",
+      title_bm: titles.title_bm,
+      title_en: titles.title_en
+    };
+
+    return {
+      skip: false,
+      name,
+      phone,
+      text: renderTemplate(templateText, vars),
+      aiVariables: vars,
+      templateId: `appointment_${purposeKey}_${language}`
+    };
+  });
+
+  return prepared.filter((x) => x && !x.skip && x.phone && x.text);
+}
+
+function openConfirmModal({ title, subtitle, recipientsText, sampleText }) {
+  el("confirmTitle").textContent = title || "Confirm Send";
+  el("confirmSubtitle").textContent = subtitle || "";
+  el("confirmRecipients").textContent = recipientsText || "-";
+  el("confirmSample").textContent = sampleText || "-";
+  el("confirmModal").classList.remove("hidden");
+
+  return new Promise((resolve) => {
+    state.confirmResolver = resolve;
+  });
+}
+
+function closeConfirmModal(confirmed) {
+  el("confirmModal").classList.add("hidden");
+  if (state.confirmResolver) {
+    state.confirmResolver(!!confirmed);
+    state.confirmResolver = null;
+  }
+}
+
+async function sendPreparedItems(items, batchLabel, aiEnabled) {
+  const sendItems = (Array.isArray(items) ? items : []).map((x) => ({
+    phone: x.phone,
+    name: x.name,
+    text: x.text,
+    aiVariables: x.aiVariables || {},
+    templateId: x.templateId || batchLabel
+  }));
+
+  if (sendItems.length === 0) throw new Error("No valid recipients to send");
+  if (!state.waConnected) throw new Error("WhatsApp is not connected");
+
+  const confirmRecipients = sendItems
+    .slice(0, 40)
+    .map((x, i) => `${i + 1}. ${x.name || "-"} (${x.phone})`)
+    .join("\n");
+  const suffix = sendItems.length > 40 ? `\n... and ${sendItems.length - 40} more` : "";
+
+  const confirmed = await openConfirmModal({
+    title: "Confirm Send",
+    subtitle: `${sendItems.length} messages will be sent one-by-one`,
+    recipientsText: `${confirmRecipients}${suffix}`,
+    sampleText: sendItems[0].text
+  });
+
+  if (!confirmed) {
+    toast("Canceled", "Send canceled by user");
+    return null;
+  }
+
+  return await window.api.waSendPreparedBatch({
+    batchLabel,
+    items: sendItems,
+    pacing: { pattern: "random", minSec: state.settings.gapMinSec, maxSec: state.settings.gapMaxSec },
+    aiRewrite: aiEnabled
+      ? { enabled: true, prompt: AI_VARIATION_PROMPT, fallbackToOriginal: true }
+      : { enabled: false },
+    safety: { maxRecipients: 500 }
+  });
+}
+
+async function doAppointmentSend(purposeKey, langId, aiId) {
+  if (!state.waConnected) {
+    toast("WhatsApp", "Please connect WhatsApp first");
+    setActiveTab("connect");
+    return;
+  }
+
+  const items = await prepareAppointmentSendItems(purposeKey, el(langId).value);
+  if (items.length === 0) {
+    toast("No recipients", "No valid recipients were prepared.");
+    return;
+  }
+
+  const res = await sendPreparedItems(items, `appointment_${purposeKey}`, !!el(aiId).checked);
+  if (!res) return;
+  toast("Appointment send done", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
+}
+
+function readMarketingTemplateEditorToState() {
+  const t = getSelectedMarketingTemplate();
+  if (!t) return;
+  t.name = el("templateName").value.trim() || "Untitled";
+  t.body = el("templateBody").value || "";
+  t.sendPolicy = el("templateSendPolicy").value === "multiple" ? "multiple" : "once";
+  t.variables = extractTemplateVariables(t.body);
+}
+
+async function loadAppointments() {
+  const branch = el("apptBranchSelect").value;
+  const dateTs = ymdToKlMidnightTs(el("apptDateInput").value);
+  if (!branch) throw new Error("Please select a branch");
+  if (!dateTs) throw new Error("Please select a valid date");
+
+  const res = await window.api.clinicGetAppointmentList({ branch, date: dateTs });
+  state.appointments = Array.isArray(res?.appointments) ? res.appointments : [];
+  state.selectedAppointmentIds = new Set();
+  renderAppointmentTable();
+}
+
+async function loadPastPatients() {
+  const branch = el("marketingBranchSelect").value;
+  if (!branch) throw new Error("Please select branch");
+
+  const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
+  el("marketingMonthsAgo").value = String(range.monthsAgo);
+  el("pastPatientRangeText").textContent = `Loading ${range.label} (${formatDateForMessage(
+    range.startTs,
+    "english"
+  )} - ${formatDateForMessage(range.endTs, "english")})`;
+
+  const res = await window.api.clinicGetPastPatients({
+    branch,
+    start_day: range.startTs,
+    end_day: range.endTs
+  });
+  const rows = Array.isArray(res?.patients) ? res.patients : [];
+
+  let added = 0;
+  for (const row of rows) {
+    if (
+      upsertMarketingRecipient({
+        phone: row.Patient_Phone_No,
+        name: row.Patient_Name,
+        dentist: row.Dentist_Name,
+        apptDate: row.Appt_Date
+      })
+    ) {
+      added++;
+    }
+  }
+
+  renderMarketingRecipients();
+  refreshMarketingPreview();
+  el("pastPatientRangeText").textContent = `Loaded ${rows.length} rows from ${range.label} (added ${added})`;
+}
+
+async function sendMarketing() {
+  if (!state.waConnected) {
+    toast("WhatsApp", "Please connect WhatsApp first");
+    setActiveTab("connect");
+    return;
+  }
+
+  const template = getSelectedMarketingTemplate();
+  if (!template) throw new Error("Please select a template");
+
+  const selected = getSelectedMarketingRecipients();
+  if (selected.length === 0) throw new Error("Please select recipients");
+
+  const branch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
+  const items = selected
+    .map((row) => {
+      const vars = {
+        name: row.name || "Patient",
+        branch,
+        dentist: row.dentist || "",
+        date: row.apptDate ? formatDateForMessage(row.apptDate, "english") : "",
+        time: row.apptDate ? formatTimeForMessage(row.apptDate) : ""
+      };
+
+      return {
+        phone: row.phone,
+        name: row.name || "Patient",
+        text: renderTemplate(template.body, vars),
+        aiVariables: vars,
+        templateId: `marketing_${template.id}`
+      };
+    })
+    .filter((x) => isValidPhone(x.phone) && String(x.text || "").trim());
+
+  if (items.length === 0) throw new Error("No valid messages to send");
+
+  const res = await sendPreparedItems(items, `marketing_${template.id}`, !!el("aiMarketing").checked);
+  if (!res) return;
+  toast("Marketing send done", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
+}
+
+async function saveSettings() {
+  const next = {
+    gapMinSec: clamp(el("settingGapMin").value, 7, 45, 7),
+    gapMaxSec: clamp(el("settingGapMax").value, 7, 45, 45),
+    marketingMonthsAgoDefault: clamp(el("settingMarketingMonths").value, 1, 24, 6)
+  };
+  if (next.gapMaxSec < next.gapMinSec) next.gapMaxSec = next.gapMinSec;
+
+  const res = await window.api.saveClinicSettings(next);
+  state.settings = { ...DEFAULT_CLINIC_SETTINGS, ...(res?.settings || {}) };
+  applySettingsToUi();
+  toast("Settings", "Saved");
+}
+function renderProfiles() {
+  const select = el("profileSelect");
+  select.innerHTML = "";
+
+  for (const p of state.profiles) {
+    const opt = document.createElement("option");
+    opt.value = p.id;
+    opt.textContent = p.name;
+    select.appendChild(opt);
+  }
+  if (state.activeProfileId) select.value = state.activeProfileId;
+
+  const list = el("profileList");
+  list.innerHTML = "";
+
+  for (const p of state.profiles) {
+    const item = document.createElement("div");
+    item.className = "profileItem";
+    item.innerHTML = `
+      <div class="profileName">${escapeHtml(p.name)}</div>
+      <div class="profileMeta">${escapeHtml(p.id)}${p.id === state.activeProfileId ? " (active)" : ""}</div>
+      <div class="profileBtns">
+        <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Use</button>
+        <button class="btnGhost" data-act="rename" data-id="${escapeHtml(p.id)}">Rename</button>
+        <button class="btnGhost" data-act="terminate" data-id="${escapeHtml(p.id)}">Terminate</button>
+        <button class="btnGhost" data-act="delete" data-id="${escapeHtml(p.id)}">Delete</button>
+      </div>
+    `;
+
+    item.querySelectorAll("button").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.id;
+        const act = btn.dataset.act;
+        try {
+          if (act === "use") {
+            await window.api.setActiveProfile(id);
+            await refreshProfiles();
+            toast("Profile", "Switched active profile");
+          }
+
+          if (act === "rename") {
+            const current = state.profiles.find((x) => x.id === id);
+            const next = window.prompt("New profile name", current?.name || "");
+            if (!next) return;
+            await window.api.renameProfile(id, next);
+            await refreshProfiles();
+            toast("Profile", "Renamed");
+          }
+
+          if (act === "terminate") {
+            if (!window.confirm("Terminate this WhatsApp session?")) return;
+            await window.api.terminateProfileSession(id);
+            await refreshProfiles();
+            toast("Profile", "Session terminated");
+          }
+
+          if (act === "delete") {
+            if (!window.confirm("Delete this profile? This removes saved session.")) return;
+            await window.api.deleteProfile(id);
+            await refreshProfiles();
+            toast("Profile", "Deleted");
+          }
+        } catch (e) {
+          toast("Profile error", String(e?.message || e));
+        }
+      });
+    });
+
+    list.appendChild(item);
+  }
+}
+
+async function refreshProfiles() {
+  const res = await window.api.getProfiles();
+  state.profiles = Array.isArray(res?.profiles) ? res.profiles : [];
+  state.activeProfileId = res?.activeProfileId || null;
+  renderProfiles();
+}
+
+function setConnectModeUi() {
+  const pairing = el("connectMethod").value === "pairing";
+  el("pairingPhoneWrap").classList.toggle("hidden", !pairing);
+  el("pairingCodeBox").classList.toggle("hidden", !pairing);
+  el("qrImg").classList.toggle("hidden", pairing);
+}
+
+async function doHandshake() {
+  const method = el("connectMethod").value;
+  const phoneNumber = el("pairingPhone").value.trim();
+  el("qrImg").src = "";
+  el("pairingCodeText").textContent = "-";
+
+  await window.api.waHandshake({ method, phoneNumber });
+  toast("Handshake", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR...");
+}
+
+async function reloadTemplateData() {
+  const [templatesRaw, appointmentTplRes] = await Promise.all([
+    window.api.getTemplates(),
+    window.api.getAppointmentTemplates()
+  ]);
+
+  state.templates = (Array.isArray(templatesRaw) ? templatesRaw : []).map((t, i) => normalizeTemplate(t, i));
+  state.currentTemplateId = state.currentTemplateId || state.templates[0]?.id || null;
+  if (state.currentTemplateId && !state.templates.some((x) => x.id === state.currentTemplateId)) {
+    state.currentTemplateId = state.templates[0]?.id || null;
+  }
+
+  state.appointmentTemplates = {
+    ...DEFAULT_APPOINTMENT_TEMPLATES,
+    ...(appointmentTplRes?.templates || {})
+  };
+
   renderTemplateList();
-  loadTemplateToEditor();
-  renderRecipientsTable();
-  setProgress(0, 0);
+  loadTemplateEditor();
+  renderMarketingTemplateSelect();
+  applyAppointmentTemplatesToUi();
+  refreshMarketingPreview();
+}
 
-  document.querySelectorAll(".navItem").forEach((btn) => {
-    btn.addEventListener("click", () => switchView(btn.dataset.view));
+async function loadInitialDataAfterLogin() {
+  const userBranch = String(state.session.user?.Branch || "").trim();
+
+  const [settingsRes, branchRes, profileRes, connRes] = await Promise.all([
+    window.api.getClinicSettings(),
+    window.api.clinicGetBranchList(),
+    window.api.getProfiles(),
+    window.api.waGetConnectionState()
+  ]);
+
+  state.settings = { ...DEFAULT_CLINIC_SETTINGS, ...(settingsRes?.settings || {}) };
+  state.branches = Array.isArray(branchRes?.branches) ? branchRes.branches : [];
+  state.profiles = Array.isArray(profileRes?.profiles) ? profileRes.profiles : [];
+  state.activeProfileId = profileRes?.activeProfileId || null;
+
+  applySettingsToUi();
+  renderBranchesToSelect("apptBranchSelect", userBranch);
+  renderBranchesToSelect("marketingBranchSelect", userBranch);
+
+  el("apptDateInput").value = getTodayYmdKl();
+  const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
+  el("pastPatientRangeText").textContent = `Range: ${range.label}`;
+
+  renderProfiles();
+  setConnectModeUi();
+  setConnectionBadge(!!connRes?.connected, connRes?.text || "Not connected");
+
+  await reloadTemplateData();
+  await loadAppointments();
+  renderMarketingRecipients();
+  renderActivity();
+}
+
+function showLoginScreen() {
+  state.session = { authToken: "", user: {} };
+  state.appointments = [];
+  state.selectedAppointmentIds = new Set();
+  state.marketingRecipients = [];
+
+  el("appShell").classList.add("hidden");
+  el("loginScreen").classList.remove("hidden");
+  el("loginPassword").value = "";
+  el("loginStatus").textContent = "Use your clinic account to continue.";
+}
+
+function showAppShell() {
+  el("loginScreen").classList.add("hidden");
+  el("appShell").classList.remove("hidden");
+}
+
+async function afterLoginLoad() {
+  showAppShell();
+  updateHeaderGreeting();
+  setActiveTab("appointment");
+  await loadInitialDataAfterLogin();
+}
+
+async function tryRestoreSession() {
+  try {
+    const res = await window.api.clinicGetSession();
+    const session = res?.session || { authToken: "", user: {} };
+    if (!session.authToken) return showLoginScreen();
+
+    state.session = session;
+    try {
+      const refresh = await window.api.clinicRefreshMe();
+      state.session = refresh?.session || session;
+    } catch {
+      return showLoginScreen();
+    }
+
+    await afterLoginLoad();
+  } catch {
+    showLoginScreen();
+  }
+}
+function bindEvents() {
+  document.querySelectorAll(".tabBtn").forEach((btn) => {
+    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+  });
+
+  el("loginForm").addEventListener("submit", async (evt) => {
+    evt.preventDefault();
+    const email = el("loginEmail").value.trim();
+    const password = el("loginPassword").value;
+
+    if (!email || !password) {
+      el("loginStatus").textContent = "Email and password are required.";
+      return;
+    }
+
+    try {
+      el("btnLogin").disabled = true;
+      el("loginStatus").textContent = "Signing in...";
+      const res = await window.api.clinicLogin({ email, password });
+      state.session = res?.session || { authToken: "", user: {} };
+      await afterLoginLoad();
+      el("loginStatus").textContent = "";
+      toast("Login", "Logged in successfully");
+    } catch (e) {
+      el("loginStatus").textContent = `Login failed: ${String(e?.message || e)}`;
+    } finally {
+      el("btnLogin").disabled = false;
+    }
+  });
+
+  el("btnLogout").addEventListener("click", async () => {
+    try {
+      await window.api.clinicLogout();
+    } catch {
+      // ignore logout error
+    }
+    showLoginScreen();
+    toast("Session", "Logged out");
+  });
+
+  el("btnLoadAppointments").addEventListener("click", async () => {
+    try {
+      await loadAppointments();
+    } catch (e) {
+      toast("Appointments", String(e?.message || e));
+    }
+  });
+
+  el("btnApptSelectAll").addEventListener("click", () => {
+    state.selectedAppointmentIds = new Set(state.appointments.map((a) => String(a.id)));
+    renderAppointmentTable();
+  });
+
+  el("btnApptClearSelection").addEventListener("click", () => {
+    state.selectedAppointmentIds = new Set();
+    renderAppointmentTable();
+  });
+
+  el("btnSelectRemind").addEventListener("click", () => selectAppointmentsByRule(appointmentIsRemindEligible));
+  el("btnSelectFollow").addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
+  el("btnSelectReview").addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
+
+  el("btnSendRemind").addEventListener("click", async () => {
+    try {
+      await doAppointmentSend("remindAppointment", "langRemind", "aiRemind");
+    } catch (e) {
+      toast("Send error", String(e?.message || e));
+    }
+  });
+
+  el("btnSendFollow").addEventListener("click", async () => {
+    try {
+      await doAppointmentSend("followUp", "langFollow", "aiFollow");
+    } catch (e) {
+      toast("Send error", String(e?.message || e));
+    }
+  });
+
+  el("btnSendReview").addEventListener("click", async () => {
+    try {
+      await doAppointmentSend("requestReview", "langReview", "aiReview");
+    } catch (e) {
+      toast("Send error", String(e?.message || e));
+    }
+  });
+
+  el("btnAddMarketingFromText").addEventListener("click", () => {
+    const lines = (el("marketingPasteInput").value || "")
+      .split(/\r?\n/)
+      .map((x) => x.trim())
+      .filter(Boolean);
+
+    let added = 0;
+    for (const line of lines) {
+      const [phoneRaw, nameRaw] = line.split(",");
+      if (upsertMarketingRecipient({ phone: phoneRaw, name: (nameRaw || "").trim(), selected: true })) added++;
+    }
+
+    renderMarketingRecipients();
+    refreshMarketingPreview();
+    toast("Recipients", `Added ${added} entries`);
+  });
+
+  el("btnClearMarketingRecipients").addEventListener("click", () => {
+    state.marketingRecipients = [];
+    renderMarketingRecipients();
+    refreshMarketingPreview();
+  });
+
+  el("marketingSelectAll").addEventListener("change", () => {
+    const checked = !!el("marketingSelectAll").checked;
+    state.marketingRecipients.forEach((row) => {
+      row.selected = checked;
+    });
+    renderMarketingRecipients();
+    refreshMarketingPreview();
+  });
+
+  el("marketingTemplateSelect").addEventListener("change", () => {
+    state.currentTemplateId = el("marketingTemplateSelect").value;
+    renderTemplateList();
+    loadTemplateEditor();
+    refreshMarketingPreview();
+  });
+
+  el("btnLoadPastPatients").addEventListener("click", async () => {
+    try {
+      await loadPastPatients();
+      refreshMarketingPreview();
+    } catch (e) {
+      toast("Existing patients", String(e?.message || e));
+    }
+  });
+
+  el("marketingMonthsAgo").addEventListener("input", () => {
+    const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
+    el("pastPatientRangeText").textContent = `Range: ${range.label}`;
+  });
+
+  el("btnImportMarketingCsv").addEventListener("click", async () => {
+    try {
+      const mapping = { hasHeader: true, phoneCol: 0, varCols: { name: 1, dentist: 2, date: 3 } };
+      const res = await window.api.importCsv(mapping);
+      if (!res?.ok && res?.canceled) return;
+      if (!res?.ok) throw new Error(res?.error || "CSV import failed");
+
+      let added = 0;
+      for (const rawPhone of res.recipients || []) {
+        const vars = res.varsByPhone?.[rawPhone] || {};
+        if (
+          upsertMarketingRecipient({
+            phone: rawPhone,
+            name: vars.name || "",
+            dentist: vars.dentist || "",
+            apptDate: vars.date ? Date.parse(vars.date) : 0,
+            selected: true
+          })
+        ) {
+          added++;
+        }
+      }
+
+      renderMarketingRecipients();
+      refreshMarketingPreview();
+      toast("CSV", `Imported ${added} recipients`);
+    } catch (e) {
+      toast("CSV import", String(e?.message || e));
+    }
+  });
+
+  el("btnSendMarketing").addEventListener("click", async () => {
+    try {
+      await sendMarketing();
+    } catch (e) {
+      toast("Marketing send", String(e?.message || e));
+    }
+  });
+
+  el("templateName").addEventListener("input", () => {
+    readMarketingTemplateEditorToState();
+    renderTemplateList();
+    renderMarketingTemplateSelect();
+  });
+
+  el("templateBody").addEventListener("input", () => {
+    readMarketingTemplateEditorToState();
+    const t = getSelectedMarketingTemplate();
+    const vars = t ? extractTemplateVariables(t.body) : [];
+    el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("templateSendPolicy").addEventListener("change", () => {
+    readMarketingTemplateEditorToState();
+  });
+
+  el("btnNewTemplate").addEventListener("click", () => {
+    const id = `t_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 8)}`;
+    state.templates.push(
+      normalizeTemplate(
+        {
+          id,
+          name: "New template",
+          body: "Hello {name},",
+          variables: ["name"],
+          sendPolicy: "once"
+        },
+        state.templates.length
+      )
+    );
+    state.currentTemplateId = id;
+    renderTemplateList();
+    loadTemplateEditor();
+    renderMarketingTemplateSelect();
+  });
+
+  el("btnDeleteTemplate").addEventListener("click", () => {
+    const selected = getSelectedMarketingTemplate();
+    if (!selected) return;
+
+    if (!window.confirm(`Delete template \"${selected.name}\"?`)) return;
+
+    state.templates = state.templates.filter((t) => t.id !== selected.id);
+    state.currentTemplateId = state.templates[0]?.id || null;
+    renderTemplateList();
+    loadTemplateEditor();
+    renderMarketingTemplateSelect();
+    refreshMarketingPreview();
+  });
+
+  el("btnSaveTemplate").addEventListener("click", async () => {
+    try {
+      readMarketingTemplateEditorToState();
+      const normalized = state.templates.map((t, idx) => normalizeTemplate(t, idx));
+      await window.api.saveTemplates(normalized);
+      state.templates = normalized;
+      renderTemplateList();
+      renderMarketingTemplateSelect();
+      toast("Templates", "Marketing templates saved");
+    } catch (e) {
+      toast("Templates", String(e?.message || e));
+    }
+  });
+
+  el("btnSaveAppointmentTemplates").addEventListener("click", async () => {
+    try {
+      const payload = readAppointmentTemplatesFromUi();
+      const res = await window.api.saveAppointmentTemplates(payload);
+      state.appointmentTemplates = {
+        ...DEFAULT_APPOINTMENT_TEMPLATES,
+        ...(res?.templates || {})
+      };
+      applyAppointmentTemplatesToUi();
+      toast("Templates", "Appointment templates saved");
+    } catch (e) {
+      toast("Templates", String(e?.message || e));
+    }
+  });
+
+  el("btnImportTemplates").addEventListener("click", async () => {
+    try {
+      const res = await window.api.importTemplatesBundle();
+      if (!res?.ok && res?.canceled) return;
+      if (!res?.ok) throw new Error("Import failed");
+      await reloadTemplateData();
+      toast("Templates", `Imported. Marketing: ${res.marketingCount}`);
+    } catch (e) {
+      toast("Templates import", String(e?.message || e));
+    }
+  });
+
+  el("btnExportTemplates").addEventListener("click", async () => {
+    try {
+      const res = await window.api.exportTemplatesBundle();
+      if (!res?.ok && res?.canceled) return;
+      if (!res?.ok) throw new Error("Export failed");
+      toast("Templates", `Exported to ${res.filePath}`);
+    } catch (e) {
+      toast("Templates export", String(e?.message || e));
+    }
+  });
+
+  el("btnSaveSettings").addEventListener("click", async () => {
+    try {
+      await saveSettings();
+    } catch (e) {
+      toast("Settings", String(e?.message || e));
+    }
+  });
+
+  el("connectMethod").addEventListener("change", setConnectModeUi);
+  el("btnHandshake").addEventListener("click", async () => {
+    try {
+      await doHandshake();
+    } catch (e) {
+      toast("Handshake", String(e?.message || e));
+    }
   });
 
   el("profileSelect").addEventListener("change", async () => {
-    const id = el("profileSelect").value;
-    setConnectionBadge(false, "Connecting...");
-    el("waStatus").textContent = "Connecting...";
-    const res = await window.api.setActiveProfile(id);
-    activeProfileId = res.activeProfileId;
-    renderProfileSelect();
-    renderProfileList();
-    await waitForConnectionSync();
-    toast("Profile selected", "Switched profile and attempting reconnect");
-  });
-
-  function setConnectUiMode() {
-    const method = el("connectMethod")?.value || "qr";
-    const isPairing = method === "pairing";
-    el("pairingPhoneWrap")?.classList.toggle("hidden", !isPairing);
-    el("pairingBox")?.classList.toggle("hidden", !isPairing);
-    el("qrImg")?.classList.toggle("hidden", isPairing);
-  }
-
-  async function doHandshake() {
-    const method = el("connectMethod")?.value || "qr";
-    const phoneNumber = (el("pairingPhone")?.value || "").trim();
-
-    el("qrImg").src = "";
-    el("pairingCode").textContent = "-";
-
     try {
-      await window.api.waHandshake({ method, phoneNumber });
-      toast("Handshake", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR...");
+      const id = el("profileSelect").value;
+      if (!id) return;
+      await window.api.setActiveProfile(id);
+      await refreshProfiles();
+      const status = await window.api.waGetConnectionState();
+      setConnectionBadge(!!status?.connected, status?.text || "Not connected");
     } catch (e) {
-      toast("Handshake failed", String(e?.message || e));
+      toast("Profile", String(e?.message || e));
     }
-  }
-
-  el("connectMethod").addEventListener("change", () => {
-    setConnectUiMode();
   });
-
-  el("btnHandshake").addEventListener("click", doHandshake);
-  el("btnHandshakeTop").addEventListener("click", async () => {
-    await doHandshake();
-    switchView("connect");
-  });
-
-  setConnectUiMode();
 
   el("btnCreateProfile").addEventListener("click", async () => {
     const name = el("newProfileName").value.trim();
-    if (!name) {
-      toast("Missing name", "Please enter a profile name");
-      return;
+    if (!name) return toast("Profile", "Please enter profile name");
+
+    try {
+      await window.api.createProfile(name);
+      el("newProfileName").value = "";
+      await refreshProfiles();
+      toast("Profile", "Created");
+    } catch (e) {
+      toast("Profile", String(e?.message || e));
     }
-    await window.api.createProfile(name);
-    const res = await window.api.getProfiles();
-    profiles = res.profiles || [];
-    activeProfileId = res.activeProfileId || activeProfileId;
-    el("newProfileName").value = "";
-    renderProfileSelect();
-    renderProfileList();
-    toast("Profile created", "Select it and connect");
   });
-
-  el("btnNewTpl").addEventListener("click", () => {
-    const id = uuid();
-    const t = { id, name: "New template", body: "Hi {name},", variables: ["name"], sendPolicy: "once" };
-    templates.push(normalizeTemplate(t, templates.length));
-    currentTemplateId = id;
-    renderTemplateList();
-    loadTemplateToEditor();
-    refreshTemplateSelect();
-    renderRecipientsTable();
-    refreshSendPolicyText();
-    refreshSendPreview();
-    toast("Template created", "A new template has been added");
-  });
-
-  el("btnSaveTpl").addEventListener("click", async () => {
-    const t = getSelectedTemplate();
-    if (!t) return;
-
-    t.name = el("tplName").value.trim() || "Untitled";
-    t.body = el("tplBody").value || "";
-    t.sendPolicy = el("tplSendPolicy").value === "multiple" ? "multiple" : "once";
-    syncTemplateVarsFromBody(t);
-
-    templates = normalizeTemplates(templates);
-    await window.api.saveTemplates(templates);
-
-    renderTemplateList();
-    refreshTemplateSelect();
-    loadTemplateToEditor();
-    renderRecipientsTable();
-    refreshSendPolicyText();
-    refreshSendPreview();
-
-    toast("Saved", "Templates saved successfully");
-  });
-
-  el("btnDeleteTpl").addEventListener("click", async () => {
-    if (!currentTemplateId) return;
-
-    templates = templates.filter((x) => x.id !== currentTemplateId);
-    currentTemplateId = templates[0]?.id || null;
-
-    await window.api.saveTemplates(templates);
-
-    refreshTemplateSelect();
-    renderTemplateList();
-    loadTemplateToEditor();
-    renderRecipientsTable();
-    refreshSendPolicyText();
-    refreshSendPreview();
-
-    toast("Deleted", "Template deleted");
-  });
-
-  el("btnClearSentMarks").addEventListener("click", async () => {
-    const t = getSelectedTemplate();
-    if (!t) {
-      toast("No template", "Select a template first");
-      return;
-    }
-    await window.api.clearSentForTemplate(t.id);
-    toast("Cleared", "Sent marks cleared for this template");
-  });
-
-  el("tplName").addEventListener("input", () => {
-    const t = getSelectedTemplate();
-    if (!t) return;
-    t.name = el("tplName").value;
-    renderTemplateList();
-    refreshTemplateSelect();
-  });
-
-  el("tplBody").addEventListener("input", () => {
-    const t = getSelectedTemplate();
-    if (!t) return;
-    t.body = el("tplBody").value || "";
-    syncTemplateVarsFromBody(t);
-    renderTemplateVariableList();
-    refreshTemplatePreview();
-    renderRecipientsTable();
-    renderCsvVariableMapping();
-    refreshSendPreview();
-  });
-
-  el("tplSendPolicy").addEventListener("change", () => {
-    const t = getSelectedTemplate();
-    if (!t) return;
-    t.sendPolicy = el("tplSendPolicy").value === "multiple" ? "multiple" : "once";
-    refreshSendPolicyText();
-  });
-
-  el("btnAddTplVar").addEventListener("click", () => {
-    const t = getSelectedTemplate();
-    if (!t) return;
-
-    const raw = String(el("tplVarName").value || "").trim();
-    if (!isValidTemplateVarName(raw)) {
-      toast("Invalid variable", "Use letters/numbers/underscore, and start with a letter");
-      return;
-    }
-
-    const vars = getTemplateVariables(t);
-    if (!vars.includes(raw)) vars.push(raw);
-    t.variables = vars;
-    el("tplVarName").value = "";
-    renderTemplateVariableList();
-    renderRecipientsTable();
-    renderCsvVariableMapping();
-    refreshSendPreview();
-  });
-
-  el("tplSelect").addEventListener("change", () => {
-    currentTemplateId = el("tplSelect").value;
-    renderTemplateList();
-    loadTemplateToEditor();
-    renderRecipientsTable();
-    refreshSendPolicyText();
-    renderCsvVariableMapping();
-    refreshSendPreview();
-  });
-
-  el("btnAddRecipientRow").addEventListener("click", () => {
-    recipientsData.push(makeRecipientRow());
-    renderRecipientsTable();
-    refreshRecipientCount();
-    refreshSendPreview();
-  });
-  el("btnClearRecipients").addEventListener("click", () => {
-    recipientsData = [makeRecipientRow()];
-    renderRecipientsTable();
-    refreshRecipientCount();
-    refreshSendPreview();
-    toast("Recipients cleared", "Recipient list reset");
-  });
-
-  el("btnImportWaContacts").addEventListener("click", async () => {
-    openWaContactsModal();
-    await loadWaContactsForPicker();
-  });
-
-  el("btnCloseWaContactsModal").addEventListener("click", () => closeWaContactsModal());
-  el("waContactsModalBackdrop").addEventListener("click", () => closeWaContactsModal());
-  el("btnRefreshWaContacts").addEventListener("click", async () => {
-    await loadWaContactsForPicker({ forcePhotoRefresh: true });
-  });
-  el("waContactsSearch").addEventListener("input", () => {
-    renderWaContactsTable();
-  });
-  el("waContactsSelectAll").addEventListener("change", () => {
-    const checked = !!el("waContactsSelectAll").checked;
-    for (const c of waContactsFiltered) {
-      if (checked) waContactSelection.add(c.msisdn);
-      else waContactSelection.delete(c.msisdn);
-    }
-    renderWaContactsTable();
-  });
-  el("btnImportSelectedWaContacts").addEventListener("click", () => {
-    const selected = waContactsRows.filter((c) => waContactSelection.has(c.msisdn));
-    if (selected.length === 0) {
-      toast("Contacts", "Please tick at least one contact");
-      return;
-    }
-
-    const added = mergeWaContactsIntoRecipients(selected);
-    renderRecipientsTable();
-    refreshRecipientCount();
-    refreshSendPreview();
-    closeWaContactsModal();
-    toast("Contacts loaded", `Added ${added} selected contacts`);
-  });
-
-  el("btnDownloadCsvTemplate").addEventListener("click", () => {
-    downloadCsvTemplate();
-  });
-
-  ["aiEnable", "aiEndpoint", "aiAuthToken", "aiPrompt", "aiTimeoutMs", "aiFallback"].forEach((id) => {
-    const node = el(id);
-    if (!node) return;
-    const evName = node.tagName === "INPUT" && node.type === "checkbox" ? "change" : "input";
-    node.addEventListener(evName, () => {
-      if (id === "aiEnable") setAiRewriteUiEnabled(!!el("aiEnable").checked);
-      scheduleSaveAiRewriteConfig();
-    });
-  });
-
-  el("pacingPattern").addEventListener("change", () => refreshSendPreview());
-  el("minSec").addEventListener("input", () => refreshSendPreview());
-  el("maxSec").addEventListener("input", () => refreshSendPreview());
 
   el("btnClearActivity").addEventListener("click", () => {
-    activityRows = [];
-    renderActivityTable();
-    toast("Cleared", "Activity table cleared");
+    state.activityRows = [];
+    renderActivity();
   });
 
-  el("btnImportCsv").addEventListener("click", () => openCsvModal());
-  el("btnCloseCsvModal").addEventListener("click", () => closeCsvModal());
-  el("csvModalBackdrop").addEventListener("click", () => closeCsvModal());
-
-  el("btnPickCsvAndImport").addEventListener("click", async () => {
-    const mapping = readCsvMappingFromModal();
-    try {
-      const res = await window.api.importCsv(mapping);
-      if (!res.ok && res.canceled) {
-        toast("Canceled", "CSV import canceled");
-        return;
-      }
-      if (!res.ok) {
-        toast("CSV error", res.error || "Failed to import");
-        return;
-      }
-
-      mergeImportedRecipients(res.recipients || [], res.varsByPhone || {});
-      renderRecipientsTable();
-      refreshRecipientCount();
-      refreshSendPreview();
-      closeCsvModal();
-      toast("Imported", `Loaded ${res.recipients?.length || 0} recipients`);
-    } catch (e) {
-      toast("CSV import failed", String(e?.message || e));
-    }
-  });
-
-  el("btnSend").addEventListener("click", async () => {
-    if (!waConnected) {
-      toast("Not connected", "Connect WhatsApp first");
-      switchView("connect");
-      return;
-    }
-
-    const t = getSelectedTemplate();
-    if (!t) {
-      toast("No template", "Please create or select a template first");
-      switchView("templates");
-      return;
-    }
-
-    const payloadData = getSendPayload();
-    if (payloadData.recipients.length === 0) {
-      toast("No recipients", "Please add at least one valid phone number");
-      return;
-    }
-
-    const pacing = readPacing();
-    const skipAlreadySent = t.sendPolicy !== "multiple";
-    const aiRewrite = readAiRewriteConfigFromUi();
-    if (aiRewrite.enabled && !aiRewrite.endpoint) {
-      toast("AI rewrite", "Please set backend endpoint URL or disable AI rewrite");
-      return;
-    }
-    if (aiRewrite.enabled && !aiRewrite.prompt) {
-      toast("AI rewrite", "Please set rewrite prompt or disable AI rewrite");
-      return;
-    }
-
-    setProgress(0, payloadData.recipients.length);
-    toast("Batch started", `Processing ${payloadData.recipients.length} recipients`);
-    switchView("activity");
-
-    try {
-      const res = await window.api.waSendBatch({
-        templateId: t.id,
-        templateBody: t.body,
-        recipients: payloadData.recipients,
-        varsByPhone: payloadData.varsByPhone,
-        aiRewrite,
-        pacing,
-        safety: { maxRecipients: 200 },
-        skipAlreadySent
-      });
-
-      toast("Batch finished", `Sent: ${res.sent}, Skipped: ${res.skipped}, Failed: ${res.failed}`);
-      setProgress(payloadData.recipients.length, payloadData.recipients.length);
-    } catch (e) {
-      toast("Batch error", String(e?.message || e));
-    }
-  });
+  el("btnConfirmSend").addEventListener("click", () => closeConfirmModal(true));
+  el("btnCancelConfirm").addEventListener("click", () => closeConfirmModal(false));
+  el("confirmModalBackdrop").addEventListener("click", () => closeConfirmModal(false));
 
   window.api.onQR((dataUrl) => {
-    el("qrImg").src = dataUrl;
+    el("qrImg").src = dataUrl || "";
   });
 
   window.api.onPairingCode((code) => {
-    el("pairingCode").textContent = String(code || "-");
+    el("pairingCodeText").textContent = String(code || "-");
   });
 
-  window.api.onStatus((s) => {
-    if (s?.profileId && activeProfileId && s.profileId !== activeProfileId) return;
-    el("waStatus").textContent = s.text || "Status updated";
-    const connected = !!s.connected;
-    setConnectionBadge(connected, s.text || (connected ? "Connected" : "Not connected"));
-    if (connected) {
-      window.api
-        .getProfiles()
-        .then((res) => {
-          profiles = res.profiles || [];
-          activeProfileId = res.activeProfileId || activeProfileId;
-          renderProfileSelect();
-          renderProfileList();
-        })
-        .catch(() => {});
-    }
-
-    const active = profiles.find((x) => x.id === activeProfileId);
-    el("waProfileText").textContent = active ? `${active.name} (${active.id})` : "-";
-
-    toast("WhatsApp status", s.text || "Updated");
+  window.api.onStatus((status) => {
+    if (status?.profileId && state.activeProfileId && status.profileId !== state.activeProfileId) return;
+    setConnectionBadge(!!status?.connected, status?.text || "Not connected");
   });
 
-  window.api.onBatchProgress((p) => {
-    if (!p) return;
-
-    addActivityRow({
-      ts: p.ts || "",
-      phone: p.phone || "",
-      status: p.status || "failed",
-      error: p.error || ""
+  window.api.onBatchProgress((row) => {
+    if (!row) return;
+    pushActivity({
+      ts: row.ts || "",
+      phone: row.phone || "",
+      status: row.status || "failed",
+      error: row.error || ""
     });
-
-    if (p.total && p.index) {
-      const done =
-        p.status === "sent" || p.status === "failed" || p.status === "skipped"
-          ? p.index
-          : Math.max(0, p.index - 1);
-      setProgress(done, p.total);
-    }
   });
+}
 
-  setConnectionBadge(false, "Connecting...");
-  switchView("connect");
-  refreshRecipientCount();
-  refreshTemplatePreview();
-  refreshSendPolicyText();
-  refreshSendPreview();
-
-  await syncConnectionStateFromBackend();
-  await waitForConnectionSync();
+async function init() {
+  bindEvents();
+  await tryRestoreSession();
 }
 
 init().catch((e) => {
-  console.error(e);
   toast("Init error", String(e?.message || e));
 });
-

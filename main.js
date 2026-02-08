@@ -36,6 +36,8 @@ const invalidSessionProfiles = new Set();
 const restartRecoveryDoneByAttempt = new Set();
 let lastFetchedWaVersion = null;
 let lastFetchedWaVersionAt = 0;
+const contactNameSyncByProfile = new Map();
+const lastContactNameSyncAtByProfile = new Map();
 
 // Used to ignore late events from old sockets
 let handshakeAttemptId = 0;
@@ -48,9 +50,428 @@ const profilesRootDir = path.join(userDataDir, "wa_profiles");
 
 const dataDir = path.join(__dirname, "data");
 const templatesFile = path.join(dataDir, "templates.json");
+const CLINIC_API_BASE = "https://xqoc-ewo0-x3u2.s2.xano.io";
+const CLINIC_TZ = "Asia/Kuala_Lumpur";
+const CLINIC_AUTH_SESSION_KEY = "clinicAuthSession";
+const CLINIC_SETTINGS_KEY = "clinicSettings";
+const CLINIC_APPOINTMENT_TEMPLATES_KEY = "clinicAppointmentTemplates";
+const CLINIC_API_KEY_AUTH = "api:s4bMNy03";
+const CLINIC_API_KEY_DATA = "api:lY50ALPv";
+
+const DEFAULT_CLINIC_SETTINGS = {
+  timezone: CLINIC_TZ,
+  gapMinSec: 7,
+  gapMaxSec: 45,
+  marketingMonthsAgoDefault: 6
+};
+
+const DEFAULT_APPOINTMENT_TEMPLATES = {
+  remindAppointment: {
+    bahasa: [
+      "Assalamualaikum/Selamat sejahtera {name}. Anda ada temujanji di {branch}.",
+      "",
+      "Tarikh: {date} ({weekday})",
+      "Masa: {time}",
+      "",
+      "Anda digalakkan hadir 15 minit awal dan tidak lewat lebih dari 10 minit dari waktu temujanji. Jika lewat, temujanji mungkin akan terpaksa dibatalkan jika terdapat kekangan waktu di klinik.",
+      "",
+      "Maklumkan kepada kami sekiranya anda tidak dapat menghadiri temujanji ye.",
+      "",
+      "Lokasi kami : {branch} {address}",
+      "No Tel: {branch_phone}",
+      "Google Map: {google_direction}",
+      "Waze: {waze_direction}",
+      "",
+      "Jumpa nanti."
+    ].join("\n"),
+    english: [
+      "Hello {title_en} {name}. Your appointment at {branch} is confirmed.",
+      "",
+      "Date: {date} ({weekday})",
+      "Time: {time}",
+      "",
+      "You are encouraged to arrive 15 minutes early and not later than 10 minutes past the appointment time. If delayed, the appointment may need to be canceled due to time constraints at the clinic.",
+      "",
+      "Please inform us if you are unable to attend the appointment.",
+      "",
+      "Our location : {branch} {address}",
+      "No Tel: {branch_phone}",
+      "Google Map: {google_direction}",
+      "Waze: {waze_direction}",
+      "",
+      "See you."
+    ].join("\n")
+  },
+  followUp: {
+    bahasa: [
+      "Assalamualaikum/Selamat sejahtera {title_bm} {name}.",
+      "",
+      "Saya staf dari {branch}.",
+      "",
+      "Kami nak follow up selepas sesi rawatan semalam. Macam mana keadaan gigi selepas buat rawatan semalam ye? Ada rasa sakit / tak selesa ke?"
+    ].join("\n"),
+    english: [
+      "Hello {title_en} {name}.",
+      "",
+      "I'm from {branch}.",
+      "",
+      "We would like to follow up after yesterday's treatment session. How is the condition of your teeth after the treatment yesterday? Do you feel any pain or discomfort?"
+    ].join("\n")
+  },
+  requestReview: {
+    bahasa: [
+      "Kalau {title_bm} kelapangan, minta jasa baik untuk bagi kami review di bawah untuk cawangan {branch} dan {dentist} ye.",
+      "",
+      "Google: {google_review_link}",
+      "Facebook: https://bit.ly/3rYsqvy",
+      "",
+      "Review tau, ianya akan sangat membantu kami hehe.",
+      "",
+      "Terima kasih."
+    ].join("\n"),
+    english: [
+      "If you have the time, we kindly request that you provide us with a review for {branch} and {dentist} through the following links:",
+      "",
+      "Google: {google_review_link}",
+      "Facebook: https://bit.ly/3rYsqvy",
+      "",
+      "We will really appreciate it as the review will really help us.",
+      "",
+      "Thank you in advance."
+    ].join("\n")
+  }
+};
 
 function ensureDir(p) {
   if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+}
+
+function cleanString(v) {
+  return String(v || "").trim();
+}
+
+function clampInt(raw, min, max, fallback) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return fallback;
+  const rounded = Math.round(n);
+  return Math.min(max, Math.max(min, rounded));
+}
+
+function normalizeClinicSettings(input) {
+  const src = input && typeof input === "object" ? input : {};
+  const gapMinSec = clampInt(src.gapMinSec, 7, 45, DEFAULT_CLINIC_SETTINGS.gapMinSec);
+  const gapMaxCandidate = clampInt(src.gapMaxSec, 7, 45, DEFAULT_CLINIC_SETTINGS.gapMaxSec);
+  const gapMaxSec = Math.max(gapMinSec, gapMaxCandidate);
+  const marketingMonthsAgoDefault = clampInt(src.marketingMonthsAgoDefault, 1, 24, 6);
+
+  return {
+    timezone: CLINIC_TZ,
+    gapMinSec,
+    gapMaxSec,
+    marketingMonthsAgoDefault
+  };
+}
+
+function getClinicSettings() {
+  const raw = store.get(CLINIC_SETTINGS_KEY);
+  return normalizeClinicSettings({ ...DEFAULT_CLINIC_SETTINGS, ...(raw || {}) });
+}
+
+function saveClinicSettings(input) {
+  const next = normalizeClinicSettings({ ...getClinicSettings(), ...(input || {}) });
+  store.set(CLINIC_SETTINGS_KEY, next);
+  return next;
+}
+
+function normalizeAuthUser(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+  const keys = ["name", "email", "nickname", "Gender", "Role", "Branch", "dept", "Access"];
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(src, key)) continue;
+    const val = src[key];
+    if (Array.isArray(val)) out[key] = val.map((x) => cleanString(x)).filter(Boolean);
+    else if (val === null || val === undefined) out[key] = "";
+    else out[key] = cleanString(val);
+  }
+  return out;
+}
+
+function normalizeAuthSession(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const authToken = cleanString(src.authToken);
+  return {
+    authToken,
+    user: normalizeAuthUser(src.user),
+    loggedInAt: cleanString(src.loggedInAt)
+  };
+}
+
+function getAuthSession() {
+  const raw = store.get(CLINIC_AUTH_SESSION_KEY);
+  return normalizeAuthSession(raw || {});
+}
+
+function saveAuthSession(authToken, user) {
+  const session = normalizeAuthSession({
+    authToken,
+    user,
+    loggedInAt: nowIsoShort()
+  });
+  store.set(CLINIC_AUTH_SESSION_KEY, session);
+  return session;
+}
+
+function clearAuthSession() {
+  store.set(CLINIC_AUTH_SESSION_KEY, { authToken: "", user: {}, loggedInAt: "" });
+}
+
+function normalizeAppointmentTemplateEntry(rawEntry, fallback) {
+  const src = rawEntry && typeof rawEntry === "object" ? rawEntry : {};
+  return {
+    bahasa: cleanString(src.bahasa) || fallback.bahasa,
+    english: cleanString(src.english) || fallback.english
+  };
+}
+
+function normalizeAppointmentTemplates(input) {
+  const src = input && typeof input === "object" ? input : {};
+  return {
+    remindAppointment: normalizeAppointmentTemplateEntry(
+      src.remindAppointment,
+      DEFAULT_APPOINTMENT_TEMPLATES.remindAppointment
+    ),
+    followUp: normalizeAppointmentTemplateEntry(src.followUp, DEFAULT_APPOINTMENT_TEMPLATES.followUp),
+    requestReview: normalizeAppointmentTemplateEntry(src.requestReview, DEFAULT_APPOINTMENT_TEMPLATES.requestReview)
+  };
+}
+
+function getAppointmentTemplates() {
+  const raw = store.get(CLINIC_APPOINTMENT_TEMPLATES_KEY);
+  return normalizeAppointmentTemplates(raw || {});
+}
+
+function saveAppointmentTemplates(input) {
+  const next = normalizeAppointmentTemplates({ ...getAppointmentTemplates(), ...(input || {}) });
+  store.set(CLINIC_APPOINTMENT_TEMPLATES_KEY, next);
+  return next;
+}
+
+function clinicAuthHeaders(authToken, contentTypeJson = true) {
+  const headers = {};
+  if (contentTypeJson) headers["Content-Type"] = "application/json";
+  const token = cleanString(authToken);
+  if (token) headers.Authorization = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
+  return headers;
+}
+
+async function clinicFetchJson(url, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const res = await fetch(url, opts);
+  const raw = await res.text();
+  let data = {};
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    throw new Error(`API returned non-JSON response (${res.status})`);
+  }
+
+  if (!res.ok) {
+    const msg =
+      cleanString(data?.message) ||
+      cleanString(data?.error?.message) ||
+      cleanString(data?.error) ||
+      `HTTP ${res.status}`;
+    const err = new Error(msg);
+    err.statusCode = res.status;
+    err.apiCode = cleanString(data?.code);
+    err.url = url;
+    throw err;
+  }
+
+  if (String(data?.status || "").toLowerCase() === "error") {
+    const msg = cleanString(data?.message) || cleanString(data?.error) || "API returned error status";
+    const err = new Error(msg);
+    err.statusCode = res.status;
+    err.apiCode = cleanString(data?.code);
+    err.url = url;
+    throw err;
+  }
+
+  return data;
+}
+
+function clinicIsRouteNotFoundError(err) {
+  const msg = String(err?.message || "");
+  const apiCode = String(err?.apiCode || "");
+  const statusCode = Number(err?.statusCode || 0);
+  return statusCode === 404 || apiCode === "ERROR_CODE_NOT_FOUND" || /Unable to locate request/i.test(msg);
+}
+
+async function clinicFetchJsonWithFallback(urls, options) {
+  const list = Array.isArray(urls) ? urls.filter(Boolean) : [urls].filter(Boolean);
+  if (list.length === 0) throw new Error("No API endpoint configured");
+
+  let lastErr = null;
+  for (const url of list) {
+    try {
+      return await clinicFetchJson(url, options);
+    } catch (err) {
+      if (!clinicIsRouteNotFoundError(err)) throw err;
+      lastErr = err;
+    }
+  }
+
+  const tried = list.join(", ");
+  throw new Error(`Unable to locate request. Tried: ${tried}`);
+}
+
+async function clinicLogin(email, password) {
+  const endpoint = `${CLINIC_API_BASE}/api:s4bMNy03/auth/login`;
+  const payload = {
+    email: cleanString(email),
+    password: cleanString(password)
+  };
+  if (!payload.email || !payload.password) throw new Error("Email and password are required");
+
+  const data = await clinicFetchJson(endpoint, {
+    method: "POST",
+    headers: clinicAuthHeaders("", true),
+    body: JSON.stringify(payload)
+  });
+
+  const token = cleanString(data?.authToken || data?.token);
+  if (!token) throw new Error("Login succeeded but token is missing");
+  return token;
+}
+
+async function clinicGetMe(authToken) {
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/auth/me`;
+  const data = await clinicFetchJson(endpoint, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  return normalizeAuthUser(data || {});
+}
+
+function normalizeBranchRecord(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    created_at: Number(src.created_at || 0) || 0,
+    label: cleanString(src.label),
+    address: cleanString(src.address),
+    google_direction: cleanString(src.google_direction),
+    waze_direction: cleanString(src.waze_direction),
+    branch_phone: cleanString(src.branch_phone),
+    Region: cleanString(src.Region),
+    Google_Review: cleanString(src.Google_Review)
+  };
+}
+
+async function clinicGetBranchList(authToken) {
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/branch_list`;
+  const data = await clinicFetchJson(endpoint, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  return Array.isArray(data) ? data.map(normalizeBranchRecord).filter((x) => x.label) : [];
+}
+
+function normalizeAppointmentRecord(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    id: Number(src.id || 0) || 0,
+    created_at: Number(src.created_at || 0) || 0,
+    Appt_Date: Number(src.Appt_Date || 0) || 0,
+    Appt_Start_Time: Number(src.Appt_Start_Time || 0) || 0,
+    Appt_End_Time: Number(src.Appt_End_Time || 0) || 0,
+    Branch_Name: cleanString(src.Branch_Name),
+    Dentist_Name: cleanString(src.Dentist_Name),
+    Patient_Name: cleanString(src.Patient_Name),
+    Patient_Phone_No: cleanString(src.Patient_Phone_No),
+    Treatment: cleanString(src.Treatment),
+    Status: src.Status === true,
+    ic_number: cleanString(src.ic_number)
+  };
+}
+
+async function clinicGetAppointmentList(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const branch = cleanString(src.branch);
+  const date = Number(src.date || 0);
+  if (!branch) throw new Error("Branch is required");
+  if (!Number.isFinite(date) || date <= 0) throw new Error("Date timestamp is required");
+
+  const qs = new URLSearchParams({
+    branch,
+    date: String(Math.round(date))
+  });
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/appt_list?${qs.toString()}`;
+  const data = await clinicFetchJson(endpoint, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+
+  return Array.isArray(data) ? data.map(normalizeAppointmentRecord).filter((x) => x.id) : [];
+}
+
+function normalizePatientRecord(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    name: cleanString(src.name),
+    ic_number: cleanString(src.ic_number),
+    phone: cleanString(src.phone),
+    gender: cleanString(src.gender).toLowerCase(),
+    dob: cleanString(src.dob),
+    age: Number(src.age || 0) || 0,
+    address: cleanString(src.address),
+    postcode: cleanString(src.postcode)
+  };
+}
+
+async function clinicGetPatient(authToken, icNumber) {
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/patient`;
+  const ic = cleanString(icNumber);
+  if (!ic) throw new Error("IC number is required");
+  const data = await clinicFetchJson(endpoint, {
+    method: "POST",
+    headers: clinicAuthHeaders(authToken, true),
+    body: JSON.stringify({ ic_number: ic })
+  });
+  return normalizePatientRecord(data || {});
+}
+
+function normalizePastPatientRecord(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  return {
+    Appt_Date: Number(src.Appt_Date || 0) || 0,
+    Dentist_Name: cleanString(src.Dentist_Name),
+    Patient_Name: cleanString(src.Patient_Name),
+    Patient_Phone_No: cleanString(src.Patient_Phone_No)
+  };
+}
+
+async function clinicGetPastPatients(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const branch = cleanString(src.branch);
+  const startDay = Number(src.start_day || 0);
+  const endDay = Number(src.end_day || 0);
+  if (!branch) throw new Error("Branch is required");
+  if (!Number.isFinite(startDay) || startDay <= 0) throw new Error("start_day timestamp is required");
+  if (!Number.isFinite(endDay) || endDay <= 0) throw new Error("end_day timestamp is required");
+
+  const qs = new URLSearchParams({
+    branch,
+    start_day: String(Math.round(startDay)),
+    end_day: String(Math.round(endDay))
+  });
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/past_patient?${qs.toString()}`;
+  const data = await clinicFetchJson(endpoint, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+
+  return Array.isArray(data) ? data.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No) : [];
 }
 
 async function getLatestWaVersionSafe(fetchLatestBaileysVersion) {
@@ -112,6 +533,7 @@ function normalizeContactsCacheRoot(raw) {
       byPhone[msisdn] = {
         msisdn,
         jid: jid || `${msisdn}@s.whatsapp.net`,
+        lid: sanitizeContactName(contactRaw.lid),
         name: sanitizeContactName(contactRaw.name),
         notify: sanitizeContactName(contactRaw.notify),
         verifiedName: sanitizeContactName(contactRaw.verifiedName),
@@ -235,6 +657,50 @@ function saveTemplates(templates) {
   ensureDataFiles();
   const normalized = normalizeTemplatesList(templates);
   fs.writeFileSync(templatesFile, JSON.stringify(normalized, null, 2), "utf-8");
+}
+
+function getTemplateExportBundle() {
+  return {
+    exported_at: nowIsoShort(),
+    timezone: CLINIC_TZ,
+    marketingTemplates: readTemplates(),
+    appointmentTemplates: getAppointmentTemplates()
+  };
+}
+
+function importTemplateBundle(raw) {
+  if (Array.isArray(raw)) {
+    saveTemplates(raw);
+    return {
+      marketingCount: normalizeTemplatesList(raw).length,
+      appointmentUpdated: false
+    };
+  }
+
+  const src = raw && typeof raw === "object" ? raw : {};
+  const marketingTemplates = Array.isArray(src.marketingTemplates)
+    ? src.marketingTemplates
+    : Array.isArray(src.templates)
+      ? src.templates
+      : null;
+  const appointmentTemplates =
+    src.appointmentTemplates && typeof src.appointmentTemplates === "object" ? src.appointmentTemplates : null;
+
+  let marketingCount = readTemplates().length;
+  let appointmentUpdated = false;
+
+  if (marketingTemplates) {
+    const normalizedMarketing = normalizeTemplatesList(marketingTemplates);
+    saveTemplates(normalizedMarketing);
+    marketingCount = normalizedMarketing.length;
+  }
+
+  if (appointmentTemplates) {
+    saveAppointmentTemplates(appointmentTemplates);
+    appointmentUpdated = true;
+  }
+
+  return { marketingCount, appointmentUpdated };
 }
 
 function nowIsoShort() {
@@ -561,6 +1027,22 @@ function getContactDisplayName(c) {
   );
 }
 
+function firstNonEmptyString(values) {
+  for (const v of Array.isArray(values) ? values : []) {
+    const s = sanitizeContactName(v);
+    if (s) return s;
+  }
+  return "";
+}
+
+function msisdnFromContactAddress(value) {
+  const norm = normalizeJidForContact(value);
+  const fromJid = msisdnFromUserJid(norm);
+  if (fromJid) return fromJid;
+  if (/^\d{6,}$/.test(norm)) return norm;
+  return "";
+}
+
 function upsertContactsForProfile(profileId, contacts) {
   if (!profileId || !Array.isArray(contacts) || contacts.length === 0) return 0;
 
@@ -569,14 +1051,24 @@ function upsertContactsForProfile(profileId, contacts) {
   let changed = 0;
 
   for (const c of contacts) {
-    const jid = normalizeJidForContact(c?.jid || c?.id || "");
-    const msisdn = msisdnFromUserJid(jid);
+    const jidSource = c?.jid || c?.id || c?.pnJid || "";
+    const jid = normalizeJidForContact(jidSource);
+    const msisdn = msisdnFromContactAddress(jidSource);
     if (!msisdn) continue;
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
-    const nameCandidate = sanitizeContactName(c?.name) || sanitizeContactName(existing?.name);
-    const notify = sanitizeContactName(c?.notify) || sanitizeContactName(existing?.notify);
-    const verifiedName = sanitizeContactName(c?.verifiedName) || sanitizeContactName(existing?.verifiedName);
+    const nameCandidate = firstNonEmptyString([
+      c?.name,
+      c?.fullName,
+      c?.firstName,
+      c?.shortName,
+      c?.short,
+      c?.username,
+      existing?.name
+    ]);
+    const notify = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname, existing?.notify]);
+    const verifiedName = firstNonEmptyString([c?.verifiedName, c?.vname, existing?.verifiedName]);
+    const lid = firstNonEmptyString([c?.lid, c?.lidJid, existing?.lid]);
     const imgUrl =
       c?.imgUrl === null || c?.imgUrl === undefined
         ? existing?.imgUrl ?? null
@@ -586,6 +1078,7 @@ function upsertContactsForProfile(profileId, contacts) {
     const next = {
       msisdn,
       jid: jid || existing?.jid || `${msisdn}@s.whatsapp.net`,
+      lid,
       name: nameCandidate,
       notify,
       verifiedName,
@@ -600,6 +1093,7 @@ function upsertContactsForProfile(profileId, contacts) {
       prev &&
       prev.msisdn === next.msisdn &&
       prev.jid === next.jid &&
+      String(prev.lid || "") === String(next.lid || "") &&
       String(prev.name || "") === String(next.name || "") &&
       String(prev.notify || "") === String(next.notify || "") &&
       String(prev.verifiedName || "") === String(next.verifiedName || "") &&
@@ -625,16 +1119,47 @@ function upsertChatsAsContactsForProfile(profileId, chats) {
 
   const contacts = [];
   for (const chat of chats) {
-    const jid = normalizeJidForContact(chat?.id || chat?.jid || "");
-    const msisdn = msisdnFromUserJid(jid);
+    const jidSource = chat?.id || chat?.jid || "";
+    const jid = normalizeJidForContact(jidSource);
+    const msisdn = msisdnFromContactAddress(jidSource);
     if (!msisdn) continue;
 
-    const name =
-      sanitizeContactName(chat?.name) ||
-      sanitizeContactName(chat?.notify) ||
-      sanitizeContactName(chat?.pushName) ||
-      "";
-    contacts.push({ id: jid, jid, name, notify: name, verifiedName: sanitizeContactName(chat?.verifiedName) });
+    const name = firstNonEmptyString([chat?.name, chat?.notify, chat?.pushName]);
+    const notify = firstNonEmptyString([chat?.notify, chat?.pushName, name]);
+    contacts.push({
+      id: jid || `${msisdn}@s.whatsapp.net`,
+      jid: jid || `${msisdn}@s.whatsapp.net`,
+      lid: firstNonEmptyString([chat?.lid, chat?.lidJid]),
+      name,
+      notify,
+      verifiedName: sanitizeContactName(chat?.verifiedName)
+    });
+  }
+
+  return upsertContactsForProfile(profileId, contacts);
+}
+
+function upsertMessagesAsContactsForProfile(profileId, messages) {
+  if (!profileId || !Array.isArray(messages) || messages.length === 0) return 0;
+
+  const contacts = [];
+  for (const msg of messages) {
+    const key = msg?.key && typeof msg.key === "object" ? msg.key : {};
+    const jidSource = key.participant || key.remoteJid || "";
+    const jid = normalizeJidForContact(jidSource);
+    const msisdn = msisdnFromContactAddress(jidSource);
+    if (!msisdn) continue;
+
+    const notify = firstNonEmptyString([msg?.pushName, msg?.notifyName, msg?.notify, msg?.participantName]);
+    const verifiedName = firstNonEmptyString([msg?.verifiedBizName, msg?.verifiedName]);
+    if (!notify && !verifiedName) continue;
+
+    contacts.push({
+      id: jid || `${msisdn}@s.whatsapp.net`,
+      jid: jid || `${msisdn}@s.whatsapp.net`,
+      notify,
+      verifiedName
+    });
   }
 
   return upsertContactsForProfile(profileId, contacts);
@@ -655,6 +1180,51 @@ function getContactsForProfile(profileId) {
   });
 
   return rows;
+}
+
+function contactHasAnyName(contact) {
+  return !!getContactDisplayName(contact);
+}
+
+async function syncContactNamesForProfile(profileId, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const force = !!opts.force;
+  const isInitialSync = opts.isInitialSync === true;
+  const cooldownMs = Number.isFinite(Number(opts.cooldownMs))
+    ? Math.max(15 * 1000, Number(opts.cooldownMs))
+    : 5 * 60 * 1000;
+
+  if (!profileId || !isConnected || !sock || typeof sock.resyncAppState !== "function") {
+    return { ok: false, skipped: true, reason: "not_available" };
+  }
+
+  const now = Date.now();
+  const lastSyncAt = Number(lastContactNameSyncAtByProfile.get(profileId) || 0);
+  if (!force && now - lastSyncAt < cooldownMs) {
+    return { ok: true, skipped: true, reason: "cooldown" };
+  }
+
+  const inFlight = contactNameSyncByProfile.get(profileId);
+  if (inFlight) return await inFlight;
+
+  const syncTask = (async () => {
+    try {
+      await sock.resyncAppState(
+        ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
+        isInitialSync
+      );
+      lastContactNameSyncAtByProfile.set(profileId, Date.now());
+      return { ok: true, synced: true, profileId };
+    } catch (e) {
+      log.warn({ err: e, profileId }, "Contact name sync failed");
+      return { ok: false, profileId, error: String(e?.message || e) };
+    } finally {
+      contactNameSyncByProfile.delete(profileId);
+    }
+  })();
+
+  contactNameSyncByProfile.set(profileId, syncTask);
+  return await syncTask;
 }
 
 function shouldRefreshContactPhoto(contact, minMinutesBetweenChecks) {
@@ -1130,6 +1700,7 @@ async function connectWA(method, attemptId) {
       sock.ev.on("messaging-history.set", (history) => {
         upsertContactsForProfile(activeProfileId, history?.contacts || []);
         upsertChatsAsContactsForProfile(activeProfileId, history?.chats || []);
+        upsertMessagesAsContactsForProfile(activeProfileId, history?.messages || []);
       });
       sock.ev.on("contacts.upsert", (contacts) => {
         upsertContactsForProfile(activeProfileId, contacts || []);
@@ -1142,6 +1713,9 @@ async function connectWA(method, attemptId) {
       });
       sock.ev.on("chats.update", (chats) => {
         upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+      });
+      sock.ev.on("messages.upsert", (evt) => {
+        upsertMessagesAsContactsForProfile(activeProfileId, evt?.messages || []);
       });
 
       sock.ev.on("connection.update", async (update) => {
@@ -1198,6 +1772,7 @@ async function connectWA(method, attemptId) {
           isConnected = true;
           invalidSessionProfiles.delete(activeProfileId);
           updateConnectedProfileMeta(activeProfileId, sock?.user || {});
+          syncContactNamesForProfile(activeProfileId, { force: false, isInitialSync: false }).catch(() => {});
           win?.webContents.send("wa:status", {
             connected: true,
             text: "Connected",
@@ -1341,6 +1916,113 @@ ipcMain.handle("app:saveTemplates", async (_evt, templates) => {
   return { ok: true };
 });
 
+ipcMain.handle("app:getAppointmentTemplates", async () => {
+  return { ok: true, templates: getAppointmentTemplates() };
+});
+
+ipcMain.handle("app:saveAppointmentTemplates", async (_evt, templates) => {
+  const saved = saveAppointmentTemplates(templates || {});
+  return { ok: true, templates: saved };
+});
+
+ipcMain.handle("app:getClinicSettings", async () => {
+  return { ok: true, settings: getClinicSettings() };
+});
+
+ipcMain.handle("app:saveClinicSettings", async (_evt, settings) => {
+  const saved = saveClinicSettings(settings || {});
+  return { ok: true, settings: saved };
+});
+
+ipcMain.handle("app:exportTemplatesBundle", async () => {
+  const saveRes = await dialog.showSaveDialog({
+    title: "Export templates",
+    defaultPath: `clinic_templates_${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: "JSON", extensions: ["json"] }]
+  });
+  if (saveRes.canceled || !saveRes.filePath) return { ok: false, canceled: true };
+
+  const payload = getTemplateExportBundle();
+  fs.writeFileSync(saveRes.filePath, JSON.stringify(payload, null, 2), "utf-8");
+  return { ok: true, filePath: saveRes.filePath };
+});
+
+ipcMain.handle("app:importTemplatesBundle", async () => {
+  const openRes = await dialog.showOpenDialog({
+    title: "Import templates",
+    properties: ["openFile"],
+    filters: [{ name: "JSON", extensions: ["json"] }]
+  });
+  if (openRes.canceled || !openRes.filePaths || openRes.filePaths.length === 0) return { ok: false, canceled: true };
+
+  const filePath = openRes.filePaths[0];
+  const text = fs.readFileSync(filePath, "utf-8");
+  let parsed = null;
+  try {
+    parsed = text ? JSON.parse(text) : {};
+  } catch (e) {
+    throw new Error("Invalid JSON file");
+  }
+
+  const result = importTemplateBundle(parsed);
+  return { ok: true, filePath, ...result };
+});
+
+ipcMain.handle("clinic:getSession", async () => {
+  const session = getAuthSession();
+  return { ok: true, session };
+});
+
+ipcMain.handle("clinic:login", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const token = await clinicLogin(src.email, src.password);
+  const user = await clinicGetMe(token);
+  const session = saveAuthSession(token, user);
+  return { ok: true, session };
+});
+
+ipcMain.handle("clinic:logout", async () => {
+  clearAuthSession();
+  return { ok: true };
+});
+
+ipcMain.handle("clinic:refreshMe", async () => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  const user = await clinicGetMe(session.authToken);
+  const saved = saveAuthSession(session.authToken, user);
+  return { ok: true, session: saved };
+});
+
+ipcMain.handle("clinic:getBranchList", async () => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  const branches = await clinicGetBranchList(session.authToken);
+  return { ok: true, branches };
+});
+
+ipcMain.handle("clinic:getAppointmentList", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  const appointments = await clinicGetAppointmentList(session.authToken, payload || {});
+  return { ok: true, appointments };
+});
+
+ipcMain.handle("clinic:getPatient", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  const icNumber = payload && typeof payload === "object" ? payload.ic_number || payload.icNumber : payload;
+  const patient = await clinicGetPatient(session.authToken, icNumber);
+  return { ok: true, patient };
+});
+
+ipcMain.handle("clinic:getPastPatients", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  const records = await clinicGetPastPatients(session.authToken, payload || {});
+  return { ok: true, patients: records };
+});
+
 ipcMain.handle("app:getAiRewriteConfig", async () => {
   return { ok: true, config: getAiRewriteConfig() };
 });
@@ -1396,6 +2078,16 @@ ipcMain.handle("wa:getContacts", async (_evt, options) => {
   const profileId = getActiveProfileId();
   const opts = options && typeof options === "object" ? options : {};
   let contacts = getContactsForProfile(profileId);
+
+  if (isConnected && sock) {
+    if (opts.forceNameSync) {
+      await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
+      contacts = getContactsForProfile(profileId);
+    } else if (contacts.length > 0 && contacts.some((c) => !contactHasAnyName(c))) {
+      syncContactNamesForProfile(profileId, { force: false, isInitialSync: false }).catch(() => {});
+    }
+  }
+
   if (opts.includePhotos && isConnected && sock) {
     contacts = await enrichContactPhotosForProfile(profileId, opts);
   }
@@ -1466,11 +2158,17 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const minSec = pacing.minSec ?? 7;
   const maxSec = pacing.maxSec ?? 10;
   const aiCfg = normalizeAiRewriteConfig({ ...getAiRewriteConfig(), ...(aiRewrite || {}) });
+  const clinicSession = getAuthSession();
+  const sessionAuthToken = cleanString(clinicSession?.authToken);
+  const aiAuthToken = cleanString(aiCfg.authToken) || sessionAuthToken;
   if (aiCfg.enabled && !aiCfg.endpoint) {
     throw new Error("AI rewrite is enabled but backend endpoint is empty");
   }
   if (aiCfg.enabled && !aiCfg.prompt) {
     throw new Error("AI rewrite is enabled but prompt is empty");
+  }
+  if (aiCfg.enabled && !aiAuthToken) {
+    throw new Error("AI rewrite requires Authorization token. Please log in first.");
   }
 
   let sent = 0;
@@ -1526,7 +2224,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         try {
           text = await rewriteMessageViaBackend({
             endpoint: aiCfg.endpoint,
-            authToken: aiCfg.authToken,
+            authToken: aiAuthToken,
             prompt: promptText,
             message: baseText,
             variables: vars,
@@ -1589,6 +2287,147 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   }
 
   return { ok: true, sent, failed, skipped };
+});
+
+ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const items = Array.isArray(src.items) ? src.items : [];
+  if (items.length === 0) throw new Error("No messages to send");
+  if (!isConnected || !sock) throw new Error("WhatsApp not connected");
+
+  const pacing = src.pacing && typeof src.pacing === "object" ? src.pacing : {};
+  const pattern = pacing.pattern === "cycle" ? "cycle" : "random";
+  const minSec = clampInt(pacing.minSec, 1, 90, 7);
+  const maxSec = Math.max(minSec, clampInt(pacing.maxSec, 1, 90, 10));
+  const safety = src.safety && typeof src.safety === "object" ? src.safety : {};
+  const maxRecipients = Math.max(1, Number(safety.maxRecipients || 500));
+  if (items.length > maxRecipients) throw new Error(`Too many recipients. Limit is ${maxRecipients}.`);
+
+  const aiCfg = normalizeAiRewriteConfig({ ...getAiRewriteConfig(), ...(src.aiRewrite || {}) });
+  const clinicSession = getAuthSession();
+  const sessionAuthToken = cleanString(clinicSession?.authToken);
+  const aiAuthToken = cleanString(aiCfg.authToken) || sessionAuthToken;
+  if (aiCfg.enabled && !aiCfg.endpoint) throw new Error("AI rewrite endpoint is required");
+  if (aiCfg.enabled && !aiCfg.prompt) throw new Error("AI rewrite prompt is required");
+  if (aiCfg.enabled && !aiAuthToken) {
+    throw new Error("AI rewrite requires Authorization token. Please log in first.");
+  }
+
+  let sent = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i] && typeof items[i] === "object" ? items[i] : {};
+    const rawPhone = cleanString(item.phone);
+    const rowName = cleanString(item.name);
+    const templateId = cleanString(item.templateId) || cleanString(src.batchLabel) || "prepared";
+    let msisdn = "";
+
+    try {
+      msisdn = normalizeMsisdn(rawPhone);
+    } catch (e) {
+      failed++;
+      win?.webContents.send("batch:progress", {
+        ts: nowIsoShort(),
+        index: i + 1,
+        total: items.length,
+        phone: rawPhone,
+        name: rowName,
+        status: "failed",
+        error: "Invalid phone number"
+      });
+      continue;
+    }
+
+    const baseText = String(item.text || "").trim();
+    if (!baseText) {
+      skipped++;
+      win?.webContents.send("batch:progress", {
+        ts: nowIsoShort(),
+        index: i + 1,
+        total: items.length,
+        phone: msisdn,
+        name: rowName,
+        status: "skipped",
+        error: "Message is empty"
+      });
+      continue;
+    }
+
+    try {
+      let text = baseText;
+      if (aiCfg.enabled) {
+        const aiVars = item.aiVariables && typeof item.aiVariables === "object" ? item.aiVariables : {};
+        const aiPromptTemplate = cleanString(item.aiPrompt) || aiCfg.prompt;
+        try {
+          text = await rewriteMessageViaBackend({
+            endpoint: aiCfg.endpoint,
+            authToken: aiAuthToken,
+            prompt: aiPromptTemplate,
+            message: baseText,
+            variables: aiVars,
+            msisdn,
+            templateId,
+            timeoutMs: aiCfg.timeoutMs
+          });
+        } catch (aiErr) {
+          if (!aiCfg.fallbackToOriginal) {
+            throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
+          }
+          text = baseText;
+          win?.webContents.send("batch:progress", {
+            ts: nowIsoShort(),
+            index: i + 1,
+            total: items.length,
+            phone: msisdn,
+            name: rowName,
+            status: "sending",
+            error: `AI fallback: ${String(aiErr?.message || aiErr)}`
+          });
+        }
+      }
+
+      win?.webContents.send("batch:progress", {
+        ts: nowIsoShort(),
+        index: i + 1,
+        total: items.length,
+        phone: msisdn,
+        name: rowName,
+        status: "sending"
+      });
+
+      await sendText(msisdn, text);
+      sent++;
+
+      win?.webContents.send("batch:progress", {
+        ts: nowIsoShort(),
+        index: i + 1,
+        total: items.length,
+        phone: msisdn,
+        name: rowName,
+        status: "sent"
+      });
+    } catch (e) {
+      failed++;
+      win?.webContents.send("batch:progress", {
+        ts: nowIsoShort(),
+        index: i + 1,
+        total: items.length,
+        phone: msisdn,
+        name: rowName,
+        status: "failed",
+        error: String(e?.message || e)
+      });
+    }
+
+    if (i < items.length - 1) {
+      const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
+      await new Promise((r) => setTimeout(r, ms));
+    }
+  }
+
+  return { ok: true, sent, failed, skipped, total: items.length };
 });
 
 /* --------------------------- Window ---------------------------- */
