@@ -537,6 +537,75 @@ p {
   gap: 8px;
 }
 
+.placeholderPanel {
+  border: 1px solid #d9e8e6;
+  border-radius: 12px;
+  padding: 8px;
+  background: #fbfdfd;
+}
+
+.placeholderBtnRow {
+  margin-top: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.placeholderBtn {
+  border: 1px solid #bcdad5;
+  background: #f3fbfa;
+  color: #12514a;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 5px 9px;
+  cursor: pointer;
+}
+
+.placeholderBtn:hover {
+  background: #ddf4f1;
+}
+
+.placeholderBtn.inserted {
+  background: #0d8f83;
+  color: #fff;
+  border-color: #0d8f83;
+}
+
+.placeholderPreviewBox {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fcfb;
+  padding: 8px;
+}
+
+.placeholderPreviewBody {
+  margin-top: 6px;
+  min-height: 52px;
+  max-height: 190px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.placeholderInline {
+  border-radius: 7px;
+  padding: 1px 5px;
+  margin: 0 1px;
+  border: 1px solid #8ecdc4;
+  background: #ddf5f1;
+  color: #0b5f54;
+  font-weight: 700;
+  cursor: help;
+}
+
+.placeholderInline.unknown {
+  border-color: #d4b57e;
+  background: #fff4dc;
+  color: #886313;
+}
+
 .connectLayout {
   display: grid;
   grid-template-columns: 1fr 1fr;

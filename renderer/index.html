@@ -299,6 +299,11 @@
                     <label class="fieldLabel">Message Body</label>
                     <textarea id="templateBody" class="fieldInput" rows="7"></textarea>
 
+                    <div class="placeholderPanel">
+                      <div class="fieldLabel">Ready placeholders (click to insert)</div>
+                      <div class="placeholderBtnRow" id="marketingPlaceholderButtons"></div>
+                    </div>
+
                     <label class="fieldLabel">Send Policy</label>
                     <select id="templateSendPolicy" class="fieldInput compact">
                       <option value="once">Once per recipient</option>
@@ -306,6 +311,10 @@
                     </select>
 
                     <div class="smallText" id="templateVariablesText">Variables: -</div>
+                    <div class="placeholderPreviewBox">
+                      <div class="fieldLabel">Placeholder highlight</div>
+                      <div class="placeholderPreviewBody" id="templatePlaceholderPreview">Type template to preview placeholders.</div>
+                    </div>
                     <button class="btnPrimary" id="btnSaveTemplate">Save Marketing Templates</button>
                   </div>
                 </div>

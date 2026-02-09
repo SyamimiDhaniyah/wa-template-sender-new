@@ -9,6 +9,17 @@ const DEFAULT_APPOINTMENT_TEMPLATES = {
   requestReview: { bahasa: "", english: "" }
 };
 
+const MARKETING_PLACEHOLDERS = [
+  { token: "{name}", key: "name", description: "Patient name from recipient list." },
+  { token: "{branch}", key: "branch", description: "Branch selected in Marketing tab." },
+  { token: "{my_branch}", key: "my_branch", description: "Your login branch from account profile." },
+  { token: "{date}", key: "date", description: "Recipient appointment date, or today if unavailable." },
+  { token: "{day}", key: "day", description: "Day name from appointment date, or today." },
+  { token: "{time}", key: "time", description: "Recipient appointment time if available." },
+  { token: "{dentist}", key: "dentist", description: "Dentist name from recipient row if available." },
+  { token: "{phone}", key: "phone", description: "Normalized phone number of recipient." }
+];
+
 const state = {
   session: { authToken: "", user: {} },
   settings: { ...DEFAULT_CLINIC_SETTINGS },
@@ -24,7 +35,8 @@ const state = {
   activeProfileId: null,
   activityRows: [],
   currentTemplateId: null,
-  confirmResolver: null
+  confirmResolver: null,
+  templateBodyCaretPos: 0
 };
 
 function el(id) {
@@ -99,6 +111,10 @@ function extractTemplateVariables(body) {
   let m = null;
   while ((m = re.exec(text))) set.add(String(m[1]));
   return Array.from(set);
+}
+
+function getPlaceholderMetaByKey(key) {
+  return MARKETING_PLACEHOLDERS.find((x) => x.key === key) || null;
 }
 
 function ymdToKlMidnightTs(ymd) {
@@ -482,14 +498,100 @@ function loadTemplateEditor() {
     el("templateBody").value = "";
     el("templateSendPolicy").value = "once";
     el("templateVariablesText").textContent = "Variables: -";
+    el("templatePlaceholderPreview").textContent = "Type template to preview placeholders.";
     return;
   }
 
   el("templateName").value = t.name;
   el("templateBody").value = t.body;
+  state.templateBodyCaretPos = Number((t.body || "").length);
   el("templateSendPolicy").value = t.sendPolicy;
   const vars = extractTemplateVariables(t.body);
   el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+  renderTemplatePlaceholderPreview(t.body);
+}
+
+function renderMarketingPlaceholderButtons() {
+  const wrap = el("marketingPlaceholderButtons");
+  wrap.innerHTML = "";
+
+  for (const item of MARKETING_PLACEHOLDERS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "placeholderBtn";
+    btn.textContent = item.token;
+    btn.title = item.description;
+    btn.dataset.token = item.token;
+    btn.addEventListener("click", () => {
+      insertPlaceholderIntoTemplate(item.token, btn);
+    });
+    wrap.appendChild(btn);
+  }
+}
+
+function insertPlaceholderIntoTemplate(token, btn) {
+  const textarea = el("templateBody");
+  const value = textarea.value || "";
+  const liveStart = Number(textarea.selectionStart || 0);
+  const isTextareaActive = document.activeElement === textarea;
+  const insertPos = isTextareaActive ? liveStart : Number(state.templateBodyCaretPos || 0);
+  const safePos = Math.max(0, Math.min(value.length, insertPos));
+  const next = `${value.slice(0, safePos)}${token}${value.slice(safePos)}`;
+  textarea.value = next;
+  const caretPos = safePos + token.length;
+  state.templateBodyCaretPos = caretPos;
+  textarea.focus();
+  textarea.setSelectionRange(caretPos, caretPos);
+
+  readMarketingTemplateEditorToState();
+  const vars = extractTemplateVariables(next);
+  el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+  renderTemplatePlaceholderPreview(next);
+  renderTemplateList();
+  refreshMarketingPreview();
+
+  if (btn) {
+    btn.classList.add("inserted");
+    setTimeout(() => btn.classList.remove("inserted"), 480);
+  }
+}
+
+function rememberTemplateCaretPosition() {
+  const textarea = el("templateBody");
+  if (!textarea) return;
+  const start = Number(textarea.selectionStart || 0);
+  state.templateBodyCaretPos = Math.max(0, start);
+}
+
+function renderTemplatePlaceholderPreview(text) {
+  const raw = String(text || "");
+  const target = el("templatePlaceholderPreview");
+  if (!raw.trim()) {
+    target.textContent = "Type template to preview placeholders.";
+    return;
+  }
+
+  const parts = [];
+  const re = /\{(\w+)\}/g;
+  let cursor = 0;
+  let m = null;
+  while ((m = re.exec(raw))) {
+    const full = String(m[0] || "");
+    const key = String(m[1] || "");
+    const start = Number(m.index);
+    if (start > cursor) {
+      parts.push(escapeHtml(raw.slice(cursor, start)).replace(/\n/g, "<br/>"));
+    }
+    const meta = getPlaceholderMetaByKey(key);
+    const cls = meta ? "placeholderInline" : "placeholderInline unknown";
+    const title = meta ? meta.description : "Unknown placeholder. Not in ready variable list.";
+    parts.push(`<span class="${cls}" title="${escapeHtml(title)}">${escapeHtml(full)}</span>`);
+    cursor = start + full.length;
+  }
+  if (cursor < raw.length) {
+    parts.push(escapeHtml(raw.slice(cursor)).replace(/\n/g, "<br/>"));
+  }
+  target.innerHTML = parts.join("");
 }
 
 function renderMarketingTemplateSelect() {
@@ -519,22 +621,33 @@ function renderMarketingTemplateSelect() {
   select.value = state.currentTemplateId;
 }
 
+function buildMarketingTemplateVars(recipient) {
+  const row = recipient && typeof recipient === "object" ? recipient : {};
+  const selectedBranch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
+  const myBranch = state.session.user?.Branch || selectedBranch || "";
+  const dateTs = row.apptDate ? Number(row.apptDate) : Date.now();
+  const weekday = formatWeekdayForMessage(dateTs, "english");
+
+  return {
+    name: row.name || "Patient",
+    branch: selectedBranch,
+    my_branch: myBranch,
+    dentist: row.dentist || "",
+    date: formatDateForMessage(dateTs, "english"),
+    day: weekday,
+    weekday,
+    time: row.apptDate ? formatTimeForMessage(row.apptDate) : "",
+    phone: normalizePhone(row.phone || "")
+  };
+}
+
 function refreshMarketingPreview() {
   const template = getSelectedMarketingTemplate();
   const recipient = getSelectedMarketingRecipients()[0];
   if (!template) return (el("marketingPreview").textContent = "No marketing template selected.");
   if (!recipient) return (el("marketingPreview").textContent = "Select at least one recipient to preview.");
 
-  const branch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
-  const vars = {
-    name: recipient.name || "Patient",
-    branch,
-    dentist: recipient.dentist || "",
-    date: recipient.apptDate ? formatDateForMessage(recipient.apptDate, "english") : "",
-    time: recipient.apptDate ? formatTimeForMessage(recipient.apptDate) : ""
-  };
-
-  el("marketingPreview").textContent = renderTemplate(template.body, vars);
+  el("marketingPreview").textContent = renderTemplate(template.body, buildMarketingTemplateVars(recipient));
 }
 function applySettingsToUi() {
   const s = state.settings;
@@ -796,16 +909,9 @@ async function sendMarketing() {
   const selected = getSelectedMarketingRecipients();
   if (selected.length === 0) throw new Error("Please select recipients");
 
-  const branch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
   const items = selected
     .map((row) => {
-      const vars = {
-        name: row.name || "Patient",
-        branch,
-        dentist: row.dentist || "",
-        date: row.apptDate ? formatDateForMessage(row.apptDate, "english") : "",
-        time: row.apptDate ? formatTimeForMessage(row.apptDate) : ""
-      };
+      const vars = buildMarketingTemplateVars(row);
 
       return {
         phone: row.phone,
@@ -1218,13 +1324,19 @@ function bindEvents() {
   });
 
   el("templateBody").addEventListener("input", () => {
+    rememberTemplateCaretPosition();
     readMarketingTemplateEditorToState();
     const t = getSelectedMarketingTemplate();
     const vars = t ? extractTemplateVariables(t.body) : [];
     el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+    renderTemplatePlaceholderPreview(el("templateBody").value || "");
     renderTemplateList();
     refreshMarketingPreview();
   });
+  el("templateBody").addEventListener("click", rememberTemplateCaretPosition);
+  el("templateBody").addEventListener("keyup", rememberTemplateCaretPosition);
+  el("templateBody").addEventListener("select", rememberTemplateCaretPosition);
+  el("templateBody").addEventListener("focus", rememberTemplateCaretPosition);
 
   el("templateSendPolicy").addEventListener("change", () => {
     readMarketingTemplateEditorToState();
@@ -1395,6 +1507,7 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  renderMarketingPlaceholderButtons();
   await tryRestoreSession();
 }
 
