@@ -2497,38 +2497,75 @@ async function markChatReadForProfile(profileId, chatJid) {
   if (!chat) return { ok: true, skipped: true };
 
   const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
-  const unreadKeys = list
-    .filter((m) => m && m.fromMe !== true && m.key && m.key.id && m.key.remoteJid)
-    .slice(-50)
-    .map((m) => ({
-      remoteJid: m.key.remoteJid,
-      id: m.key.id,
-      fromMe: m.key.fromMe === true,
-      participant: m.key.participant || undefined
-    }));
+  const incoming = [...list]
+    .filter((m) => m && m.fromMe !== true && m.key && m.key.id)
+    .sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0));
+  const unreadKeyHashes = new Set();
+  const unreadKeys = [];
+
+  for (let i = incoming.length - 1; i >= 0; i--) {
+    const msg = incoming[i];
+    const key = {
+      remoteJid: normalizeChatJid(msg?.key?.remoteJid || jid) || jid,
+      id: cleanString(msg?.key?.id || ""),
+      fromMe: false,
+      participant: cleanString(msg?.key?.participant || "") || undefined
+    };
+    if (!key.remoteJid || !key.id) continue;
+    const hash = messageKeyHash(key);
+    if (unreadKeyHashes.has(hash)) continue;
+    unreadKeyHashes.add(hash);
+    unreadKeys.push(key);
+    if (unreadKeys.length >= 40) break;
+  }
+  const unreadKeysForSend = [...unreadKeys].reverse();
 
   const lastMsgInChat =
     list.length > 0
       ? [...list].sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0))[list.length - 1]
       : null;
+  const lastIncoming = incoming.length > 0 ? incoming[incoming.length - 1] : null;
+  const lastForModifySource = lastIncoming || lastMsgInChat;
   const lastMsgForModify =
-    lastMsgInChat && lastMsgInChat.key && lastMsgInChat.key.id
+    lastForModifySource && lastForModifySource.key && lastForModifySource.key.id
       ? {
           key: {
-            remoteJid: lastMsgInChat.key.remoteJid || jid,
-            id: lastMsgInChat.key.id,
-            fromMe: lastMsgInChat.key.fromMe === true,
-            participant: lastMsgInChat.key.participant || undefined
+            remoteJid: normalizeChatJid(lastForModifySource.key.remoteJid || jid) || jid,
+            id: cleanString(lastForModifySource.key.id || ""),
+            fromMe: lastForModifySource.key.fromMe === true,
+            participant: cleanString(lastForModifySource.key.participant || "") || undefined
           },
-          messageTimestamp: Math.floor(Number(lastMsgInChat.timestampMs || Date.now()) / 1000)
+          messageTimestamp: Math.floor(Number(lastForModifySource.timestampMs || Date.now()) / 1000)
         }
       : null;
 
-  if (sock && isConnected && unreadKeys.length > 0 && typeof sock.readMessages === "function") {
+  let readMessagesSent = false;
+  let readReceiptSent = false;
+  let chatModifySent = false;
+
+  if (sock && isConnected && unreadKeysForSend.length > 0 && typeof sock.readMessages === "function") {
     try {
-      await sock.readMessages(unreadKeys);
+      await sock.readMessages(unreadKeysForSend);
+      readMessagesSent = true;
     } catch (e) {
-      log.debug({ err: e }, "Failed to mark chat as read");
+      log.warn({ err: e, profileId, chatJid: jid, keyCount: unreadKeysForSend.length }, "Failed sock.readMessages");
+    }
+  }
+
+  if (
+    sock &&
+    isConnected &&
+    !readMessagesSent &&
+    unreadKeysForSend.length > 0 &&
+    typeof sock.sendReceipt === "function"
+  ) {
+    try {
+      for (const key of unreadKeysForSend.slice(-20)) {
+        await sock.sendReceipt(key.remoteJid || jid, key.participant || undefined, [key.id], "read");
+      }
+      readReceiptSent = true;
+    } catch (e) {
+      log.warn({ err: e, profileId, chatJid: jid }, "Failed sock.sendReceipt read fallback");
     }
   }
 
@@ -2541,8 +2578,9 @@ async function markChatReadForProfile(profileId, chatJid) {
         },
         jid
       );
+      chatModifySent = true;
     } catch (e) {
-      log.debug({ err: e }, "Failed chatModify markRead");
+      log.warn({ err: e, profileId, chatJid: jid }, "Failed sock.chatModify markRead");
     }
   }
 
@@ -2555,7 +2593,7 @@ async function markChatReadForProfile(profileId, chatJid) {
     scheduleWaChatSync(profileId, "read");
     schedulePersistWaChatCache();
   }
-  return { ok: true, chatJid: jid };
+  return { ok: true, chatJid: jid, readMessagesSent, readReceiptSent, chatModifySent };
 }
 
 const MIME_BY_EXT = {

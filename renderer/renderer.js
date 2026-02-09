@@ -608,9 +608,10 @@ function scheduleWaSyncRefresh() {
   if (state.waSyncTimer) clearTimeout(state.waSyncTimer);
   state.waSyncTimer = setTimeout(() => {
     state.waSyncTimer = null;
+    const shouldMarkRead = state.activeTab === "whatsapp" && !!state.waActiveChatJid;
     refreshWaChats({
       refreshMessages: true,
-      markRead: false,
+      markRead: shouldMarkRead,
       showLoadingMessages: false,
       includePhotos: false
     }).catch(() => {});
