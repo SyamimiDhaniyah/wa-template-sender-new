@@ -43,6 +43,7 @@ const state = {
   waLoadingChats: false,
   waLoadingMessages: false,
   waRefreshQueued: false,
+  waForceHistoryRefreshOnConnected: false,
   waChatsReqSeq: 0,
   waMessagesReqSeq: 0,
   profiles: [],
@@ -1797,8 +1798,7 @@ function renderProfiles() {
         const act = btn.dataset.act;
         try {
           if (act === "use") {
-            await window.api.setActiveProfile(id);
-            await refreshProfiles();
+            await activateProfileAndSync(id);
             toast("Profile", "Switched active profile");
           }
 
@@ -1840,6 +1840,41 @@ async function refreshProfiles() {
   state.activeProfileId = res?.activeProfileId || null;
   renderProfiles();
   scheduleWaSyncRefresh();
+}
+
+async function refreshWaChatsWithHistoryWarmup() {
+  await refreshWaChats({
+    refreshMessages: true,
+    markRead: true,
+    ensureHistory: true,
+    forceHistory: true,
+    includePhotos: true
+  });
+}
+
+async function activateProfileAndSync(profileId) {
+  const id = String(profileId || "").trim();
+  if (!id) return;
+
+  state.waActiveChatJid = "";
+  state.waExplicitOpenChatJid = "";
+  state.waMessages = [];
+  state.waChats = [];
+  state.waForceHistoryRefreshOnConnected = true;
+
+  await window.api.setActiveProfile(id);
+  await refreshProfiles();
+  const status = await window.api.waGetConnectionState();
+  setConnectionBadge(!!status?.connected, status?.text || "Not connected");
+
+  if (status?.connected) {
+    state.waForceHistoryRefreshOnConnected = false;
+    await refreshWaChatsWithHistoryWarmup();
+  } else {
+    renderWaChatList();
+    renderWaConversationHead();
+    renderWaMessages({ forceBottom: false });
+  }
 }
 
 function setConnectModeUi() {
@@ -1917,6 +1952,7 @@ async function loadInitialDataAfterLogin() {
   state.waLoadingChats = false;
   state.waLoadingMessages = false;
   state.waRefreshQueued = false;
+  state.waForceHistoryRefreshOnConnected = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
@@ -1951,6 +1987,7 @@ function showLoginScreen() {
   state.waLoadingChats = false;
   state.waLoadingMessages = false;
   state.waRefreshQueued = false;
+  state.waForceHistoryRefreshOnConnected = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
@@ -2434,19 +2471,7 @@ function bindEvents() {
     try {
       const id = el("profileSelect").value;
       if (!id) return;
-      state.waActiveChatJid = "";
-      state.waExplicitOpenChatJid = "";
-      state.waMessages = [];
-      await window.api.setActiveProfile(id);
-      await refreshProfiles();
-      const status = await window.api.waGetConnectionState();
-      setConnectionBadge(!!status?.connected, status?.text || "Not connected");
-      await refreshWaChats({
-        refreshMessages: true,
-        markRead: true,
-        ensureHistory: true,
-        includePhotos: true
-      });
+      await activateProfileAndSync(id);
     } catch (e) {
       toast("Profile", String(e?.message || e));
     }
@@ -2493,7 +2518,15 @@ function bindEvents() {
   window.api.onStatus((status) => {
     if (status?.profileId && state.activeProfileId && status.profileId !== state.activeProfileId) return;
     const prevConnected = state.waConnected;
-    setConnectionBadge(!!status?.connected, status?.text || "Not connected");
+    const connected = !!status?.connected;
+    setConnectionBadge(connected, status?.text || "Not connected");
+
+    if (!prevConnected && connected && state.waForceHistoryRefreshOnConnected) {
+      state.waForceHistoryRefreshOnConnected = false;
+      refreshWaChatsWithHistoryWarmup().catch(() => {});
+      return;
+    }
+
     if (prevConnected !== !!status?.connected || state.activeTab === "whatsapp") {
       scheduleWaSyncRefresh();
     }
