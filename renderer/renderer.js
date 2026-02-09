@@ -353,14 +353,99 @@ function normalizeWaAttachmentList(list) {
   return out;
 }
 
-function waDroppedFilesToAttachments(fileList) {
+function waPathFromFileUri(uriText) {
+  const raw = String(uriText || "").trim();
+  if (!raw || !raw.toLowerCase().startsWith("file://")) return "";
+  try {
+    const url = new URL(raw);
+    let p = decodeURIComponent(url.pathname || "");
+    if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
+    if (url.host) p = `//${url.host}${p}`;
+    return p;
+  } catch {
+    return "";
+  }
+}
+
+function waParseDroppedPathCandidates(dataTransfer) {
+  const dt = dataTransfer || null;
+  if (!dt || typeof dt.getData !== "function") return [];
+
+  const out = [];
+  const seen = new Set();
+  const pushPath = (value) => {
+    const raw = String(value || "").trim().replace(/^"(.*)"$/, "$1");
+    if (!raw) return;
+    const normalized = raw.replaceAll("/", "\\");
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(normalized);
+  };
+
+  const uriList = String(dt.getData("text/uri-list") || "");
+  for (const lineRaw of uriList.split(/\r?\n/)) {
+    const line = String(lineRaw || "").trim();
+    if (!line || line.startsWith("#")) continue;
+    if (line.toLowerCase().startsWith("file://")) {
+      const fromUri = waPathFromFileUri(line);
+      if (fromUri) pushPath(fromUri);
+      continue;
+    }
+    pushPath(line);
+  }
+
+  const plain = String(dt.getData("text/plain") || "");
+  for (const lineRaw of plain.split(/\r?\n/)) {
+    const line = String(lineRaw || "").trim();
+    if (!line) continue;
+    if (line.toLowerCase().startsWith("file://")) {
+      const fromUri = waPathFromFileUri(line);
+      if (fromUri) pushPath(fromUri);
+      continue;
+    }
+    if (/^[A-Za-z]:\\/.test(line) || /^\\\\/.test(line) || /^\//.test(line)) {
+      pushPath(line);
+    }
+  }
+
+  return out;
+}
+
+function waResolveDroppedFilePath(file, fallbackPath) {
+  const directPath = String(file?.path || "").trim();
+  if (directPath) return directPath;
+
+  try {
+    if (window.api && typeof window.api.waGetPathForDroppedFile === "function") {
+      const resolved = String(window.api.waGetPathForDroppedFile(file) || "").trim();
+      if (resolved) return resolved;
+    }
+  } catch {
+    // ignore path resolution failure and continue with fallback
+  }
+
+  return String(fallbackPath || "").trim();
+}
+
+function waDroppedFilesToAttachments(fileList, fallbackPaths = []) {
   const files = Array.from(fileList || []);
-  return normalizeWaAttachmentList(
-    files.map((file) => ({
-      path: file?.path || "",
+  const fromFiles = normalizeWaAttachmentList(
+    files.map((file, idx) => ({
+      path: waResolveDroppedFilePath(file, fallbackPaths[idx] || ""),
       fileName: file?.name || "",
       mimeType: file?.type || "",
       size: Number(file?.size || 0) || 0
+    }))
+  );
+  if (fromFiles.length > 0) return fromFiles;
+
+  return normalizeWaAttachmentList(
+    (Array.isArray(fallbackPaths) ? fallbackPaths : []).map((filePath) => ({
+      path: filePath,
+      fileName: "",
+      mimeType: "",
+      size: 0
     }))
   );
 }
@@ -941,7 +1026,7 @@ function setWaDropActive(active) {
   panel.classList.toggle("waDropActive", !!active);
 }
 
-async function handleWaFileDrop(fileList) {
+async function handleWaFileDrop(evt) {
   if (!state.waActiveChatJid) {
     toast("WhatsApp", "Please select a chat before dropping files");
     return;
@@ -951,7 +1036,9 @@ async function handleWaFileDrop(fileList) {
     return;
   }
 
-  const attachments = waDroppedFilesToAttachments(fileList);
+  const fileList = evt?.dataTransfer?.files || [];
+  const fallbackPaths = waParseDroppedPathCandidates(evt?.dataTransfer);
+  const attachments = waDroppedFilesToAttachments(fileList, fallbackPaths);
   if (attachments.length === 0) {
     toast("WhatsApp", "No valid files were dropped");
     return;
@@ -2018,7 +2105,7 @@ function bindEvents() {
       state.waDropDepth = 0;
       setWaDropActive(false);
       try {
-        await handleWaFileDrop(evt.dataTransfer?.files);
+        await handleWaFileDrop(evt);
       } catch (e) {
         toast("WhatsApp", String(e?.message || e));
       }

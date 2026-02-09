@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("api", {
   getTemplates: () => ipcRenderer.invoke("app:getTemplates"),
@@ -38,6 +38,14 @@ contextBridge.exposeInMainWorld("api", {
   waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
+  waGetPathForDroppedFile: (file) => {
+    try {
+      if (!webUtils || typeof webUtils.getPathForFile !== "function") return "";
+      return String(webUtils.getPathForFile(file) || "");
+    } catch {
+      return "";
+    }
+  },
   waDownloadMedia: (payload) => ipcRenderer.invoke("wa:downloadMedia", payload),
   waResolveImagePreview: (payload) => ipcRenderer.invoke("wa:resolveImagePreview", payload),
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
