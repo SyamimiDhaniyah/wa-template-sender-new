@@ -720,6 +720,7 @@ p {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .waChatTools {
@@ -734,8 +735,10 @@ p {
 .waChatList {
   overflow: auto;
   flex: 1;
+  height: 100%;
   min-height: 0;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .waChatItem {
@@ -907,6 +910,10 @@ p {
   display: block;
 }
 
+.waMediaThumb.clickable {
+  cursor: zoom-in;
+}
+
 .waMediaMeta {
   margin-top: 6px;
   font-size: 12px;
@@ -1060,6 +1067,45 @@ p {
   border-radius: 14px;
   padding: 14px;
   box-shadow: var(--shadow);
+}
+
+.waImageLightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 650;
+  background: rgba(11, 20, 19, 0.84);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+}
+
+.waImageLightboxImg {
+  max-width: min(94vw, 1100px);
+  max-height: 90vh;
+  border-radius: 12px;
+  border: 1px solid rgba(187, 225, 217, 0.42);
+  box-shadow: 0 20px 44px rgba(2, 10, 9, 0.45);
+  object-fit: contain;
+  background: #0d1717;
+}
+
+.waImageLightboxClose {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  border: 1px solid #8db5ae;
+  background: rgba(11, 27, 26, 0.84);
+  color: #d9ece8;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.waImageLightboxClose:hover {
+  background: rgba(22, 45, 43, 0.95);
 }
 
 .confirmBody {

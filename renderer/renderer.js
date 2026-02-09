@@ -33,6 +33,7 @@ const state = {
   activeTab: "whatsapp",
   waChats: [],
   waActiveChatJid: "",
+  waExplicitOpenChatJid: "",
   waMessages: [],
   waChatSearch: "",
   waPendingAttachment: null,
@@ -283,6 +284,13 @@ function getActiveWaChat() {
   return state.waChats.find((x) => x.jid === state.waActiveChatJid) || null;
 }
 
+function canMarkReadForChat(chatJid) {
+  const jid = String(chatJid || "");
+  if (!jid) return false;
+  if (state.activeTab !== "whatsapp") return false;
+  return jid === String(state.waActiveChatJid || "") && jid === String(state.waExplicitOpenChatJid || "");
+}
+
 function renderWaAttachmentRow() {
   const row = el("waAttachmentRow");
   const label = el("waAttachmentMeta");
@@ -399,6 +407,26 @@ async function handleWaMediaDownload(msg) {
   }
 }
 
+function openWaImageLightbox(src, altText) {
+  const wrap = el("waImageLightbox");
+  const img = el("waImageLightboxImg");
+  if (!wrap || !img) return;
+  const dataUrl = String(src || "").trim();
+  if (!dataUrl) return;
+  img.src = dataUrl;
+  img.alt = String(altText || "Image preview");
+  wrap.classList.remove("hidden");
+}
+
+function closeWaImageLightbox() {
+  const wrap = el("waImageLightbox");
+  const img = el("waImageLightboxImg");
+  if (!wrap || !img) return;
+  wrap.classList.add("hidden");
+  img.removeAttribute("src");
+  img.alt = "Image preview";
+}
+
 function renderWaMessages(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
   const viewport = el("waMessageViewport");
@@ -445,6 +473,12 @@ function renderWaMessages(options = {}) {
         img.className = "waMediaThumb";
         img.src = msg.media.thumbnailDataUrl;
         img.alt = msg.media.fileName || msg.media.kind || "media";
+        if (String(msg.media.kind || "").toLowerCase() === "image") {
+          img.classList.add("clickable");
+          img.addEventListener("click", () => {
+            openWaImageLightbox(msg.media.thumbnailDataUrl, msg.media.fileName || "Image");
+          });
+        }
         bubble.appendChild(img);
       }
 
@@ -492,7 +526,8 @@ function renderWaMessages(options = {}) {
 
 async function refreshWaMessages(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
-  if (!state.waActiveChatJid) {
+  const activeChatJid = String(state.waActiveChatJid || "");
+  if (!activeChatJid) {
     state.waMessages = [];
     state.waLoadingMessages = false;
     renderWaConversationHead();
@@ -512,7 +547,7 @@ async function refreshWaMessages(options = {}) {
 
   try {
     const res = await window.api.waGetChatMessages({
-      chatJid: state.waActiveChatJid,
+      chatJid: activeChatJid,
       limit: 180
     });
     if (requestId !== state.waMessagesReqSeq) return;
@@ -524,12 +559,13 @@ async function refreshWaMessages(options = {}) {
     renderWaMessages({ forceBottom: opts.forceBottom === true });
   }
 
-  if (opts.markRead !== false) {
+  const allowMarkRead = opts.markRead !== false && canMarkReadForChat(activeChatJid);
+  if (allowMarkRead) {
     try {
-      await window.api.waMarkChatRead({ chatJid: state.waActiveChatJid });
+      await window.api.waMarkChatRead({ chatJid: activeChatJid });
       if (requestId !== state.waMessagesReqSeq) return;
       state.waChats = state.waChats.map((chat) =>
-        chat.jid === state.waActiveChatJid
+        chat.jid === activeChatJid
           ? {
               ...chat,
               unreadCount: 0
@@ -548,6 +584,7 @@ async function openWaChat(chatJid) {
   const next = String(chatJid || "");
   if (!next) return;
   state.waActiveChatJid = next;
+  state.waExplicitOpenChatJid = next;
   renderWaChatList();
   renderWaConversationHead();
   await refreshWaMessages({ markRead: true, forceBottom: true, showLoading: true });
@@ -576,9 +613,14 @@ async function refreshWaChats(options = {}) {
     });
     if (requestId !== state.waChatsReqSeq) return;
     state.waChats = Array.isArray(res?.chats) ? res.chats : [];
-    if (!state.waActiveChatJid || !state.waChats.some((x) => x.jid === state.waActiveChatJid)) {
-      state.waActiveChatJid = state.waChats[0]?.jid || "";
-      if (!state.waActiveChatJid) state.waMessages = [];
+    const activeStillExists = state.waChats.some((x) => x.jid === state.waActiveChatJid);
+    if (!activeStillExists) {
+      state.waActiveChatJid = "";
+      state.waMessages = [];
+    }
+    const explicitStillExists = state.waChats.some((x) => x.jid === state.waExplicitOpenChatJid);
+    if (!explicitStillExists) {
+      state.waExplicitOpenChatJid = "";
     }
   } finally {
     if (requestId !== state.waChatsReqSeq) return;
@@ -608,7 +650,7 @@ function scheduleWaSyncRefresh() {
   if (state.waSyncTimer) clearTimeout(state.waSyncTimer);
   state.waSyncTimer = setTimeout(() => {
     state.waSyncTimer = null;
-    const shouldMarkRead = state.activeTab === "whatsapp" && !!state.waActiveChatJid;
+    const shouldMarkRead = canMarkReadForChat(state.waActiveChatJid);
     refreshWaChats({
       refreshMessages: true,
       markRead: shouldMarkRead,
@@ -1513,6 +1555,7 @@ async function loadInitialDataAfterLogin() {
   setConnectionBadge(!!connRes?.connected, connRes?.text || "Not connected");
   state.waChatSearch = "";
   state.waActiveChatJid = "";
+  state.waExplicitOpenChatJid = "";
   state.waMessages = [];
   state.waChats = [];
   state.waLoadingChats = false;
@@ -1543,6 +1586,7 @@ function showLoginScreen() {
   state.marketingRecipients = [];
   state.waChats = [];
   state.waActiveChatJid = "";
+  state.waExplicitOpenChatJid = "";
   state.waMessages = [];
   state.waChatSearch = "";
   state.waLoadingChats = false;
@@ -1557,6 +1601,7 @@ function showLoginScreen() {
     clearTimeout(state.waSyncTimer);
     state.waSyncTimer = null;
   }
+  closeWaImageLightbox();
   renderWaChatList();
   renderWaConversationHead();
   renderWaMessages();
@@ -1971,6 +2016,9 @@ function bindEvents() {
     try {
       const id = el("profileSelect").value;
       if (!id) return;
+      state.waActiveChatJid = "";
+      state.waExplicitOpenChatJid = "";
+      state.waMessages = [];
       await window.api.setActiveProfile(id);
       await refreshProfiles();
       const status = await window.api.waGetConnectionState();
@@ -2008,6 +2056,13 @@ function bindEvents() {
   el("btnConfirmSend").addEventListener("click", () => closeConfirmModal(true));
   el("btnCancelConfirm").addEventListener("click", () => closeConfirmModal(false));
   el("confirmModalBackdrop").addEventListener("click", () => closeConfirmModal(false));
+  el("waImageLightboxClose").addEventListener("click", () => closeWaImageLightbox());
+  el("waImageLightbox").addEventListener("click", (evt) => {
+    if (evt.target === el("waImageLightbox")) closeWaImageLightbox();
+  });
+  document.addEventListener("keydown", (evt) => {
+    if (evt.key === "Escape") closeWaImageLightbox();
+  });
 
   window.api.onQR((dataUrl) => {
     el("qrImg").src = dataUrl || "";

@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const qrcode = require("qrcode");
@@ -1755,6 +1755,10 @@ function summarizeMessagePayload(rawMessage) {
   if (content.imageMessage && typeof content.imageMessage === "object") {
     const caption = textOrEmpty(content.imageMessage.caption);
     const thumb = bytesToBase64(content.imageMessage.jpegThumbnail);
+    const localThumb = textOrEmpty(messageNode.__localThumbnailDataUrl);
+    const thumbDataUrl = thumb
+      ? `data:image/jpeg;base64,${thumb}`
+      : localThumb.startsWith("data:image/") ? localThumb : "";
     return {
       type: "image",
       text: caption,
@@ -1765,7 +1769,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.imageMessage.mimetype) || "image/jpeg",
         fileName: textOrEmpty(content.imageMessage.fileName),
         fileLength: Number(content.imageMessage.fileLength || 0) || 0,
-        thumbnailDataUrl: thumb ? `data:image/jpeg;base64,${thumb}` : ""
+        thumbnailDataUrl: thumbDataUrl
       },
       skip: false
     };
@@ -2653,6 +2657,34 @@ function extensionFromMime(mimeType) {
   return "";
 }
 
+function buildImagePreviewDataUrlFromFile(filePath) {
+  const srcPath = cleanString(filePath);
+  if (!srcPath || !fs.existsSync(srcPath)) return "";
+
+  try {
+    const img = nativeImage.createFromPath(srcPath);
+    if (!img || img.isEmpty()) return "";
+    const size = img.getSize();
+    if (!size || !size.width || !size.height) return "";
+
+    const maxSide = 420;
+    let preview = img;
+    const largest = Math.max(size.width, size.height);
+    if (largest > maxSide) {
+      const scale = maxSide / largest;
+      const width = Math.max(1, Math.round(size.width * scale));
+      const height = Math.max(1, Math.round(size.height * scale));
+      const resized = img.resize({ width, height, quality: "good" });
+      if (resized && !resized.isEmpty()) preview = resized;
+    }
+
+    return preview.toDataURL();
+  } catch (e) {
+    log.debug({ err: e, filePath: srcPath }, "Failed to build local image preview");
+    return "";
+  }
+}
+
 function buildDefaultDownloadFileName(messageRecord) {
   const msg = messageRecord && typeof messageRecord === "object" ? messageRecord : {};
   const media = msg.media && typeof msg.media === "object" ? msg.media : {};
@@ -2690,6 +2722,7 @@ async function sendChatMessage(payload) {
   }
 
   let messagePayload = null;
+  let localImagePreviewDataUrl = "";
   if (attachment) {
     const filePath = cleanString(attachment.path || "");
     if (!filePath || !fs.existsSync(filePath)) throw new Error("Attachment file not found");
@@ -2698,6 +2731,7 @@ async function sendChatMessage(payload) {
     const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
 
     if (kind === "image") {
+      localImagePreviewDataUrl = buildImagePreviewDataUrlFromFile(filePath);
       messagePayload = {
         image: { url: filePath },
         ...(trimmedText ? { caption: trimmedText } : {})
@@ -2728,6 +2762,9 @@ async function sendChatMessage(payload) {
 
   const sentMessage = await sock.sendMessage(chatJid, messagePayload, sendOptions);
   if (sentMessage && typeof sentMessage === "object") {
+    if (localImagePreviewDataUrl) {
+      sentMessage.__localThumbnailDataUrl = localImagePreviewDataUrl;
+    }
     upsertMessagesForProfile(profileId, [sentMessage]);
   } else {
     scheduleWaChatSync(profileId, "send");
