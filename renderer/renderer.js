@@ -201,6 +201,8 @@ function setActiveTab(tabName) {
   state.activeTab = tab;
   document.querySelectorAll(".tabBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
   document.querySelectorAll(".tabPanel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `tab-${tab}`));
+  const wrap = document.querySelector(".tabWrap");
+  if (wrap) wrap.classList.toggle("is-whatsapp", tab === "whatsapp");
 }
 
 function normalizeTemplate(raw, idx) {
