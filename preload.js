@@ -35,7 +35,6 @@ contextBridge.exposeInMainWorld("api", {
   waGetContacts: (options) => ipcRenderer.invoke("wa:getContacts", options),
   waGetRecentChats: (options) => ipcRenderer.invoke("wa:getRecentChats", options),
   waGetChatMessages: (payload) => ipcRenderer.invoke("wa:getChatMessages", payload),
-  waWarmChatHistory: (payload) => ipcRenderer.invoke("wa:warmChatHistory", payload),
   waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
