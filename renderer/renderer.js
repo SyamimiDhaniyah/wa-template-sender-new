@@ -493,6 +493,7 @@ function renderWaMessages(options = {}) {
 
     const bubble = document.createElement("div");
     bubble.className = "waBubble";
+    let hasVisibleContent = false;
 
     if (!msg.fromMe && msg.senderName) {
       const sender = document.createElement("div");
@@ -541,6 +542,7 @@ function renderWaMessages(options = {}) {
       });
       mediaMeta.appendChild(dlBtn);
       bubble.appendChild(mediaMeta);
+      hasVisibleContent = true;
     }
 
     if (msg.text) {
@@ -548,6 +550,20 @@ function renderWaMessages(options = {}) {
       text.className = "waMessageText";
       text.textContent = msg.text;
       bubble.appendChild(text);
+      hasVisibleContent = true;
+    } else {
+      const previewText = String(msg.preview || "").trim();
+      if (previewText) {
+        const preview = document.createElement("div");
+        preview.className = "waMessageText";
+        preview.textContent = previewText;
+        bubble.appendChild(preview);
+        hasVisibleContent = true;
+      }
+    }
+
+    if (!hasVisibleContent) {
+      continue;
     }
 
     const ts = document.createElement("div");
