@@ -44,8 +44,10 @@ const lastContactNameSyncAtByProfile = new Map();
 let handshakeAttemptId = 0;
 let startupReconnectScheduled = false;
 const WA_CHAT_MAX_MESSAGES_PER_CHAT = 320;
+const WA_CHAT_STORE_KEY = "waChatByProfile";
 const waChatByProfileMem = {};
 const waChatSyncTimers = new Map();
+let waChatPersistTimer = null;
 
 const store = new Store();
 
@@ -576,6 +578,226 @@ function clearContactsCacheForProfile(profileId) {
   if (!Object.prototype.hasOwnProperty.call(waContactsByProfileMem, profileId)) return;
   delete waContactsByProfileMem[profileId];
   persistContactsCache();
+}
+
+function normalizePersistedChatSummary(raw, fallbackJid) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const jid = normalizeChatJid(src.jid || fallbackJid || "");
+  if (!jid) return null;
+  return {
+    jid,
+    name: cleanString(src.name || ""),
+    lastMessageTimestampMs: Math.max(0, Number(src.lastMessageTimestampMs || 0) || 0),
+    lastMessagePreview: String(src.lastMessagePreview || ""),
+    lastMessageType: cleanString(src.lastMessageType || ""),
+    lastMessageFromMe: src.lastMessageFromMe === true,
+    unreadCount: Math.max(0, Number(src.unreadCount || 0) || 0),
+    archived: src.archived === true,
+    pinned: src.pinned === true,
+    updatedAt: cleanString(src.updatedAt || nowIsoShort())
+  };
+}
+
+function normalizePersistedChatMedia(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const kind = cleanString(src.kind || "");
+  const mimeType = cleanString(src.mimeType || "");
+  const fileName = cleanString(src.fileName || "");
+  const fileLength = Math.max(0, Number(src.fileLength || 0) || 0);
+  const thumbnailDataUrl = cleanString(src.thumbnailDataUrl || "");
+  if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl) return null;
+  return {
+    kind,
+    mimeType,
+    fileName,
+    fileLength,
+    thumbnailDataUrl
+  };
+}
+
+function normalizePersistedChatMessage(raw, fallbackChatJid) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const key = normalizeMessageKey(src.key || {}, fallbackChatJid);
+  const chatJid = normalizeChatJid(src.chatJid || key.remoteJid || fallbackChatJid || "");
+  if (!chatJid || !key.id) return null;
+
+  const timestampMs = Math.max(0, Number(src.timestampMs || 0) || 0);
+  const type = cleanString(src.type || "unknown");
+  const text = String(src.text || "");
+  const preview = String(src.preview || text || "");
+  const fromMe = src.fromMe === true || key.fromMe === true;
+  const pushName = cleanString(src.pushName || "");
+  const media = normalizePersistedChatMedia(src.media);
+  const hasMedia = src.hasMedia === true || !!media;
+
+  return {
+    key: {
+      remoteJid: chatJid,
+      id: key.id,
+      fromMe,
+      participant: cleanString(key.participant || "")
+    },
+    hash: messageKeyHash({
+      remoteJid: chatJid,
+      id: key.id,
+      fromMe,
+      participant: cleanString(key.participant || "")
+    }),
+    chatJid,
+    fromMe,
+    pushName,
+    timestampMs,
+    type,
+    text,
+    preview,
+    hasMedia,
+    media,
+    status: Math.max(0, Number(src.status || 0) || 0),
+    rawMessage: null
+  };
+}
+
+function normalizeWaChatCacheRoot(raw) {
+  const srcRoot = raw && typeof raw === "object" ? raw : {};
+  const out = {};
+
+  for (const [profileId, profileRaw] of Object.entries(srcRoot)) {
+    if (!profileId) continue;
+    const profileObj = profileRaw && typeof profileRaw === "object" ? profileRaw : {};
+    const chatsRaw = profileObj.chatsByJid && typeof profileObj.chatsByJid === "object" ? profileObj.chatsByJid : {};
+    const messagesRaw =
+      profileObj.messagesByChat && typeof profileObj.messagesByChat === "object" ? profileObj.messagesByChat : {};
+
+    const chatsByJid = {};
+    for (const [jidKey, chatRaw] of Object.entries(chatsRaw)) {
+      const chat = normalizePersistedChatSummary(chatRaw, jidKey);
+      if (!chat) continue;
+      chatsByJid[chat.jid] = chat;
+    }
+
+    const messagesByChat = {};
+    for (const [jidKey, listRaw] of Object.entries(messagesRaw)) {
+      const chatJid = normalizeChatJid(jidKey);
+      if (!chatJid || !Array.isArray(listRaw)) continue;
+      const normalizedList = listRaw
+        .map((m) => normalizePersistedChatMessage(m, chatJid))
+        .filter((m) => !!m)
+        .sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0))
+        .slice(-WA_CHAT_MAX_MESSAGES_PER_CHAT);
+      if (normalizedList.length > 0) messagesByChat[chatJid] = normalizedList;
+    }
+
+    for (const [chatJid, list] of Object.entries(messagesByChat)) {
+      if (Object.prototype.hasOwnProperty.call(chatsByJid, chatJid)) continue;
+      const latest = Array.isArray(list) && list.length > 0 ? list[list.length - 1] : null;
+      chatsByJid[chatJid] = {
+        jid: chatJid,
+        name: "",
+        lastMessageTimestampMs: Number(latest?.timestampMs || 0) || 0,
+        lastMessagePreview: String(latest?.preview || ""),
+        lastMessageType: cleanString(latest?.type || ""),
+        lastMessageFromMe: latest?.fromMe === true,
+        unreadCount: 0,
+        archived: false,
+        pinned: false,
+        updatedAt: nowIsoShort()
+      };
+    }
+
+    if (Object.keys(chatsByJid).length > 0 || Object.keys(messagesByChat).length > 0) {
+      out[profileId] = {
+        chatsByJid,
+        messagesByChat
+      };
+    }
+  }
+
+  return out;
+}
+
+function persistWaChatCache() {
+  try {
+    const root = {};
+    for (const [profileId, profileState] of Object.entries(waChatByProfileMem || {})) {
+      if (!profileId || !profileState || typeof profileState !== "object") continue;
+      const chats = profileState.chatsByJid && typeof profileState.chatsByJid === "object" ? profileState.chatsByJid : {};
+      const messages =
+        profileState.messagesByChat && typeof profileState.messagesByChat === "object"
+          ? profileState.messagesByChat
+          : {};
+
+      const chatsByJid = {};
+      for (const [jid, chatRaw] of Object.entries(chats)) {
+        const chat = normalizePersistedChatSummary(chatRaw, jid);
+        if (!chat) continue;
+        chatsByJid[chat.jid] = chat;
+      }
+
+      const messagesByChat = {};
+      for (const [jid, listRaw] of Object.entries(messages)) {
+        const chatJid = normalizeChatJid(jid);
+        if (!chatJid || !Array.isArray(listRaw)) continue;
+        const compact = listRaw
+          .map((msg) => normalizePersistedChatMessage(msg, chatJid))
+          .filter((msg) => !!msg)
+          .sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0))
+          .slice(-WA_CHAT_MAX_MESSAGES_PER_CHAT)
+          .map((msg) => ({
+            ...msg,
+            rawMessage: null
+          }));
+        if (compact.length > 0) messagesByChat[chatJid] = compact;
+      }
+
+      for (const [chatJid, list] of Object.entries(messagesByChat)) {
+        if (Object.prototype.hasOwnProperty.call(chatsByJid, chatJid)) continue;
+        const latest = Array.isArray(list) && list.length > 0 ? list[list.length - 1] : null;
+        chatsByJid[chatJid] = {
+          jid: chatJid,
+          name: "",
+          lastMessageTimestampMs: Number(latest?.timestampMs || 0) || 0,
+          lastMessagePreview: String(latest?.preview || ""),
+          lastMessageType: cleanString(latest?.type || ""),
+          lastMessageFromMe: latest?.fromMe === true,
+          unreadCount: 0,
+          archived: false,
+          pinned: false,
+          updatedAt: nowIsoShort()
+        };
+      }
+
+      if (Object.keys(chatsByJid).length > 0 || Object.keys(messagesByChat).length > 0) {
+        root[profileId] = {
+          chatsByJid,
+          messagesByChat
+        };
+      }
+    }
+    store.set(WA_CHAT_STORE_KEY, root);
+  } catch (e) {
+    log.warn({ err: e }, "Failed to persist WA chat cache");
+  }
+}
+
+function schedulePersistWaChatCache() {
+  if (waChatPersistTimer) return;
+  waChatPersistTimer = setTimeout(() => {
+    waChatPersistTimer = null;
+    persistWaChatCache();
+  }, 260);
+}
+
+function loadPersistedWaChatCache() {
+  try {
+    const raw = store.get(WA_CHAT_STORE_KEY);
+    const normalized = normalizeWaChatCacheRoot(raw);
+    for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
+    for (const [profileId, profileState] of Object.entries(normalized)) {
+      waChatByProfileMem[profileId] = profileState;
+    }
+  } catch (e) {
+    for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
+  }
 }
 
 function isValidTemplateVarName(name) {
@@ -1337,6 +1559,7 @@ function clearWaChatStateForProfile(profileId) {
   const root = getWaChatStoreObj();
   if (!Object.prototype.hasOwnProperty.call(root, profileId)) return;
   delete root[profileId];
+  schedulePersistWaChatCache();
 }
 
 function ensureWaChatStateForProfile(profileId) {
@@ -1431,6 +1654,7 @@ function isIgnoredChatJid(jid) {
   if (!chatJid.includes("@")) return true;
   if (chatJid === "status@broadcast") return true;
   if (chatJid.endsWith("@broadcast")) return true;
+  if (chatJid.endsWith("@lid")) return true;
   return false;
 }
 
@@ -1722,6 +1946,28 @@ function getContactByChatJid(profileId, chatJid) {
   return byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : null;
 }
 
+function ensureContactsFromChatsForProfile(profileId) {
+  if (!profileId) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  const chats = Object.values(state.chatsByJid || {});
+  if (chats.length === 0) return 0;
+
+  const contacts = [];
+  for (const chat of chats) {
+    const chatJid = normalizeChatJid(chat?.jid || "");
+    if (!chatJid || !chatJid.endsWith("@s.whatsapp.net")) continue;
+    contacts.push({
+      id: chatJid,
+      jid: chatJid,
+      name: cleanString(chat?.name || ""),
+      notify: cleanString(chat?.name || "")
+    });
+  }
+
+  if (contacts.length === 0) return 0;
+  return upsertContactsForProfile(profileId, contacts);
+}
+
 function fallbackTitleForChatJid(chatJid) {
   const jid = normalizeJidForContact(chatJid);
   if (!jid) return "Unknown chat";
@@ -1836,7 +2082,10 @@ function upsertChatsForProfile(profileId, chats) {
     }
   }
 
-  if (changed > 0) scheduleWaChatSync(profileId, "chats");
+  if (changed > 0) {
+    scheduleWaChatSync(profileId, "chats");
+    schedulePersistWaChatCache();
+  }
   return changed;
 }
 
@@ -1936,7 +2185,10 @@ function upsertMessagesForProfile(profileId, messages) {
     }
   }
 
-  if (changed > 0) scheduleWaChatSync(profileId, "messages");
+  if (changed > 0) {
+    scheduleWaChatSync(profileId, "messages");
+    schedulePersistWaChatCache();
+  }
   return changed;
 }
 
@@ -1996,7 +2248,10 @@ function applyMessageUpdatesForProfile(profileId, updates) {
     }
   }
 
-  if (changed > 0) scheduleWaChatSync(profileId, "message_updates");
+  if (changed > 0) {
+    scheduleWaChatSync(profileId, "message_updates");
+    schedulePersistWaChatCache();
+  }
   return changed;
 }
 
@@ -2146,6 +2401,7 @@ async function markChatReadForProfile(profileId, chatJid) {
       updatedAt: nowIsoShort()
     };
     scheduleWaChatSync(profileId, "read");
+    schedulePersistWaChatCache();
   }
   return { ok: true, chatJid: jid };
 }
@@ -2760,12 +3016,22 @@ async function connectWA(method, attemptId) {
         upsertChatsAsContactsForProfile(activeProfileId, rows);
         upsertChatsForProfile(activeProfileId, rows);
       });
+      sock.ev.on("chats.set", (evt) => {
+        const rows = Array.isArray(evt?.chats) ? evt.chats : [];
+        upsertChatsAsContactsForProfile(activeProfileId, rows);
+        upsertChatsForProfile(activeProfileId, rows);
+      });
       sock.ev.on("chats.update", (chats) => {
         const rows = Array.isArray(chats) ? chats : [];
         upsertChatsAsContactsForProfile(activeProfileId, rows);
         upsertChatsForProfile(activeProfileId, rows);
       });
       sock.ev.on("messages.upsert", (evt) => {
+        const rows = Array.isArray(evt?.messages) ? evt.messages : [];
+        upsertMessagesAsContactsForProfile(activeProfileId, rows);
+        upsertMessagesForProfile(activeProfileId, rows);
+      });
+      sock.ev.on("messages.set", (evt) => {
         const rows = Array.isArray(evt?.messages) ? evt.messages : [];
         upsertMessagesAsContactsForProfile(activeProfileId, rows);
         upsertMessagesForProfile(activeProfileId, rows);
@@ -3162,7 +3428,33 @@ ipcMain.handle("wa:getContacts", async (_evt, options) => {
 
 ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
   const profileId = getActiveProfileId();
-  const chats = getRecentChatsForProfile(profileId, options || {});
+  const opts = options && typeof options === "object" ? options : {};
+
+  if (isConnected && sock) {
+    if (opts.forceNameSync === true) {
+      await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
+    }
+
+    const includePhotos = opts.includePhotos !== false;
+    if (includePhotos) {
+      ensureContactsFromChatsForProfile(profileId);
+      enrichContactPhotosForProfile(profileId, {
+        maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 40,
+        minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
+          ? Number(opts.minMinutesBetweenPhotoChecks)
+          : 120,
+        photoFetchConcurrency: Number.isFinite(Number(opts.photoFetchConcurrency))
+          ? Number(opts.photoFetchConcurrency)
+          : 3
+      })
+        .then(() => {
+          scheduleWaChatSync(profileId, "photos");
+        })
+        .catch(() => {});
+    }
+  }
+
+  const chats = getRecentChatsForProfile(profileId, opts);
   return {
     ok: true,
     connected: !!isConnected,
@@ -3596,7 +3888,20 @@ app.whenReady().then(() => {
   ensureDataFiles();
   loadProfiles();
   loadPersistedContactsCache();
+  loadPersistedWaChatCache();
   createWindow();
+});
+
+app.on("before-quit", () => {
+  try {
+    if (waChatPersistTimer) {
+      clearTimeout(waChatPersistTimer);
+      waChatPersistTimer = null;
+    }
+    persistWaChatCache();
+  } catch (e) {
+    // ignore
+  }
 });
 
 app.on("window-all-closed", () => {

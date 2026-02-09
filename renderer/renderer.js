@@ -39,6 +39,9 @@ const state = {
   waSyncTimer: null,
   waLoadingChats: false,
   waLoadingMessages: false,
+  waRefreshQueued: false,
+  waChatsReqSeq: 0,
+  waMessagesReqSeq: 0,
   profiles: [],
   activeProfileId: null,
   activityRows: [],
@@ -478,22 +481,31 @@ async function refreshWaMessages(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
   if (!state.waActiveChatJid) {
     state.waMessages = [];
+    state.waLoadingMessages = false;
     renderWaConversationHead();
     renderWaMessages();
     return;
   }
 
-  state.waLoadingMessages = true;
-  renderWaConversationHead();
-  renderWaMessages();
+  const requestId = ++state.waMessagesReqSeq;
+  const shouldShowLoading = opts.showLoading !== false && state.waMessages.length === 0;
+  if (shouldShowLoading) {
+    state.waLoadingMessages = true;
+    renderWaConversationHead();
+    renderWaMessages();
+  } else {
+    state.waLoadingMessages = false;
+  }
 
   try {
     const res = await window.api.waGetChatMessages({
       chatJid: state.waActiveChatJid,
       limit: 180
     });
+    if (requestId !== state.waMessagesReqSeq) return;
     state.waMessages = Array.isArray(res?.messages) ? res.messages : [];
   } finally {
+    if (requestId !== state.waMessagesReqSeq) return;
     state.waLoadingMessages = false;
     renderWaConversationHead();
     renderWaMessages();
@@ -502,6 +514,7 @@ async function refreshWaMessages(options = {}) {
   if (opts.markRead !== false) {
     try {
       await window.api.waMarkChatRead({ chatJid: state.waActiveChatJid });
+      if (requestId !== state.waMessagesReqSeq) return;
       state.waChats = state.waChats.map((chat) =>
         chat.jid === state.waActiveChatJid
           ? {
@@ -529,33 +542,50 @@ async function openWaChat(chatJid) {
 
 async function refreshWaChats(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
-  if (state.waLoadingChats) return;
+  if (state.waLoadingChats) {
+    state.waRefreshQueued = true;
+    return;
+  }
   state.waLoadingChats = true;
+  const requestId = ++state.waChatsReqSeq;
 
   try {
     const res = await window.api.waGetRecentChats({
       search: state.waChatSearch || "",
-      limit: 220
+      limit: 220,
+      includePhotos: opts.includePhotos !== false,
+      maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 35,
+      minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
+        ? Number(opts.minMinutesBetweenPhotoChecks)
+        : 120
     });
+    if (requestId !== state.waChatsReqSeq) return;
     state.waChats = Array.isArray(res?.chats) ? res.chats : [];
     if (!state.waActiveChatJid || !state.waChats.some((x) => x.jid === state.waActiveChatJid)) {
       state.waActiveChatJid = state.waChats[0]?.jid || "";
       if (!state.waActiveChatJid) state.waMessages = [];
     }
   } finally {
+    if (requestId !== state.waChatsReqSeq) return;
     state.waLoadingChats = false;
   }
 
+  if (requestId !== state.waChatsReqSeq) return;
   renderWaChatList();
   renderWaConversationHead();
 
   if (!state.waActiveChatJid) {
     renderWaMessages();
-    return;
+  } else if (opts.refreshMessages !== false) {
+    await refreshWaMessages({
+      markRead: opts.markRead !== false,
+      showLoading: opts.showLoadingMessages !== false
+    });
   }
 
-  if (opts.refreshMessages !== false) {
-    await refreshWaMessages({ markRead: opts.markRead !== false });
+  if (state.waRefreshQueued) {
+    state.waRefreshQueued = false;
+    await refreshWaChats({ ...opts, markRead: false, showLoadingMessages: false });
   }
 }
 
@@ -563,7 +593,12 @@ function scheduleWaSyncRefresh() {
   if (state.waSyncTimer) clearTimeout(state.waSyncTimer);
   state.waSyncTimer = setTimeout(() => {
     state.waSyncTimer = null;
-    refreshWaChats({ refreshMessages: true, markRead: false }).catch(() => {});
+    refreshWaChats({
+      refreshMessages: true,
+      markRead: false,
+      showLoadingMessages: false,
+      includePhotos: false
+    }).catch(() => {});
   }, 160);
 }
 
@@ -1464,6 +1499,11 @@ async function loadInitialDataAfterLogin() {
   state.waActiveChatJid = "";
   state.waMessages = [];
   state.waChats = [];
+  state.waLoadingChats = false;
+  state.waLoadingMessages = false;
+  state.waRefreshQueued = false;
+  state.waChatsReqSeq = 0;
+  state.waMessagesReqSeq = 0;
   setWaPendingAttachment(null);
   el("waChatSearchInput").value = "";
 
@@ -1483,6 +1523,11 @@ function showLoginScreen() {
   state.waActiveChatJid = "";
   state.waMessages = [];
   state.waChatSearch = "";
+  state.waLoadingChats = false;
+  state.waLoadingMessages = false;
+  state.waRefreshQueued = false;
+  state.waChatsReqSeq = 0;
+  state.waMessagesReqSeq = 0;
   setWaPendingAttachment(null);
   el("waChatSearchInput").value = "";
   el("waComposerInput").value = "";
