@@ -30,7 +30,15 @@ const state = {
   selectedAppointmentIds: new Set(),
   marketingRecipients: [],
   waConnected: false,
-  activeTab: "appointment",
+  activeTab: "whatsapp",
+  waChats: [],
+  waActiveChatJid: "",
+  waMessages: [],
+  waChatSearch: "",
+  waPendingAttachment: null,
+  waSyncTimer: null,
+  waLoadingChats: false,
+  waLoadingMessages: false,
   profiles: [],
   activeProfileId: null,
   activityRows: [],
@@ -186,7 +194,7 @@ function setConnectionBadge(connected, text) {
 }
 
 function setActiveTab(tabName) {
-  const tab = String(tabName || "appointment");
+  const tab = String(tabName || "whatsapp");
   state.activeTab = tab;
   document.querySelectorAll(".tabBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
   document.querySelectorAll(".tabPanel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `tab-${tab}`));
@@ -227,6 +235,368 @@ function updateHeaderGreeting() {
   const branch = String(user.Branch || "").trim();
   el("helloText").textContent = `Hello, ${getGreetingName()}`;
   el("helloMeta").textContent = [branch, role, TIMEZONE].filter(Boolean).join(" | ");
+}
+
+function formatWaTimeShort(ts) {
+  const n = Number(ts || 0);
+  if (!n) return "";
+  return new Intl.DateTimeFormat("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(n));
+}
+
+function formatWaChatTime(ts) {
+  const n = Number(ts || 0);
+  if (!n) return "";
+  const dt = new Date(n);
+  const now = new Date();
+  const sameDay = dt.toDateString() === now.toDateString();
+  if (sameDay) return formatWaTimeShort(n);
+
+  const deltaDays = Math.floor((now.getTime() - dt.getTime()) / (24 * 60 * 60 * 1000));
+  if (deltaDays >= 0 && deltaDays < 6) {
+    return new Intl.DateTimeFormat("en-US", { weekday: "short" }).format(dt);
+  }
+  return new Intl.DateTimeFormat("en-GB", { day: "2-digit", month: "2-digit" }).format(dt);
+}
+
+function formatWaBytes(bytesRaw) {
+  const bytes = Number(bytesRaw || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function waChatInitial(chat) {
+  const t = String(chat?.title || "").trim();
+  return t ? t.slice(0, 1).toUpperCase() : "#";
+}
+
+function getActiveWaChat() {
+  return state.waChats.find((x) => x.jid === state.waActiveChatJid) || null;
+}
+
+function renderWaAttachmentRow() {
+  const row = el("waAttachmentRow");
+  const label = el("waAttachmentMeta");
+  const att = state.waPendingAttachment;
+  if (!att) {
+    row.classList.add("hidden");
+    label.textContent = "Attachment";
+    return;
+  }
+
+  const bits = [];
+  bits.push(att.fileName || "Attachment");
+  if (att.kind) bits.push(att.kind);
+  const sizeText = formatWaBytes(att.size);
+  if (sizeText) bits.push(sizeText);
+  label.textContent = bits.join(" | ");
+  row.classList.remove("hidden");
+}
+
+function setWaPendingAttachment(attachment) {
+  state.waPendingAttachment = attachment || null;
+  renderWaAttachmentRow();
+}
+
+function renderWaChatList() {
+  const wrap = el("waChatList");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+
+  if (state.waChats.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "smallText";
+    empty.style.padding = "12px";
+    empty.textContent = state.waConnected
+      ? "No recent chats yet. Open a conversation in WhatsApp first."
+      : "Connect WhatsApp to load conversations.";
+    wrap.appendChild(empty);
+    return;
+  }
+
+  for (const chat of state.waChats) {
+    const item = document.createElement("div");
+    item.className = `waChatItem${chat.jid === state.waActiveChatJid ? " active" : ""}`;
+
+    const avatar = document.createElement(chat.avatarUrl ? "img" : "div");
+    avatar.className = "waChatAvatar";
+    if (chat.avatarUrl) {
+      avatar.src = chat.avatarUrl;
+      avatar.alt = chat.title || "Avatar";
+      avatar.loading = "lazy";
+    } else {
+      avatar.textContent = waChatInitial(chat);
+    }
+
+    const main = document.createElement("div");
+    main.className = "waChatMain";
+    const previewPrefix = chat.lastMessageFromMe ? "You: " : "";
+    main.innerHTML = `
+      <div class="waChatName">${escapeHtml(chat.title || chat.jid)}</div>
+      <div class="waChatPreview">${escapeHtml(`${previewPrefix}${chat.preview || ""}` || "(no messages)")}</div>
+    `;
+
+    const meta = document.createElement("div");
+    meta.className = "waChatMeta";
+    meta.innerHTML = `
+      <div class="waChatTime">${escapeHtml(formatWaChatTime(chat.lastMessageTimestampMs))}</div>
+      ${
+        Number(chat.unreadCount || 0) > 0
+          ? `<div class="waUnreadBadge">${escapeHtml(String(Math.min(99, Number(chat.unreadCount || 0))))}</div>`
+          : ""
+      }
+    `;
+
+    item.append(avatar, main, meta);
+    item.addEventListener("click", async () => {
+      try {
+        await openWaChat(chat.jid);
+      } catch (e) {
+        toast("WhatsApp", String(e?.message || e));
+      }
+    });
+
+    wrap.appendChild(item);
+  }
+}
+
+function renderWaConversationHead() {
+  const titleEl = document.querySelector("#waConversationHead .waHeadTitle");
+  const activeChat = getActiveWaChat();
+  if (!activeChat) {
+    if (titleEl) titleEl.textContent = "WhatsApp";
+    el("waHeadMeta").textContent = "Select a conversation";
+    return;
+  }
+  if (titleEl) titleEl.textContent = activeChat.title || activeChat.jid || "WhatsApp";
+  const bits = [];
+  if (activeChat.isGroup) bits.push("Group");
+  if (activeChat.unreadCount) bits.push(`${activeChat.unreadCount} unread`);
+  bits.push(activeChat.jid);
+  el("waHeadMeta").textContent = bits.join(" | ");
+}
+
+async function handleWaMediaDownload(msg) {
+  try {
+    const res = await window.api.waDownloadMedia({
+      chatJid: msg.chatJid,
+      key: msg.key
+    });
+    if (!res?.ok && res?.canceled) return;
+    if (!res?.ok) throw new Error("Download failed");
+    toast("Download", `Saved to ${res.filePath}`);
+  } catch (e) {
+    toast("Download", String(e?.message || e));
+  }
+}
+
+function renderWaMessages() {
+  const viewport = el("waMessageViewport");
+  if (!viewport) return;
+  viewport.innerHTML = "";
+
+  if (!state.waActiveChatJid) {
+    viewport.innerHTML = '<div class="waEmptyState">Select a conversation to start replying.</div>';
+    return;
+  }
+
+  if (state.waLoadingMessages) {
+    viewport.innerHTML = '<div class="waEmptyState">Loading messages...</div>';
+    return;
+  }
+
+  if (state.waMessages.length === 0) {
+    viewport.innerHTML = '<div class="waEmptyState">No messages in this chat yet.</div>';
+    return;
+  }
+
+  for (const msg of state.waMessages) {
+    const row = document.createElement("div");
+    row.className = `waMessageRow${msg.fromMe ? " me" : ""}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "waBubble";
+
+    if (!msg.fromMe && msg.senderName) {
+      const sender = document.createElement("div");
+      sender.className = "waSender";
+      sender.textContent = msg.senderName;
+      bubble.appendChild(sender);
+    }
+
+    if (msg.hasMedia && msg.media) {
+      if (msg.media.thumbnailDataUrl) {
+        const img = document.createElement("img");
+        img.className = "waMediaThumb";
+        img.src = msg.media.thumbnailDataUrl;
+        img.alt = msg.media.fileName || msg.media.kind || "media";
+        bubble.appendChild(img);
+      }
+
+      const mediaMeta = document.createElement("div");
+      mediaMeta.className = "waMediaMeta";
+      const mediaText = msg.media.fileName || `[${msg.media.kind || "media"}]`;
+      const sizeText = formatWaBytes(msg.media.fileLength);
+      const textNode = document.createElement("span");
+      textNode.textContent = sizeText ? `${mediaText} (${sizeText})` : mediaText;
+      mediaMeta.appendChild(textNode);
+
+      const dlBtn = document.createElement("button");
+      dlBtn.className = "waMediaDownloadBtn";
+      dlBtn.textContent = "Download";
+      dlBtn.addEventListener("click", async () => {
+        await handleWaMediaDownload(msg);
+      });
+      mediaMeta.appendChild(dlBtn);
+      bubble.appendChild(mediaMeta);
+    }
+
+    if (msg.text) {
+      const text = document.createElement("div");
+      text.className = "waMessageText";
+      text.textContent = msg.text;
+      bubble.appendChild(text);
+    }
+
+    const ts = document.createElement("div");
+    ts.className = "waMsgTime";
+    ts.textContent = formatWaTimeShort(msg.timestampMs);
+    bubble.appendChild(ts);
+
+    row.appendChild(bubble);
+    viewport.appendChild(row);
+  }
+
+  viewport.scrollTop = viewport.scrollHeight;
+}
+
+async function refreshWaMessages(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  if (!state.waActiveChatJid) {
+    state.waMessages = [];
+    renderWaConversationHead();
+    renderWaMessages();
+    return;
+  }
+
+  state.waLoadingMessages = true;
+  renderWaConversationHead();
+  renderWaMessages();
+
+  try {
+    const res = await window.api.waGetChatMessages({
+      chatJid: state.waActiveChatJid,
+      limit: 180
+    });
+    state.waMessages = Array.isArray(res?.messages) ? res.messages : [];
+  } finally {
+    state.waLoadingMessages = false;
+    renderWaConversationHead();
+    renderWaMessages();
+  }
+
+  if (opts.markRead !== false) {
+    try {
+      await window.api.waMarkChatRead({ chatJid: state.waActiveChatJid });
+      state.waChats = state.waChats.map((chat) =>
+        chat.jid === state.waActiveChatJid
+          ? {
+              ...chat,
+              unreadCount: 0
+            }
+          : chat
+      );
+      renderWaChatList();
+      renderWaConversationHead();
+    } catch {
+      // ignore mark-read failure
+    }
+  }
+}
+
+async function openWaChat(chatJid) {
+  const next = String(chatJid || "");
+  if (!next) return;
+  state.waActiveChatJid = next;
+  renderWaChatList();
+  renderWaConversationHead();
+  await refreshWaMessages({ markRead: true });
+}
+
+async function refreshWaChats(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  if (state.waLoadingChats) return;
+  state.waLoadingChats = true;
+
+  try {
+    const res = await window.api.waGetRecentChats({
+      search: state.waChatSearch || "",
+      limit: 220
+    });
+    state.waChats = Array.isArray(res?.chats) ? res.chats : [];
+    if (!state.waActiveChatJid || !state.waChats.some((x) => x.jid === state.waActiveChatJid)) {
+      state.waActiveChatJid = state.waChats[0]?.jid || "";
+      if (!state.waActiveChatJid) state.waMessages = [];
+    }
+  } finally {
+    state.waLoadingChats = false;
+  }
+
+  renderWaChatList();
+  renderWaConversationHead();
+
+  if (!state.waActiveChatJid) {
+    renderWaMessages();
+    return;
+  }
+
+  if (opts.refreshMessages !== false) {
+    await refreshWaMessages({ markRead: opts.markRead !== false });
+  }
+}
+
+function scheduleWaSyncRefresh() {
+  if (state.waSyncTimer) clearTimeout(state.waSyncTimer);
+  state.waSyncTimer = setTimeout(() => {
+    state.waSyncTimer = null;
+    refreshWaChats({ refreshMessages: true, markRead: false }).catch(() => {});
+  }, 160);
+}
+
+async function pickWaAttachment() {
+  const res = await window.api.waPickAttachment();
+  if (!res?.ok && res?.canceled) return;
+  if (!res?.ok) throw new Error("Attachment selection failed");
+  setWaPendingAttachment(res.attachment || null);
+}
+
+async function sendWaComposerMessage() {
+  if (!state.waActiveChatJid) throw new Error("Please select a chat");
+
+  const text = String(el("waComposerInput").value || "");
+  const payload = {
+    chatJid: state.waActiveChatJid,
+    text,
+    attachment: state.waPendingAttachment || null
+  };
+  const hasText = text.trim().length > 0;
+  const hasAttachment = !!state.waPendingAttachment;
+  if (!hasText && !hasAttachment) return;
+
+  el("btnWaSend").disabled = true;
+  try {
+    await window.api.waSendChatMessage(payload);
+    el("waComposerInput").value = "";
+    setWaPendingAttachment(null);
+    await refreshWaMessages({ markRead: false });
+    await refreshWaChats({ refreshMessages: false, markRead: false });
+  } finally {
+    el("btnWaSend").disabled = false;
+  }
 }
 function renderActivity() {
   const tbody = el("activityBody");
@@ -1020,6 +1390,7 @@ async function refreshProfiles() {
   state.profiles = Array.isArray(res?.profiles) ? res.profiles : [];
   state.activeProfileId = res?.activeProfileId || null;
   renderProfiles();
+  scheduleWaSyncRefresh();
 }
 
 function setConnectModeUi() {
@@ -1089,8 +1460,15 @@ async function loadInitialDataAfterLogin() {
   renderProfiles();
   setConnectModeUi();
   setConnectionBadge(!!connRes?.connected, connRes?.text || "Not connected");
+  state.waChatSearch = "";
+  state.waActiveChatJid = "";
+  state.waMessages = [];
+  state.waChats = [];
+  setWaPendingAttachment(null);
+  el("waChatSearchInput").value = "";
 
   await reloadTemplateData();
+  await refreshWaChats({ refreshMessages: true, markRead: true });
   await loadAppointments();
   renderMarketingRecipients();
   renderActivity();
@@ -1101,6 +1479,20 @@ function showLoginScreen() {
   state.appointments = [];
   state.selectedAppointmentIds = new Set();
   state.marketingRecipients = [];
+  state.waChats = [];
+  state.waActiveChatJid = "";
+  state.waMessages = [];
+  state.waChatSearch = "";
+  setWaPendingAttachment(null);
+  el("waChatSearchInput").value = "";
+  el("waComposerInput").value = "";
+  if (state.waSyncTimer) {
+    clearTimeout(state.waSyncTimer);
+    state.waSyncTimer = null;
+  }
+  renderWaChatList();
+  renderWaConversationHead();
+  renderWaMessages();
 
   el("appShell").classList.add("hidden");
   el("loginScreen").classList.remove("hidden");
@@ -1116,7 +1508,7 @@ function showAppShell() {
 async function afterLoginLoad() {
   showAppShell();
   updateHeaderGreeting();
-  setActiveTab("appointment");
+  setActiveTab("whatsapp");
   await loadInitialDataAfterLogin();
 }
 
@@ -1141,7 +1533,59 @@ async function tryRestoreSession() {
 }
 function bindEvents() {
   document.querySelectorAll(".tabBtn").forEach((btn) => {
-    btn.addEventListener("click", () => setActiveTab(btn.dataset.tab));
+    btn.addEventListener("click", async () => {
+      setActiveTab(btn.dataset.tab);
+      if (btn.dataset.tab === "whatsapp") {
+        try {
+          await refreshWaChats({ refreshMessages: true, markRead: true });
+        } catch (e) {
+          toast("WhatsApp", String(e?.message || e));
+        }
+      }
+    });
+  });
+
+  el("btnWaRefreshChats").addEventListener("click", async () => {
+    try {
+      await refreshWaChats({ refreshMessages: true, markRead: true });
+    } catch (e) {
+      toast("WhatsApp", String(e?.message || e));
+    }
+  });
+
+  el("waChatSearchInput").addEventListener("input", () => {
+    state.waChatSearch = el("waChatSearchInput").value.trim();
+    scheduleWaSyncRefresh();
+  });
+
+  el("btnWaAttach").addEventListener("click", async () => {
+    try {
+      await pickWaAttachment();
+    } catch (e) {
+      toast("WhatsApp", String(e?.message || e));
+    }
+  });
+
+  el("btnWaClearAttachment").addEventListener("click", () => {
+    setWaPendingAttachment(null);
+  });
+
+  el("btnWaSend").addEventListener("click", async () => {
+    try {
+      await sendWaComposerMessage();
+    } catch (e) {
+      toast("WhatsApp", String(e?.message || e));
+    }
+  });
+
+  el("waComposerInput").addEventListener("keydown", async (evt) => {
+    if (evt.key !== "Enter" || evt.shiftKey) return;
+    evt.preventDefault();
+    try {
+      await sendWaComposerMessage();
+    } catch (e) {
+      toast("WhatsApp", String(e?.message || e));
+    }
   });
 
   el("loginForm").addEventListener("submit", async (evt) => {
@@ -1453,6 +1897,7 @@ function bindEvents() {
       await refreshProfiles();
       const status = await window.api.waGetConnectionState();
       setConnectionBadge(!!status?.connected, status?.text || "Not connected");
+      await refreshWaChats({ refreshMessages: true, markRead: true });
     } catch (e) {
       toast("Profile", String(e?.message || e));
     }
@@ -1491,7 +1936,17 @@ function bindEvents() {
 
   window.api.onStatus((status) => {
     if (status?.profileId && state.activeProfileId && status.profileId !== state.activeProfileId) return;
+    const prevConnected = state.waConnected;
     setConnectionBadge(!!status?.connected, status?.text || "Not connected");
+    if (prevConnected !== !!status?.connected || state.activeTab === "whatsapp") {
+      scheduleWaSyncRefresh();
+    }
+  });
+
+  window.api.onWaChatSync((payload) => {
+    if (!payload) return;
+    if (payload.profileId && state.activeProfileId && payload.profileId !== state.activeProfileId) return;
+    scheduleWaSyncRefresh();
   });
 
   window.api.onBatchProgress((row) => {

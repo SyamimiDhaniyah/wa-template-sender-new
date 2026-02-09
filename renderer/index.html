@@ -45,7 +45,8 @@
         </div>
 
         <nav class="tabNav">
-          <button class="tabBtn active" data-tab="appointment">Appointment</button>
+          <button class="tabBtn active" data-tab="whatsapp">WhatsApp</button>
+          <button class="tabBtn" data-tab="appointment">Appointment</button>
           <button class="tabBtn" data-tab="marketing">Marketing</button>
           <button class="tabBtn" data-tab="templates">Template</button>
           <button class="tabBtn" data-tab="connect">Connect</button>
@@ -75,7 +76,47 @@
         </header>
 
         <section class="tabWrap">
-          <div class="tabPanel" id="tab-appointment">
+          <div class="tabPanel" id="tab-whatsapp">
+            <div class="waAppShell">
+              <aside class="waChatColumn">
+                <div class="waChatTools">
+                  <input id="waChatSearchInput" class="fieldInput compact" placeholder="Search chats" />
+                  <button class="btnGhost" id="btnWaRefreshChats">Refresh</button>
+                </div>
+                <div class="waChatList" id="waChatList"></div>
+              </aside>
+
+              <section class="waConversation">
+                <header class="waConversationHead" id="waConversationHead">
+                  <div class="waHeadTitle">WhatsApp</div>
+                  <div class="waHeadMeta" id="waHeadMeta">Select a conversation</div>
+                </header>
+
+                <div class="waMessageViewport" id="waMessageViewport">
+                  <div class="waEmptyState">Select a conversation to start replying.</div>
+                </div>
+
+                <footer class="waComposer">
+                  <div class="waAttachmentRow hidden" id="waAttachmentRow">
+                    <div class="waAttachmentMeta" id="waAttachmentMeta">Attachment</div>
+                    <button class="btnGhost" id="btnWaClearAttachment">Remove</button>
+                  </div>
+                  <div class="waComposerRow">
+                    <button class="btnGhost" id="btnWaAttach">Attach</button>
+                    <textarea
+                      id="waComposerInput"
+                      class="fieldInput"
+                      rows="2"
+                      placeholder="Type a message"
+                    ></textarea>
+                    <button class="btnPrimary" id="btnWaSend">Send</button>
+                  </div>
+                </footer>
+              </section>
+            </div>
+          </div>
+
+          <div class="tabPanel hidden" id="tab-appointment">
             <div class="panelTitleRow">
               <div>
                 <h2>Appointments</h2>

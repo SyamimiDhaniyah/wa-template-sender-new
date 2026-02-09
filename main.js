@@ -19,7 +19,8 @@ async function getBaileys() {
     useMultiFileAuthState: mod.useMultiFileAuthState,
     DisconnectReason: mod.DisconnectReason,
     Browsers: mod.Browsers,
-    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion
+    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion,
+    downloadMediaMessage: mod.downloadMediaMessage
   };
   return _baileys;
 }
@@ -42,6 +43,9 @@ const lastContactNameSyncAtByProfile = new Map();
 // Used to ignore late events from old sockets
 let handshakeAttemptId = 0;
 let startupReconnectScheduled = false;
+const WA_CHAT_MAX_MESSAGES_PER_CHAT = 320;
+const waChatByProfileMem = {};
+const waChatSyncTimers = new Map();
 
 const store = new Store();
 
@@ -873,6 +877,8 @@ async function deleteProfile(profileId) {
   }
   invalidSessionProfiles.delete(profileId);
   clearContactsCacheForProfile(profileId);
+  clearWaChatStateForProfile(profileId);
+  clearWaChatSyncTimer(profileId);
 
   // Never leave app without at least one profile
   if (nextProfiles.length === 0) {
@@ -924,6 +930,8 @@ async function terminateProfileSession(profileId) {
   clearAuthDir(authDir);
   invalidSessionProfiles.delete(profileId);
   clearContactsCacheForProfile(profileId);
+  clearWaChatStateForProfile(profileId);
+  clearWaChatSyncTimer(profileId);
 
   profiles[idx] = normalizeProfileRecord(
     {
@@ -1303,6 +1311,1015 @@ async function enrichContactPhotosForProfile(profileId, options) {
   }
 
   return getContactsForProfile(profileId);
+}
+
+/* --------------------------- WhatsApp Chat Store (recent chats + messages) ---------------------------- */
+function getWaChatStoreObj() {
+  return waChatByProfileMem;
+}
+
+function clearWaChatStateForProfile(profileId) {
+  if (!profileId) return;
+  const root = getWaChatStoreObj();
+  if (!Object.prototype.hasOwnProperty.call(root, profileId)) return;
+  delete root[profileId];
+}
+
+function ensureWaChatStateForProfile(profileId) {
+  const root = getWaChatStoreObj();
+  if (!root[profileId] || typeof root[profileId] !== "object") {
+    root[profileId] = {
+      chatsByJid: {},
+      messagesByChat: {}
+    };
+  }
+  if (!root[profileId].chatsByJid || typeof root[profileId].chatsByJid !== "object") {
+    root[profileId].chatsByJid = {};
+  }
+  if (!root[profileId].messagesByChat || typeof root[profileId].messagesByChat !== "object") {
+    root[profileId].messagesByChat = {};
+  }
+  return root[profileId];
+}
+
+function scheduleWaChatSync(profileId, reason) {
+  if (!profileId) return;
+  const key = String(profileId);
+  const oldTimer = waChatSyncTimers.get(key);
+  if (oldTimer) clearTimeout(oldTimer);
+  const timer = setTimeout(() => {
+    waChatSyncTimers.delete(key);
+    win?.webContents.send("wa:chatSync", {
+      profileId: key,
+      reason: cleanString(reason || "update") || "update",
+      ts: Date.now()
+    });
+  }, 120);
+  waChatSyncTimers.set(key, timer);
+}
+
+function clearWaChatSyncTimer(profileId) {
+  const key = String(profileId || "");
+  if (!key) return;
+  const timer = waChatSyncTimers.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  waChatSyncTimers.delete(key);
+}
+
+function normalizeEpochMs(raw, fallback = 0) {
+  if (raw === null || raw === undefined) return fallback;
+
+  if (typeof raw === "number") {
+    if (!Number.isFinite(raw)) return fallback;
+    if (raw > 1e12) return Math.round(raw);
+    return Math.round(raw * 1000);
+  }
+
+  if (typeof raw === "bigint") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? normalizeEpochMs(n, fallback) : fallback;
+  }
+
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (!s) return fallback;
+    const n = Number(s);
+    return Number.isFinite(n) ? normalizeEpochMs(n, fallback) : fallback;
+  }
+
+  if (raw && typeof raw === "object") {
+    if (typeof raw.toNumber === "function") {
+      try {
+        return normalizeEpochMs(raw.toNumber(), fallback);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (typeof raw.low === "number") {
+      return normalizeEpochMs(raw.low, fallback);
+    }
+    if (typeof raw.seconds === "number") {
+      return normalizeEpochMs(raw.seconds, fallback);
+    }
+    if (typeof raw.value === "number") {
+      return normalizeEpochMs(raw.value, fallback);
+    }
+  }
+
+  return fallback;
+}
+
+function isIgnoredChatJid(jid) {
+  const chatJid = normalizeJidForContact(jid);
+  if (!chatJid) return true;
+  if (!chatJid.includes("@")) return true;
+  if (chatJid === "status@broadcast") return true;
+  if (chatJid.endsWith("@broadcast")) return true;
+  return false;
+}
+
+function normalizeChatJid(input) {
+  const jid = normalizeJidForContact(input);
+  return isIgnoredChatJid(jid) ? "" : jid;
+}
+
+function normalizeSendTargetJid(input) {
+  const raw = cleanString(input);
+  if (!raw) return "";
+  if (raw.includes("@")) return normalizeChatJid(raw);
+  try {
+    const msisdn = normalizeMsisdn(raw);
+    return `${msisdn}@s.whatsapp.net`;
+  } catch (e) {
+    return "";
+  }
+}
+
+function bytesToBase64(value) {
+  if (!value) return "";
+  try {
+    if (Buffer.isBuffer(value)) return value.toString("base64");
+    if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
+    if (Array.isArray(value)) return Buffer.from(value).toString("base64");
+  } catch (e) {
+    return "";
+  }
+  return "";
+}
+
+function unwrapMessageContent(messageContent) {
+  let content = messageContent && typeof messageContent === "object" ? messageContent : {};
+  for (let i = 0; i < 8; i++) {
+    if (!content || typeof content !== "object") break;
+    if (content.ephemeralMessage?.message) {
+      content = content.ephemeralMessage.message;
+      continue;
+    }
+    if (content.viewOnceMessage?.message) {
+      content = content.viewOnceMessage.message;
+      continue;
+    }
+    if (content.viewOnceMessageV2?.message) {
+      content = content.viewOnceMessageV2.message;
+      continue;
+    }
+    if (content.viewOnceMessageV2Extension?.message) {
+      content = content.viewOnceMessageV2Extension.message;
+      continue;
+    }
+    if (content.documentWithCaptionMessage?.message) {
+      content = content.documentWithCaptionMessage.message;
+      continue;
+    }
+    if (content.editedMessage?.message) {
+      content = content.editedMessage.message;
+      continue;
+    }
+    break;
+  }
+  return content && typeof content === "object" ? content : {};
+}
+
+function summarizeMessagePayload(rawMessage) {
+  const messageNode = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
+  const content = unwrapMessageContent(messageNode.message || {});
+  const textOrEmpty = (v) => cleanString(v || "");
+
+  if (!content || Object.keys(content).length === 0) {
+    return {
+      type: "unknown",
+      text: "",
+      preview: "",
+      hasMedia: false,
+      media: null,
+      skip: false
+    };
+  }
+
+  if (textOrEmpty(content.conversation)) {
+    const text = textOrEmpty(content.conversation);
+    return { type: "text", text, preview: text, hasMedia: false, media: null, skip: false };
+  }
+
+  if (textOrEmpty(content.extendedTextMessage?.text)) {
+    const text = textOrEmpty(content.extendedTextMessage.text);
+    return { type: "text", text, preview: text, hasMedia: false, media: null, skip: false };
+  }
+
+  if (content.imageMessage && typeof content.imageMessage === "object") {
+    const caption = textOrEmpty(content.imageMessage.caption);
+    const thumb = bytesToBase64(content.imageMessage.jpegThumbnail);
+    return {
+      type: "image",
+      text: caption,
+      preview: caption || "[Image]",
+      hasMedia: true,
+      media: {
+        kind: "image",
+        mimeType: textOrEmpty(content.imageMessage.mimetype) || "image/jpeg",
+        fileName: textOrEmpty(content.imageMessage.fileName),
+        fileLength: Number(content.imageMessage.fileLength || 0) || 0,
+        thumbnailDataUrl: thumb ? `data:image/jpeg;base64,${thumb}` : ""
+      },
+      skip: false
+    };
+  }
+
+  if (content.videoMessage && typeof content.videoMessage === "object") {
+    const caption = textOrEmpty(content.videoMessage.caption);
+    const thumb = bytesToBase64(content.videoMessage.jpegThumbnail);
+    return {
+      type: "video",
+      text: caption,
+      preview: caption || "[Video]",
+      hasMedia: true,
+      media: {
+        kind: "video",
+        mimeType: textOrEmpty(content.videoMessage.mimetype) || "video/mp4",
+        fileName: textOrEmpty(content.videoMessage.fileName),
+        fileLength: Number(content.videoMessage.fileLength || 0) || 0,
+        thumbnailDataUrl: thumb ? `data:image/jpeg;base64,${thumb}` : ""
+      },
+      skip: false
+    };
+  }
+
+  if (content.documentMessage && typeof content.documentMessage === "object") {
+    const fileName = textOrEmpty(content.documentMessage.fileName);
+    const caption = textOrEmpty(content.documentMessage.caption);
+    return {
+      type: "document",
+      text: caption,
+      preview: caption || fileName || "[Document]",
+      hasMedia: true,
+      media: {
+        kind: "document",
+        mimeType: textOrEmpty(content.documentMessage.mimetype) || "application/octet-stream",
+        fileName,
+        fileLength: Number(content.documentMessage.fileLength || 0) || 0,
+        thumbnailDataUrl: ""
+      },
+      skip: false
+    };
+  }
+
+  if (content.audioMessage && typeof content.audioMessage === "object") {
+    return {
+      type: "audio",
+      text: "",
+      preview: "[Audio]",
+      hasMedia: true,
+      media: {
+        kind: "audio",
+        mimeType: textOrEmpty(content.audioMessage.mimetype) || "audio/ogg",
+        fileName: "",
+        fileLength: Number(content.audioMessage.fileLength || 0) || 0,
+        thumbnailDataUrl: ""
+      },
+      skip: false
+    };
+  }
+
+  if (content.stickerMessage && typeof content.stickerMessage === "object") {
+    return {
+      type: "sticker",
+      text: "",
+      preview: "[Sticker]",
+      hasMedia: true,
+      media: {
+        kind: "sticker",
+        mimeType: textOrEmpty(content.stickerMessage.mimetype) || "image/webp",
+        fileName: "",
+        fileLength: Number(content.stickerMessage.fileLength || 0) || 0,
+        thumbnailDataUrl: ""
+      },
+      skip: false
+    };
+  }
+
+  if (content.locationMessage && typeof content.locationMessage === "object") {
+    return {
+      type: "location",
+      text: "",
+      preview: "[Location]",
+      hasMedia: false,
+      media: null,
+      skip: false
+    };
+  }
+
+  if (content.reactionMessage && typeof content.reactionMessage === "object") {
+    const reactionText = textOrEmpty(content.reactionMessage.text);
+    return {
+      type: "reaction",
+      text: reactionText,
+      preview: reactionText ? `Reacted ${reactionText}` : "[Reaction]",
+      hasMedia: false,
+      media: null,
+      skip: true
+    };
+  }
+
+  if (content.protocolMessage && typeof content.protocolMessage === "object") {
+    return {
+      type: "protocol",
+      text: "",
+      preview: "",
+      hasMedia: false,
+      media: null,
+      skip: true
+    };
+  }
+
+  if (content.contactsArrayMessage && typeof content.contactsArrayMessage === "object") {
+    return {
+      type: "contacts",
+      text: "",
+      preview: "[Contact card]",
+      hasMedia: false,
+      media: null,
+      skip: false
+    };
+  }
+
+  if (content.contactMessage && typeof content.contactMessage === "object") {
+    const displayName = textOrEmpty(content.contactMessage.displayName);
+    return {
+      type: "contact",
+      text: "",
+      preview: displayName ? `[Contact] ${displayName}` : "[Contact]",
+      hasMedia: false,
+      media: null,
+      skip: false
+    };
+  }
+
+  if (content.pollCreationMessage || content.pollCreationMessageV2 || content.pollCreationMessageV3) {
+    return {
+      type: "poll",
+      text: "",
+      preview: "[Poll]",
+      hasMedia: false,
+      media: null,
+      skip: false
+    };
+  }
+
+  const fallback = Object.keys(content)[0] || "message";
+  return {
+    type: fallback,
+    text: "",
+    preview: `[${fallback}]`,
+    hasMedia: false,
+    media: null,
+    skip: false
+  };
+}
+
+function normalizeMessageKey(key, fallbackRemoteJid) {
+  const src = key && typeof key === "object" ? key : {};
+  const remoteJid = normalizeChatJid(src.remoteJid || fallbackRemoteJid || "");
+  const id = cleanString(src.id || "");
+  const participant = normalizeJidForContact(src.participant || "");
+  const fromMe = src.fromMe === true;
+  return { remoteJid, id, participant, fromMe };
+}
+
+function messageKeyHash(key) {
+  const k = key && typeof key === "object" ? key : {};
+  return `${cleanString(k.remoteJid)}|${cleanString(k.id)}|${k.fromMe ? "1" : "0"}|${cleanString(k.participant)}`;
+}
+
+function getContactByChatJid(profileId, chatJid) {
+  const msisdn = msisdnFromContactAddress(chatJid);
+  if (!msisdn) return null;
+  const byPhone =
+    waContactsByProfileMem &&
+    waContactsByProfileMem[profileId] &&
+    typeof waContactsByProfileMem[profileId] === "object"
+      ? waContactsByProfileMem[profileId]
+      : {};
+  return byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : null;
+}
+
+function fallbackTitleForChatJid(chatJid) {
+  const jid = normalizeJidForContact(chatJid);
+  if (!jid) return "Unknown chat";
+  const msisdn = msisdnFromContactAddress(jid);
+  if (msisdn) return msisdn;
+  if (jid.endsWith("@g.us")) return "Group";
+  return jid;
+}
+
+function resolveChatTitle(profileId, chat) {
+  const c = chat && typeof chat === "object" ? chat : {};
+  const direct = firstNonEmptyString([c.name, c.subject, c.notify, c.pushName]);
+  if (direct) return direct;
+  const byContact = getContactByChatJid(profileId, c.jid);
+  const contactName = getContactDisplayName(byContact);
+  if (contactName) return contactName;
+  return fallbackTitleForChatJid(c.jid);
+}
+
+function resolveMessageSenderName(profileId, chatJid, messageRecord) {
+  if (!messageRecord || typeof messageRecord !== "object") return "";
+  if (messageRecord.fromMe) return "You";
+
+  const participant = normalizeJidForContact(messageRecord?.key?.participant || "");
+  const fromJid = participant || normalizeJidForContact(chatJid);
+  const fromContactMsisdn = msisdnFromContactAddress(fromJid);
+  if (fromContactMsisdn) {
+    const byPhone =
+      waContactsByProfileMem &&
+      waContactsByProfileMem[profileId] &&
+      typeof waContactsByProfileMem[profileId] === "object"
+        ? waContactsByProfileMem[profileId]
+        : {};
+    const contact = byPhone[fromContactMsisdn];
+    const name = getContactDisplayName(contact);
+    if (name) return name;
+    return fromContactMsisdn;
+  }
+
+  return messageRecord.pushName || "";
+}
+
+function ensureChatSummary(profileId, chatJid) {
+  const state = ensureWaChatStateForProfile(profileId);
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) return null;
+  if (!state.chatsByJid[jid] || typeof state.chatsByJid[jid] !== "object") {
+    state.chatsByJid[jid] = {
+      jid,
+      name: "",
+      lastMessageTimestampMs: 0,
+      lastMessagePreview: "",
+      lastMessageType: "",
+      lastMessageFromMe: false,
+      unreadCount: 0,
+      archived: false,
+      pinned: false,
+      updatedAt: nowIsoShort()
+    };
+  }
+  return state.chatsByJid[jid];
+}
+
+function upsertChatsForProfile(profileId, chats) {
+  if (!profileId || !Array.isArray(chats) || chats.length === 0) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  let changed = 0;
+
+  for (const raw of chats) {
+    const src = raw && typeof raw === "object" ? raw : {};
+    const chatJid = normalizeChatJid(src.id || src.jid || "");
+    if (!chatJid) continue;
+
+    const chat = ensureChatSummary(profileId, chatJid);
+    if (!chat) continue;
+
+    const nextName = firstNonEmptyString([src.name, src.subject, src.notify, src.pushName, chat.name]);
+    const nextTs = normalizeEpochMs(
+      src.conversationTimestamp || src.lastMessageRecvTimestamp || src.lastMessageTimestamp || src.timestamp,
+      chat.lastMessageTimestampMs || 0
+    );
+
+    const rawUnread = Number(src.unreadCount);
+    const nextUnread = Number.isFinite(rawUnread) ? Math.max(0, Math.round(rawUnread)) : chat.unreadCount;
+    const nextArchived = typeof src.archive === "boolean" ? src.archive : chat.archived;
+    const nextPinned =
+      typeof src.pin !== "undefined"
+        ? Number(src.pin || 0) > 0
+        : typeof src.pinned === "boolean"
+          ? src.pinned
+          : chat.pinned;
+
+    const same =
+      chat.name === nextName &&
+      Number(chat.lastMessageTimestampMs || 0) === Number(nextTs || 0) &&
+      Number(chat.unreadCount || 0) === Number(nextUnread || 0) &&
+      !!chat.archived === !!nextArchived &&
+      !!chat.pinned === !!nextPinned;
+
+    if (!same) {
+      state.chatsByJid[chatJid] = {
+        ...chat,
+        jid: chatJid,
+        name: nextName,
+        lastMessageTimestampMs: Number(nextTs || 0),
+        unreadCount: nextUnread,
+        archived: !!nextArchived,
+        pinned: !!nextPinned,
+        updatedAt: nowIsoShort()
+      };
+      changed++;
+    }
+  }
+
+  if (changed > 0) scheduleWaChatSync(profileId, "chats");
+  return changed;
+}
+
+function normalizeMessageRecord(rawMessage) {
+  const msg = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
+  const key = normalizeMessageKey(msg.key, msg?.key?.remoteJid || msg?.remoteJid || "");
+  const chatJid = key.remoteJid || normalizeChatJid(msg?.chatId || msg?.jid || "");
+  if (!chatJid) return null;
+  if (!key.id) return null;
+
+  const summary = summarizeMessagePayload(msg);
+  if (summary.skip) return null;
+
+  const ts = normalizeEpochMs(msg.messageTimestamp, Date.now());
+  return {
+    key: {
+      remoteJid: chatJid,
+      id: key.id,
+      fromMe: key.fromMe,
+      participant: key.participant || ""
+    },
+    hash: messageKeyHash({
+      remoteJid: chatJid,
+      id: key.id,
+      fromMe: key.fromMe,
+      participant: key.participant || ""
+    }),
+    chatJid,
+    fromMe: key.fromMe,
+    pushName: cleanString(msg.pushName || msg.notifyName || msg.participantName || ""),
+    timestampMs: Number(ts || Date.now()),
+    type: summary.type,
+    text: summary.text,
+    preview: summary.preview,
+    hasMedia: summary.hasMedia,
+    media: summary.media,
+    status: Number(msg.status || 0) || 0,
+    rawMessage: msg
+  };
+}
+
+function upsertMessagesForProfile(profileId, messages) {
+  if (!profileId || !Array.isArray(messages) || messages.length === 0) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  let changed = 0;
+
+  for (const item of messages) {
+    const normalized = normalizeMessageRecord(item);
+    if (!normalized) continue;
+
+    const chat = ensureChatSummary(profileId, normalized.chatJid);
+    if (!chat) continue;
+
+    if (!state.messagesByChat[normalized.chatJid] || !Array.isArray(state.messagesByChat[normalized.chatJid])) {
+      state.messagesByChat[normalized.chatJid] = [];
+    }
+    const list = state.messagesByChat[normalized.chatJid];
+    const existingIndex = list.findIndex((x) => x && x.hash === normalized.hash);
+
+    if (existingIndex >= 0) {
+      const prev = list[existingIndex];
+      list[existingIndex] = {
+        ...prev,
+        ...normalized,
+        media: normalized.media || prev.media || null,
+        rawMessage: normalized.rawMessage || prev.rawMessage
+      };
+      changed++;
+    } else {
+      list.push(normalized);
+      changed++;
+    }
+
+    if (list.length > WA_CHAT_MAX_MESSAGES_PER_CHAT) {
+      list.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+      state.messagesByChat[normalized.chatJid] = list.slice(-WA_CHAT_MAX_MESSAGES_PER_CHAT);
+    }
+
+    const isLatest = Number(normalized.timestampMs || 0) >= Number(chat.lastMessageTimestampMs || 0);
+    const nextName = firstNonEmptyString([chat.name, normalized.pushName]);
+    if (isLatest || !chat.lastMessagePreview || !chat.lastMessageTimestampMs) {
+      state.chatsByJid[normalized.chatJid] = {
+        ...chat,
+        name: nextName,
+        lastMessageTimestampMs: Number(normalized.timestampMs || chat.lastMessageTimestampMs || Date.now()),
+        lastMessagePreview: cleanString(normalized.preview || ""),
+        lastMessageType: cleanString(normalized.type || ""),
+        lastMessageFromMe: normalized.fromMe === true,
+        updatedAt: nowIsoShort()
+      };
+    } else if (chat.name !== nextName) {
+      state.chatsByJid[normalized.chatJid] = {
+        ...chat,
+        name: nextName,
+        updatedAt: nowIsoShort()
+      };
+    }
+  }
+
+  if (changed > 0) scheduleWaChatSync(profileId, "messages");
+  return changed;
+}
+
+function applyMessageUpdatesForProfile(profileId, updates) {
+  if (!profileId || !Array.isArray(updates) || updates.length === 0) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  let changed = 0;
+
+  for (const patch of updates) {
+    const src = patch && typeof patch === "object" ? patch : {};
+    const key = normalizeMessageKey(src.key, src?.key?.remoteJid || "");
+    if (!key.remoteJid || !key.id) continue;
+    const chatJid = key.remoteJid;
+    const list = state.messagesByChat[chatJid];
+    if (!Array.isArray(list) || list.length === 0) continue;
+
+    const hash = messageKeyHash({ ...key, remoteJid: chatJid });
+    const idx = list.findIndex((x) => x && x.hash === hash);
+    if (idx < 0) continue;
+
+    const prev = list[idx];
+    const updateObj = src.update && typeof src.update === "object" ? src.update : {};
+    const mergedRaw = {
+      ...(prev.rawMessage && typeof prev.rawMessage === "object" ? prev.rawMessage : {}),
+      ...(updateObj && typeof updateObj === "object" ? updateObj : {})
+    };
+    if (updateObj.message && typeof updateObj.message === "object") {
+      mergedRaw.message = updateObj.message;
+    }
+
+    const normalized = normalizeMessageRecord({
+      ...prev.rawMessage,
+      key: prev.key,
+      ...updateObj,
+      message: mergedRaw.message || prev.rawMessage?.message
+    });
+    if (!normalized) continue;
+
+    list[idx] = {
+      ...prev,
+      ...normalized,
+      rawMessage: mergedRaw,
+      status: Number(updateObj.status || normalized.status || prev.status || 0) || 0
+    };
+    changed++;
+
+    const chat = ensureChatSummary(profileId, chatJid);
+    if (chat && Number(list[idx].timestampMs || 0) >= Number(chat.lastMessageTimestampMs || 0)) {
+      state.chatsByJid[chatJid] = {
+        ...chat,
+        lastMessageTimestampMs: Number(list[idx].timestampMs || 0),
+        lastMessagePreview: cleanString(list[idx].preview || ""),
+        lastMessageType: cleanString(list[idx].type || ""),
+        lastMessageFromMe: list[idx].fromMe === true,
+        updatedAt: nowIsoShort()
+      };
+    }
+  }
+
+  if (changed > 0) scheduleWaChatSync(profileId, "message_updates");
+  return changed;
+}
+
+function serializeChatSummary(profileId, chat) {
+  const c = chat && typeof chat === "object" ? chat : {};
+  const jid = normalizeChatJid(c.jid || "");
+  if (!jid) return null;
+  const contact = getContactByChatJid(profileId, jid);
+  const title = resolveChatTitle(profileId, c);
+  const preview = cleanString(c.lastMessagePreview || "");
+  const isGroup = jid.endsWith("@g.us");
+  return {
+    jid,
+    title,
+    preview: preview || "",
+    lastMessageType: cleanString(c.lastMessageType || ""),
+    lastMessageFromMe: c.lastMessageFromMe === true,
+    lastMessageTimestampMs: Number(c.lastMessageTimestampMs || 0) || 0,
+    unreadCount: Math.max(0, Number(c.unreadCount || 0) || 0),
+    archived: c.archived === true,
+    pinned: c.pinned === true,
+    avatarUrl: cleanString(contact?.imgUrl || ""),
+    isGroup
+  };
+}
+
+function getRecentChatsForProfile(profileId, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  const state = ensureWaChatStateForProfile(profileId);
+  const search = cleanString(opts.search || "").toLowerCase();
+  const limitRaw = Number(opts.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(250, Math.round(limitRaw))) : 120;
+
+  const rows = Object.values(state.chatsByJid)
+    .map((c) => serializeChatSummary(profileId, c))
+    .filter((c) => !!c);
+
+  rows.sort((a, b) => {
+    const ap = a.pinned ? 1 : 0;
+    const bp = b.pinned ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    const at = Number(a.lastMessageTimestampMs || 0);
+    const bt = Number(b.lastMessageTimestampMs || 0);
+    if (at !== bt) return bt - at;
+    return String(a.title || "").localeCompare(String(b.title || ""));
+  });
+
+  const filtered = search
+    ? rows.filter((row) => {
+        return (
+          String(row.title || "").toLowerCase().includes(search) ||
+          String(row.preview || "").toLowerCase().includes(search) ||
+          String(row.jid || "").toLowerCase().includes(search)
+        );
+      })
+    : rows;
+
+  return filtered.slice(0, limit);
+}
+
+function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
+  const msg = messageRecord && typeof messageRecord === "object" ? messageRecord : {};
+  const senderName = resolveMessageSenderName(profileId, chatJid, msg);
+  return {
+    key: {
+      remoteJid: cleanString(msg?.key?.remoteJid || chatJid),
+      id: cleanString(msg?.key?.id || ""),
+      fromMe: msg?.key?.fromMe === true,
+      participant: cleanString(msg?.key?.participant || "")
+    },
+    chatJid: cleanString(chatJid),
+    timestampMs: Number(msg.timestampMs || 0) || 0,
+    fromMe: msg.fromMe === true,
+    senderName: cleanString(senderName),
+    type: cleanString(msg.type || "unknown"),
+    text: String(msg.text || ""),
+    preview: String(msg.preview || ""),
+    hasMedia: msg.hasMedia === true,
+    media: msg.media
+      ? {
+          kind: cleanString(msg.media.kind || ""),
+          mimeType: cleanString(msg.media.mimeType || ""),
+          fileName: cleanString(msg.media.fileName || ""),
+          fileLength: Number(msg.media.fileLength || 0) || 0,
+          thumbnailDataUrl: cleanString(msg.media.thumbnailDataUrl || "")
+        }
+      : null,
+    status: Number(msg.status || 0) || 0
+  };
+}
+
+function getChatMessagesForProfile(profileId, chatJid, options) {
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) return [];
+  const opts = options && typeof options === "object" ? options : {};
+  const limitRaw = Number(opts.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(250, Math.round(limitRaw))) : 120;
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const list = Array.isArray(state.messagesByChat[jid]) ? [...state.messagesByChat[jid]] : [];
+  list.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+  const clipped = list.slice(-limit);
+  return clipped.map((msg) => serializeMessageForRenderer(profileId, jid, msg));
+}
+
+function findMessageRecordForProfile(profileId, chatJid, key) {
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) return null;
+  const normalizedKey = normalizeMessageKey(key, jid);
+  if (!normalizedKey.id) return null;
+  const state = ensureWaChatStateForProfile(profileId);
+  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
+  const hash = messageKeyHash(normalizedKey);
+  return list.find((x) => x && x.hash === hash) || null;
+}
+
+async function markChatReadForProfile(profileId, chatJid) {
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) throw new Error("Invalid chat JID");
+  const state = ensureWaChatStateForProfile(profileId);
+  const chat = ensureChatSummary(profileId, jid);
+  if (!chat) return { ok: true, skipped: true };
+
+  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
+  const unreadKeys = list
+    .filter((m) => m && m.fromMe !== true && m.key && m.key.id && m.key.remoteJid)
+    .slice(-50)
+    .map((m) => ({
+      remoteJid: m.key.remoteJid,
+      id: m.key.id,
+      fromMe: m.key.fromMe === true,
+      participant: m.key.participant || undefined
+    }));
+
+  if (sock && isConnected && unreadKeys.length > 0 && typeof sock.readMessages === "function") {
+    try {
+      await sock.readMessages(unreadKeys);
+    } catch (e) {
+      log.debug({ err: e }, "Failed to mark chat as read");
+    }
+  }
+
+  if ((Number(chat.unreadCount || 0) || 0) !== 0) {
+    state.chatsByJid[jid] = {
+      ...chat,
+      unreadCount: 0,
+      updatedAt: nowIsoShort()
+    };
+    scheduleWaChatSync(profileId, "read");
+  }
+  return { ok: true, chatJid: jid };
+}
+
+const MIME_BY_EXT = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".bmp": "image/bmp",
+  ".svg": "image/svg+xml",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".avi": "video/x-msvideo",
+  ".mkv": "video/x-matroska",
+  ".mp3": "audio/mpeg",
+  ".ogg": "audio/ogg",
+  ".wav": "audio/wav",
+  ".m4a": "audio/mp4",
+  ".pdf": "application/pdf",
+  ".txt": "text/plain",
+  ".csv": "text/csv",
+  ".doc": "application/msword",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xls": "application/vnd.ms-excel",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".ppt": "application/vnd.ms-powerpoint",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".zip": "application/zip"
+};
+
+function getMimeTypeForPath(filePath) {
+  const ext = String(path.extname(String(filePath || "")).toLowerCase());
+  if (!ext) return "application/octet-stream";
+  return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
+function attachmentKindFromMimeOrPath(mimeType, filePath) {
+  const mime = cleanString(mimeType).toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+
+  const ext = String(path.extname(String(filePath || "")).toLowerCase());
+  if ([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(ext)) return "image";
+  if ([".mp4", ".mov", ".avi", ".mkv"].includes(ext)) return "video";
+  if ([".mp3", ".ogg", ".wav", ".m4a"].includes(ext)) return "audio";
+  return "document";
+}
+
+function extensionFromMime(mimeType) {
+  const mime = cleanString(mimeType).toLowerCase();
+  if (!mime) return "";
+  for (const [ext, m] of Object.entries(MIME_BY_EXT)) {
+    if (m === mime) return ext;
+  }
+  if (mime === "application/octet-stream") return ".bin";
+  return "";
+}
+
+function buildDefaultDownloadFileName(messageRecord) {
+  const msg = messageRecord && typeof messageRecord === "object" ? messageRecord : {};
+  const media = msg.media && typeof msg.media === "object" ? msg.media : {};
+  const existing = cleanString(media.fileName || "");
+  if (existing) return existing;
+
+  const ts = Number(msg.timestampMs || Date.now());
+  const d = new Date(ts);
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(
+    d.getMinutes()
+  )}${pad(d.getSeconds())}`;
+  const ext = extensionFromMime(media.mimeType || "") || ".bin";
+  const kind = cleanString(media.kind || "media") || "media";
+  return `wa_${kind}_${stamp}${ext}`;
+}
+
+async function sendChatMessage(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
+
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeSendTargetJid(src.chatJid);
+  if (!chatJid) throw new Error("Invalid chat");
+
+  const text = String(src.text || "");
+  const trimmedText = text.trim();
+  const attachment = src.attachment && typeof src.attachment === "object" ? src.attachment : null;
+  if (!trimmedText && !attachment) throw new Error("Message is empty");
+
+  const sendOptions = {};
+  if (src.quotedKey && typeof src.quotedKey === "object") {
+    const quoted = findMessageRecordForProfile(profileId, chatJid, src.quotedKey);
+    if (quoted?.rawMessage) sendOptions.quoted = quoted.rawMessage;
+  }
+
+  let messagePayload = null;
+  if (attachment) {
+    const filePath = cleanString(attachment.path || "");
+    if (!filePath || !fs.existsSync(filePath)) throw new Error("Attachment file not found");
+    const fileName = cleanString(attachment.fileName || path.basename(filePath));
+    const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(filePath));
+    const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
+
+    if (kind === "image") {
+      messagePayload = {
+        image: { url: filePath },
+        ...(trimmedText ? { caption: trimmedText } : {})
+      };
+    } else if (kind === "video") {
+      messagePayload = {
+        video: { url: filePath },
+        ...(mimeType ? { mimetype: mimeType } : {}),
+        ...(trimmedText ? { caption: trimmedText } : {})
+      };
+    } else if (kind === "audio") {
+      messagePayload = {
+        audio: { url: filePath },
+        ...(mimeType ? { mimetype: mimeType } : {}),
+        ptt: false
+      };
+    } else {
+      messagePayload = {
+        document: { url: filePath },
+        fileName: fileName || path.basename(filePath),
+        ...(mimeType ? { mimetype: mimeType } : {}),
+        ...(trimmedText ? { caption: trimmedText } : {})
+      };
+    }
+  } else {
+    messagePayload = { text: trimmedText };
+  }
+
+  const sentMessage = await sock.sendMessage(chatJid, messagePayload, sendOptions);
+  if (sentMessage && typeof sentMessage === "object") {
+    upsertMessagesForProfile(profileId, [sentMessage]);
+  } else {
+    scheduleWaChatSync(profileId, "send");
+  }
+
+  return {
+    ok: true,
+    chatJid,
+    messageId: cleanString(sentMessage?.key?.id || "")
+  };
+}
+
+async function downloadChatMedia(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
+
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeChatJid(src.chatJid);
+  if (!chatJid) throw new Error("Invalid chat");
+  if (!src.key || typeof src.key !== "object") throw new Error("Message key is required");
+
+  const found = findMessageRecordForProfile(profileId, chatJid, src.key);
+  if (!found || !found.rawMessage) throw new Error("Message not found");
+  if (!found.hasMedia) throw new Error("This message has no media");
+
+  const { downloadMediaMessage } = await getBaileys();
+  if (typeof downloadMediaMessage !== "function") {
+    throw new Error("Media download is unavailable in current Baileys build");
+  }
+
+  let mediaData = null;
+  try {
+    mediaData = await downloadMediaMessage(found.rawMessage, "buffer", {}, {
+      logger: log,
+      reuploadRequest: sock.updateMediaMessage
+    });
+  } catch (e) {
+    throw new Error(`Failed to download media: ${String(e?.message || e)}`);
+  }
+
+  const buffer = Buffer.isBuffer(mediaData) ? mediaData : mediaData ? Buffer.from(mediaData) : null;
+  if (!buffer || buffer.length === 0) throw new Error("Media download returned empty file");
+
+  const defaultName = buildDefaultDownloadFileName(found);
+  const saveRes = await dialog.showSaveDialog({
+    title: "Save media",
+    defaultPath: defaultName
+  });
+  if (saveRes.canceled || !saveRes.filePath) return { ok: false, canceled: true };
+
+  fs.writeFileSync(saveRes.filePath, buffer);
+  return {
+    ok: true,
+    filePath: saveRes.filePath,
+    size: buffer.length
+  };
 }
 
 /* --------------------------- AI Rewrite (via external backend) ---------------------------- */
@@ -1698,24 +2715,45 @@ async function connectWA(method, attemptId) {
 
       sock.ev.on("creds.update", saveCreds);
       sock.ev.on("messaging-history.set", (history) => {
-        upsertContactsForProfile(activeProfileId, history?.contacts || []);
-        upsertChatsAsContactsForProfile(activeProfileId, history?.chats || []);
-        upsertMessagesAsContactsForProfile(activeProfileId, history?.messages || []);
+        const contacts = Array.isArray(history?.contacts) ? history.contacts : [];
+        const chats = Array.isArray(history?.chats) ? history.chats : [];
+        const messages = Array.isArray(history?.messages) ? history.messages : [];
+
+        upsertContactsForProfile(activeProfileId, contacts);
+        upsertChatsAsContactsForProfile(activeProfileId, chats);
+        upsertMessagesAsContactsForProfile(activeProfileId, messages);
+        upsertChatsForProfile(activeProfileId, chats);
+        upsertMessagesForProfile(activeProfileId, messages);
       });
       sock.ev.on("contacts.upsert", (contacts) => {
-        upsertContactsForProfile(activeProfileId, contacts || []);
+        const rows = Array.isArray(contacts) ? contacts : [];
+        if (upsertContactsForProfile(activeProfileId, rows) > 0) {
+          scheduleWaChatSync(activeProfileId, "contacts");
+        }
       });
       sock.ev.on("contacts.update", (contacts) => {
-        upsertContactsForProfile(activeProfileId, contacts || []);
+        const rows = Array.isArray(contacts) ? contacts : [];
+        if (upsertContactsForProfile(activeProfileId, rows) > 0) {
+          scheduleWaChatSync(activeProfileId, "contacts");
+        }
       });
       sock.ev.on("chats.upsert", (chats) => {
-        upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+        const rows = Array.isArray(chats) ? chats : [];
+        upsertChatsAsContactsForProfile(activeProfileId, rows);
+        upsertChatsForProfile(activeProfileId, rows);
       });
       sock.ev.on("chats.update", (chats) => {
-        upsertChatsAsContactsForProfile(activeProfileId, chats || []);
+        const rows = Array.isArray(chats) ? chats : [];
+        upsertChatsAsContactsForProfile(activeProfileId, rows);
+        upsertChatsForProfile(activeProfileId, rows);
       });
       sock.ev.on("messages.upsert", (evt) => {
-        upsertMessagesAsContactsForProfile(activeProfileId, evt?.messages || []);
+        const rows = Array.isArray(evt?.messages) ? evt.messages : [];
+        upsertMessagesAsContactsForProfile(activeProfileId, rows);
+        upsertMessagesForProfile(activeProfileId, rows);
+      });
+      sock.ev.on("messages.update", (updates) => {
+        applyMessageUpdatesForProfile(activeProfileId, Array.isArray(updates) ? updates : []);
       });
 
       sock.ev.on("connection.update", async (update) => {
@@ -1773,6 +2811,7 @@ async function connectWA(method, attemptId) {
           invalidSessionProfiles.delete(activeProfileId);
           updateConnectedProfileMeta(activeProfileId, sock?.user || {});
           syncContactNamesForProfile(activeProfileId, { force: false, isInitialSync: false }).catch(() => {});
+          scheduleWaChatSync(activeProfileId, "connection_open");
           win?.webContents.send("wa:status", {
             connected: true,
             text: "Connected",
@@ -1784,6 +2823,7 @@ async function connectWA(method, attemptId) {
           isConnected = false;
           const code = lastDisconnect?.error?.output?.statusCode;
           const reason = DisconnectReason?.[code] || code || "unknown";
+          scheduleWaChatSync(activeProfileId, "connection_close");
 
           win?.webContents.send("wa:status", {
             connected: false,
@@ -1856,12 +2896,14 @@ async function startHandshake(payload) {
   if (invalidSessionProfiles.has(activeProfileId)) {
     clearAuthDir(authDir);
     invalidSessionProfiles.delete(activeProfileId);
+    clearWaChatStateForProfile(activeProfileId);
   }
 
   // If profile is not fully registered yet, clear partial auth files first
   // to force a clean QR/pairing handshake.
   if (!hasRegisteredSession(activeProfileId)) {
     clearAuthDir(authDir);
+    clearWaChatStateForProfile(activeProfileId);
   }
 
   handshakeAttemptId++;
@@ -2098,6 +3140,82 @@ ipcMain.handle("wa:getContacts", async (_evt, options) => {
     contacts,
     count: contacts.length
   };
+});
+
+ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
+  const profileId = getActiveProfileId();
+  const chats = getRecentChatsForProfile(profileId, options || {});
+  return {
+    ok: true,
+    connected: !!isConnected,
+    profileId,
+    chats,
+    count: chats.length
+  };
+});
+
+ipcMain.handle("wa:getChatMessages", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeChatJid(src.chatJid || "");
+  if (!chatJid) throw new Error("Invalid chat");
+  const messages = getChatMessagesForProfile(profileId, chatJid, src || {});
+  return {
+    ok: true,
+    connected: !!isConnected,
+    profileId,
+    chatJid,
+    messages,
+    count: messages.length
+  };
+});
+
+ipcMain.handle("wa:markChatRead", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeChatJid(src.chatJid || "");
+  if (!chatJid) throw new Error("Invalid chat");
+  return await markChatReadForProfile(profileId, chatJid);
+});
+
+ipcMain.handle("wa:sendChatMessage", async (_evt, payload) => {
+  return await sendChatMessage(payload || {});
+});
+
+ipcMain.handle("wa:pickAttachment", async () => {
+  const openRes = await dialog.showOpenDialog({
+    title: "Select attachment",
+    properties: ["openFile"],
+    filters: [
+      { name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp", "bmp"] },
+      { name: "Videos", extensions: ["mp4", "mov", "avi", "mkv"] },
+      { name: "Documents", extensions: ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "csv", "zip"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+  if (openRes.canceled || !openRes.filePaths || openRes.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+
+  const filePath = openRes.filePaths[0];
+  const stat = fs.statSync(filePath);
+  const fileName = path.basename(filePath);
+  const mimeType = getMimeTypeForPath(filePath);
+  const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
+  return {
+    ok: true,
+    attachment: {
+      path: filePath,
+      fileName,
+      mimeType,
+      kind,
+      size: Number(stat.size || 0) || 0
+    }
+  };
+});
+
+ipcMain.handle("wa:downloadMedia", async (_evt, payload) => {
+  return await downloadChatMedia(payload || {});
 });
 
 ipcMain.handle("wa:clearSentForTemplate", async (_evt, templateId) => {

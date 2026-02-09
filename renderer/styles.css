@@ -676,6 +676,281 @@ p {
   margin-bottom: 12px;
 }
 
+.waAppShell {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #f5faf8;
+  box-shadow: 0 10px 24px rgba(16, 47, 44, 0.08);
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  min-height: 620px;
+  max-height: calc(100vh - 260px);
+  overflow: hidden;
+}
+
+.waChatColumn {
+  border-right: 1px solid #d4e4e1;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.waChatTools {
+  padding: 10px;
+  border-bottom: 1px solid #e4efed;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.waChatList {
+  overflow: auto;
+  flex: 1;
+}
+
+.waChatItem {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eff5f4;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.waChatItem:hover {
+  background: #f2fbf9;
+}
+
+.waChatItem.active {
+  background: #def4ef;
+}
+
+.waChatAvatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  object-fit: cover;
+  background: #d1e8e3;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  font-weight: 700;
+  color: #1b5851;
+}
+
+.waChatMain {
+  min-width: 0;
+}
+
+.waChatName {
+  font-size: 13px;
+  font-weight: 700;
+  color: #143534;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.waChatPreview {
+  margin-top: 3px;
+  font-size: 12px;
+  color: #597574;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.waChatMeta {
+  display: grid;
+  justify-items: end;
+  gap: 6px;
+}
+
+.waChatTime {
+  font-size: 11px;
+  color: #6b8785;
+}
+
+.waUnreadBadge {
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  padding: 0 6px;
+  background: #119d83;
+  color: #fff;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.waConversation {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(177, 234, 219, 0.27), transparent 48%),
+    radial-gradient(circle at 80% 80%, rgba(191, 224, 255, 0.25), transparent 46%),
+    #e9f4f0;
+}
+
+.waConversationHead {
+  border-bottom: 1px solid #d4e4e1;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(2px);
+  padding: 11px 14px;
+}
+
+.waHeadTitle {
+  font-size: 15px;
+  font-weight: 800;
+  color: #153837;
+}
+
+.waHeadMeta {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #5f7b79;
+}
+
+.waMessageViewport {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.waEmptyState {
+  margin: auto;
+  border: 1px solid #c4ddd8;
+  background: #f9fffe;
+  color: #4c6766;
+  border-radius: 11px;
+  padding: 9px 11px;
+  font-size: 13px;
+}
+
+.waMessageRow {
+  display: flex;
+}
+
+.waMessageRow.me {
+  justify-content: flex-end;
+}
+
+.waBubble {
+  max-width: min(76%, 660px);
+  border-radius: 12px;
+  border: 1px solid #cde2de;
+  background: #fff;
+  padding: 8px 10px 6px;
+  box-shadow: 0 2px 10px rgba(13, 39, 38, 0.08);
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.waMessageRow.me .waBubble {
+  background: #d9f8e2;
+  border-color: #9fdcb5;
+}
+
+.waSender {
+  font-size: 11px;
+  font-weight: 700;
+  color: #42615f;
+  margin-bottom: 4px;
+}
+
+.waMediaThumb {
+  max-width: 260px;
+  border-radius: 10px;
+  border: 1px solid #c9ddda;
+  display: block;
+}
+
+.waMediaMeta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #3f6462;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.waMediaDownloadBtn {
+  border: 1px solid #b9d6d1;
+  background: #f4fcfa;
+  color: #205350;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 999px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.waMediaDownloadBtn:hover {
+  background: #e0f4f0;
+}
+
+.waMessageText {
+  margin-top: 6px;
+}
+
+.waMsgTime {
+  margin-top: 5px;
+  text-align: right;
+  font-size: 11px;
+  color: #54706e;
+}
+
+.waComposer {
+  border-top: 1px solid #cfe0dd;
+  padding: 8px 10px;
+  background: rgba(250, 255, 254, 0.95);
+}
+
+.waAttachmentRow {
+  margin-bottom: 7px;
+  border: 1px solid #c2ddd8;
+  background: #eef9f6;
+  border-radius: 10px;
+  padding: 7px 9px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.waAttachmentMeta {
+  font-size: 12px;
+  color: #2a5855;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.waComposerRow {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.waComposerRow textarea {
+  resize: none;
+  min-height: 46px;
+  max-height: 124px;
+}
+
 .pill {
   border: 1px solid #b5d9d4;
   border-radius: 999px;
@@ -820,6 +1095,10 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .waAppShell {
+    grid-template-columns: 300px 1fr;
+  }
+
   .activityBar {
     padding: 10px 14px 12px;
   }
@@ -838,7 +1117,7 @@ p {
   }
 
   .tabNav {
-    grid-template-columns: repeat(5, minmax(120px, 1fr));
+    grid-template-columns: repeat(6, minmax(120px, 1fr));
     overflow: auto;
   }
 
@@ -855,5 +1134,15 @@ p {
 
   .confirmBody {
     grid-template-columns: 1fr;
+  }
+
+  .waAppShell {
+    grid-template-columns: 1fr;
+    min-height: 560px;
+    max-height: none;
+  }
+
+  .waChatColumn {
+    max-height: 270px;
   }
 }

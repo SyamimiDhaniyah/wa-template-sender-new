@@ -33,6 +33,12 @@ contextBridge.exposeInMainWorld("api", {
   waAutoReconnect: () => ipcRenderer.invoke("wa:autoReconnect"),
   waGetConnectionState: () => ipcRenderer.invoke("wa:getConnectionState"),
   waGetContacts: (options) => ipcRenderer.invoke("wa:getContacts", options),
+  waGetRecentChats: (options) => ipcRenderer.invoke("wa:getRecentChats", options),
+  waGetChatMessages: (payload) => ipcRenderer.invoke("wa:getChatMessages", payload),
+  waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
+  waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
+  waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
+  waDownloadMedia: (payload) => ipcRenderer.invoke("wa:downloadMedia", payload),
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
   waSendPreparedBatch: (payload) => ipcRenderer.invoke("wa:sendPreparedBatch", payload),
 
@@ -42,5 +48,6 @@ contextBridge.exposeInMainWorld("api", {
   onQR: (cb) => ipcRenderer.on("wa:qr", (_e, dataUrl) => cb(dataUrl)),
   onPairingCode: (cb) => ipcRenderer.on("wa:pairingCode", (_e, code) => cb(code)),
   onStatus: (cb) => ipcRenderer.on("wa:status", (_e, s) => cb(s)),
+  onWaChatSync: (cb) => ipcRenderer.on("wa:chatSync", (_e, payload) => cb(payload)),
   onBatchProgress: (cb) => ipcRenderer.on("batch:progress", (_e, p) => cb(p))
 });
