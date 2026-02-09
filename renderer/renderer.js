@@ -44,6 +44,12 @@ const state = {
   waLoadingMessages: false,
   waRefreshQueued: false,
   waForceHistoryRefreshOnConnected: false,
+  waPresenceByChat: {},
+  waPresenceExpiryTimers: {},
+  waTypingPauseTimer: null,
+  waTypingHeartbeatTimer: null,
+  waTypingChatJid: "",
+  waTypingActive: false,
   waChatsReqSeq: 0,
   waMessagesReqSeq: 0,
   profiles: [],
@@ -202,6 +208,9 @@ function setConnectionBadge(connected, text) {
 
 function setActiveTab(tabName) {
   const tab = String(tabName || "whatsapp");
+  if (tab !== "whatsapp") {
+    stopWaOutgoingTyping({ sendPaused: true });
+  }
   state.activeTab = tab;
   document.querySelectorAll(".tabBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
   document.querySelectorAll(".tabPanel").forEach((panel) => panel.classList.toggle("hidden", panel.id !== `tab-${tab}`));
@@ -292,6 +301,269 @@ function canMarkReadForChat(chatJid) {
   if (!jid) return false;
   if (state.activeTab !== "whatsapp") return false;
   return jid === String(state.waActiveChatJid || "") && jid === String(state.waExplicitOpenChatJid || "");
+}
+
+function normalizeWaJid(input) {
+  return String(input || "")
+    .trim()
+    .toLowerCase();
+}
+
+function waDisplayNameFromJid(jid) {
+  const raw = String(jid || "").trim();
+  if (!raw) return "Someone";
+  const user = raw.split("@")[0] || raw;
+  if (!user) return "Someone";
+  return user;
+}
+
+function clearWaPresenceExpiryTimer(timerKey) {
+  const key = String(timerKey || "");
+  if (!key) return;
+  const timer = state.waPresenceExpiryTimers[key];
+  if (timer) clearTimeout(timer);
+  delete state.waPresenceExpiryTimers[key];
+}
+
+function removeWaPresenceParticipant(chatJid, participantJid, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const chatKey = normalizeWaJid(chatJid);
+  const participantKey = normalizeWaJid(participantJid);
+  if (!chatKey || !participantKey) return;
+
+  const map = state.waPresenceByChat[chatKey];
+  if (!map || typeof map !== "object") return;
+
+  const timerKey = `${chatKey}|${participantKey}`;
+  clearWaPresenceExpiryTimer(timerKey);
+  if (!Object.prototype.hasOwnProperty.call(map, participantKey)) return;
+
+  delete map[participantKey];
+  if (Object.keys(map).length === 0) delete state.waPresenceByChat[chatKey];
+  if (opts.render !== false && chatKey === normalizeWaJid(state.waActiveChatJid)) {
+    renderWaConversationHead();
+  }
+}
+
+function clearWaPresenceForChat(chatJid, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const chatKey = normalizeWaJid(chatJid);
+  if (!chatKey) return;
+  const map = state.waPresenceByChat[chatKey];
+  if (!map || typeof map !== "object") return;
+  for (const participantKey of Object.keys(map)) {
+    clearWaPresenceExpiryTimer(`${chatKey}|${participantKey}`);
+  }
+  delete state.waPresenceByChat[chatKey];
+  if (opts.render !== false && chatKey === normalizeWaJid(state.waActiveChatJid)) {
+    renderWaConversationHead();
+  }
+}
+
+function clearAllWaPresenceState(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  for (const timerKey of Object.keys(state.waPresenceExpiryTimers || {})) {
+    clearWaPresenceExpiryTimer(timerKey);
+  }
+  state.waPresenceByChat = {};
+  if (opts.render !== false) renderWaConversationHead();
+}
+
+function resolveWaPresenceSenderName(chatJid, participantJid, fallbackName) {
+  const fallback = String(fallbackName || "").trim();
+  if (fallback) return fallback;
+
+  const participantKey = normalizeWaJid(participantJid);
+  const chatKey = normalizeWaJid(chatJid);
+  if (participantKey && chatKey && participantKey === chatKey) {
+    const activeChat = state.waChats.find((x) => normalizeWaJid(x?.jid) === chatKey);
+    const title = String(activeChat?.title || "").trim();
+    if (title) return title;
+  }
+
+  for (let i = state.waMessages.length - 1; i >= 0; i--) {
+    const msg = state.waMessages[i];
+    const participantFromMsg = normalizeWaJid(msg?.key?.participant || "");
+    if (participantFromMsg && participantFromMsg === participantKey) {
+      const sender = String(msg?.senderName || "").trim();
+      if (sender && sender.toLowerCase() !== "you") return sender;
+    }
+  }
+
+  const byChat = state.waChats.find((x) => normalizeWaJid(x?.jid) === participantKey);
+  const chatTitle = String(byChat?.title || "").trim();
+  if (chatTitle) return chatTitle;
+
+  return waDisplayNameFromJid(participantJid);
+}
+
+function setWaPresenceParticipant(chatJid, participantJid, entry, ttlMs = 9000) {
+  const chatKey = normalizeWaJid(chatJid);
+  const participantKey = normalizeWaJid(participantJid);
+  if (!chatKey || !participantKey) return;
+
+  const bucket =
+    state.waPresenceByChat[chatKey] && typeof state.waPresenceByChat[chatKey] === "object"
+      ? state.waPresenceByChat[chatKey]
+      : {};
+  state.waPresenceByChat[chatKey] = bucket;
+  bucket[participantKey] = {
+    participantJid: participantKey,
+    presenceType: String(entry?.presenceType || "").toLowerCase(),
+    name: String(entry?.name || "").trim() || waDisplayNameFromJid(participantKey),
+    updatedAt: Number(entry?.updatedAt || Date.now()) || Date.now()
+  };
+
+  const timerKey = `${chatKey}|${participantKey}`;
+  clearWaPresenceExpiryTimer(timerKey);
+  state.waPresenceExpiryTimers[timerKey] = setTimeout(() => {
+    removeWaPresenceParticipant(chatKey, participantKey, { render: true });
+  }, Math.max(1000, Number(ttlMs || 9000)));
+
+  if (chatKey === normalizeWaJid(state.waActiveChatJid)) {
+    renderWaConversationHead();
+  }
+}
+
+function getWaTypingEntriesForChat(chatJid) {
+  const chatKey = normalizeWaJid(chatJid);
+  if (!chatKey) return [];
+  const map = state.waPresenceByChat[chatKey];
+  if (!map || typeof map !== "object") return [];
+  return Object.values(map)
+    .filter((x) => x && typeof x === "object" && ["composing", "recording"].includes(String(x.presenceType || "")))
+    .sort((a, b) => Number(b?.updatedAt || 0) - Number(a?.updatedAt || 0));
+}
+
+function formatWaTypingMeta(activeChat, typingEntries) {
+  const list = Array.isArray(typingEntries) ? typingEntries : [];
+  if (list.length === 0) return "";
+
+  const first = list[0];
+  if (!activeChat?.isGroup) {
+    return first.presenceType === "recording" ? "recording audio..." : "typing...";
+  }
+
+  if (list.length === 1) {
+    return first.presenceType === "recording" ? `${first.name} is recording audio...` : `${first.name} is typing...`;
+  }
+
+  const names = list
+    .slice(0, 2)
+    .map((x) => String(x?.name || "").trim())
+    .filter(Boolean);
+  const moreCount = Math.max(0, list.length - names.length);
+  const base = names.join(", ");
+  return moreCount > 0 ? `${base} +${moreCount} typing...` : `${base} typing...`;
+}
+
+function applyWaPresenceUpdate(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  if (src.profileId && state.activeProfileId && src.profileId !== state.activeProfileId) return;
+
+  const chatJid = String(src.id || src.chatJid || "").trim();
+  if (!chatJid) return;
+
+  const presences = src.presences && typeof src.presences === "object" ? src.presences : {};
+  for (const [participantJidRaw, presenceRaw] of Object.entries(presences)) {
+    const participantJid = String(participantJidRaw || "").trim();
+    if (!participantJid) continue;
+    const presenceType = String(presenceRaw?.lastKnownPresence || "")
+      .trim()
+      .toLowerCase();
+    if (presenceType === "composing" || presenceType === "recording") {
+      const senderName = resolveWaPresenceSenderName(chatJid, participantJid, presenceRaw?.senderName || "");
+      setWaPresenceParticipant(chatJid, participantJid, {
+        presenceType,
+        name: senderName,
+        updatedAt: Date.now()
+      });
+    } else {
+      removeWaPresenceParticipant(chatJid, participantJid, { render: true });
+    }
+  }
+}
+
+function clearWaTypingPauseTimer() {
+  if (!state.waTypingPauseTimer) return;
+  clearTimeout(state.waTypingPauseTimer);
+  state.waTypingPauseTimer = null;
+}
+
+function clearWaTypingHeartbeatTimer() {
+  if (!state.waTypingHeartbeatTimer) return;
+  clearInterval(state.waTypingHeartbeatTimer);
+  state.waTypingHeartbeatTimer = null;
+}
+
+async function sendWaChatPresence(type, chatJid) {
+  const presenceType = String(type || "").trim().toLowerCase();
+  const jid = String(chatJid || "").trim();
+  if (!presenceType || !jid) return;
+  try {
+    await window.api.waSendPresence({
+      chatJid: jid,
+      type: presenceType
+    });
+  } catch {
+    // ignore transient presence send failures
+  }
+}
+
+function stopWaOutgoingTyping(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const chatJid = String(state.waTypingChatJid || "").trim();
+  const wasActive = !!state.waTypingActive && !!chatJid;
+
+  clearWaTypingPauseTimer();
+  clearWaTypingHeartbeatTimer();
+  state.waTypingActive = false;
+  state.waTypingChatJid = "";
+
+  if (opts.sendPaused !== false && wasActive) {
+    sendWaChatPresence("paused", chatJid).catch(() => {});
+  }
+}
+
+function scheduleWaOutgoingTypingPause(chatJid) {
+  clearWaTypingPauseTimer();
+  state.waTypingPauseTimer = setTimeout(() => {
+    if (normalizeWaJid(state.waTypingChatJid) !== normalizeWaJid(chatJid)) return;
+    stopWaOutgoingTyping({ sendPaused: true });
+  }, 1400);
+}
+
+function startWaOutgoingTyping(chatJid) {
+  const jid = String(chatJid || "").trim();
+  if (!jid || !state.waConnected) return;
+  const changedChat = normalizeWaJid(state.waTypingChatJid) !== normalizeWaJid(jid);
+  if (changedChat) {
+    stopWaOutgoingTyping({ sendPaused: true });
+  }
+
+  state.waTypingChatJid = jid;
+  if (!state.waTypingActive) {
+    state.waTypingActive = true;
+    sendWaChatPresence("composing", jid).catch(() => {});
+    clearWaTypingHeartbeatTimer();
+    state.waTypingHeartbeatTimer = setInterval(() => {
+      if (!state.waTypingActive) return;
+      if (!state.waTypingChatJid) return;
+      sendWaChatPresence("composing", state.waTypingChatJid).catch(() => {});
+    }, 7000);
+  }
+  scheduleWaOutgoingTypingPause(jid);
+}
+
+function handleWaComposerInputTyping() {
+  const chatJid = String(state.waActiveChatJid || "").trim();
+  if (!chatJid) return;
+  const text = String(el("waComposerInput").value || "");
+  if (!text.trim()) {
+    stopWaOutgoingTyping({ sendPaused: true });
+    return;
+  }
+  startWaOutgoingTyping(chatJid);
 }
 
 function waAttachmentKindFromMimeOrPath(mimeType, filePath) {
@@ -606,6 +878,8 @@ function renderWaConversationHead() {
   }
   if (titleEl) titleEl.textContent = activeChat.title || activeChat.jid || "WhatsApp";
   const bits = [];
+  const typingMeta = formatWaTypingMeta(activeChat, getWaTypingEntriesForChat(activeChat.jid));
+  if (typingMeta) bits.push(typingMeta);
   if (activeChat.isGroup) bits.push("Group");
   if (activeChat.unreadCount) bits.push(`${activeChat.unreadCount} unread`);
   bits.push(activeChat.jid);
@@ -861,6 +1135,7 @@ async function refreshWaMessages(options = {}) {
 async function openWaChat(chatJid) {
   const next = String(chatJid || "");
   if (!next) return;
+  stopWaOutgoingTyping({ sendPaused: true });
   state.waActiveChatJid = next;
   state.waExplicitOpenChatJid = next;
   renderWaChatList();
@@ -878,6 +1153,7 @@ async function refreshWaChats(options = {}) {
   const requestId = ++state.waChatsReqSeq;
 
   try {
+    const prevActiveChatJid = state.waActiveChatJid;
     const res = await window.api.waGetRecentChats({
       search: state.waChatSearch || "",
       limit: 220,
@@ -893,6 +1169,8 @@ async function refreshWaChats(options = {}) {
     state.waChats = Array.isArray(res?.chats) ? res.chats : [];
     const activeStillExists = state.waChats.some((x) => x.jid === state.waActiveChatJid);
     if (!activeStillExists) {
+      if (prevActiveChatJid) clearWaPresenceForChat(prevActiveChatJid, { render: false });
+      stopWaOutgoingTyping({ sendPaused: true });
       state.waActiveChatJid = "";
       state.waMessages = [];
     }
@@ -960,6 +1238,8 @@ async function sendWaComposerMessage() {
   const hasText = trimmedText.length > 0;
   const hasAttachment = queued.length > 0;
   if (!hasText && !hasAttachment) return;
+
+  stopWaOutgoingTyping({ sendPaused: true });
 
   const activeChatJid = state.waActiveChatJid;
   setWaComposerSending(true);
@@ -1856,6 +2136,8 @@ async function activateProfileAndSync(profileId) {
   const id = String(profileId || "").trim();
   if (!id) return;
 
+  stopWaOutgoingTyping({ sendPaused: true });
+  clearAllWaPresenceState({ render: false });
   state.waActiveChatJid = "";
   state.waExplicitOpenChatJid = "";
   state.waMessages = [];
@@ -1957,6 +2239,8 @@ async function loadInitialDataAfterLogin() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   setWaDropActive(false);
+  stopWaOutgoingTyping({ sendPaused: false });
+  clearAllWaPresenceState({ render: false });
   setWaComposerSending(false);
   setWaPendingAttachments([]);
   el("waChatSearchInput").value = "";
@@ -1992,6 +2276,8 @@ function showLoginScreen() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   setWaDropActive(false);
+  stopWaOutgoingTyping({ sendPaused: false });
+  clearAllWaPresenceState({ render: false });
   setWaComposerSending(false);
   setWaPendingAttachments([]);
   el("waChatSearchInput").value = "";
@@ -2110,6 +2396,14 @@ function bindEvents() {
     }
   });
 
+  el("waComposerInput").addEventListener("input", () => {
+    handleWaComposerInputTyping();
+  });
+
+  el("waComposerInput").addEventListener("blur", () => {
+    stopWaOutgoingTyping({ sendPaused: true });
+  });
+
   const waConversation = document.querySelector(".waConversation");
   if (waConversation) {
     waConversation.addEventListener("dragenter", (evt) => {
@@ -2164,6 +2458,14 @@ function bindEvents() {
   document.addEventListener("dragend", () => {
     state.waDropDepth = 0;
     setWaDropActive(false);
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopWaOutgoingTyping({ sendPaused: true });
+  });
+
+  window.addEventListener("blur", () => {
+    stopWaOutgoingTyping({ sendPaused: true });
   });
 
   el("loginForm").addEventListener("submit", async (evt) => {
@@ -2521,6 +2823,11 @@ function bindEvents() {
     const connected = !!status?.connected;
     setConnectionBadge(connected, status?.text || "Not connected");
 
+    if (!connected) {
+      stopWaOutgoingTyping({ sendPaused: false });
+      clearAllWaPresenceState({ render: true });
+    }
+
     if (!prevConnected && connected && state.waForceHistoryRefreshOnConnected) {
       state.waForceHistoryRefreshOnConnected = false;
       refreshWaChatsWithHistoryWarmup().catch(() => {});
@@ -2536,6 +2843,10 @@ function bindEvents() {
     if (!payload) return;
     if (payload.profileId && state.activeProfileId && payload.profileId !== state.activeProfileId) return;
     scheduleWaSyncRefresh();
+  });
+
+  window.api.onWaPresence((payload) => {
+    applyWaPresenceUpdate(payload);
   });
 
   window.api.onBatchProgress((row) => {

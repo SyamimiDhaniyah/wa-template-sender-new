@@ -50,6 +50,8 @@ const waChatByProfileMem = {};
 const waChatSyncTimers = new Map();
 const waHistoryWarmupInFlightByProfile = new Map();
 const waImageAutoSaveInFlight = new Set();
+const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recording"]);
+const WA_ALLOWED_INCOMING_CHAT_PRESENCE = new Set(["composing", "recording", "paused", "available", "unavailable"]);
 let waChatPersistTimer = null;
 
 const store = new Store();
@@ -1684,6 +1686,11 @@ function normalizeSendTargetJid(input) {
   }
 }
 
+function normalizeIncomingChatPresenceType(raw) {
+  const value = cleanString(raw).toLowerCase();
+  return WA_ALLOWED_INCOMING_CHAT_PRESENCE.has(value) ? value : "";
+}
+
 function bytesToBase64(value) {
   if (!value) return "";
   try {
@@ -2633,6 +2640,28 @@ async function markChatReadForProfile(profileId, chatJid) {
   return { ok: true, chatJid: jid, readMessagesSent, readReceiptSent, chatModifySent };
 }
 
+async function sendChatPresence(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const type = cleanString(src.type || src.presence || "").toLowerCase();
+  if (!WA_ALLOWED_OUTGOING_CHAT_PRESENCE.has(type)) throw new Error("Invalid presence type");
+  if (!type) throw new Error("Invalid presence type");
+  const chatJid = normalizeChatJid(src.chatJid || "");
+  if (!chatJid) throw new Error("Invalid chat");
+
+  const profileId = getActiveProfileId();
+  if (!sock || !isConnected || typeof sock.sendPresenceUpdate !== "function") {
+    return { ok: false, skipped: true, reason: "not_connected", profileId, chatJid, type };
+  }
+
+  try {
+    await sock.sendPresenceUpdate(type, chatJid);
+    return { ok: true, profileId, chatJid, type };
+  } catch (e) {
+    log.debug({ err: e, profileId, chatJid, type }, "Failed to send chat presence update");
+    return { ok: false, profileId, chatJid, type, error: String(e?.message || e) };
+  }
+}
+
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
   ".jpeg": "image/jpeg",
@@ -3493,6 +3522,56 @@ async function connectWA(method, attemptId) {
       sock.ev.on("messages.update", (updates) => {
         applyMessageUpdatesForProfile(activeProfileId, Array.isArray(updates) ? updates : []);
       });
+      sock.ev.on("presence.update", (presenceEvt) => {
+        if (attemptId !== handshakeAttemptId) return;
+        const chatJid = normalizeChatJid(presenceEvt?.id || "");
+        if (!chatJid) return;
+
+        const meJids = new Set(
+          [
+            normalizeJidForContact(sock?.user?.id || ""),
+            normalizeJidForContact(sock?.user?.lid || ""),
+            normalizeJidForContact(sock?.authState?.creds?.me?.id || ""),
+            normalizeJidForContact(sock?.authState?.creds?.me?.lid || "")
+          ].filter(Boolean)
+        );
+        const rawPresences = presenceEvt?.presences && typeof presenceEvt.presences === "object" ? presenceEvt.presences : {};
+        const normalizedPresences = {};
+
+        for (const [participantRaw, rawPresence] of Object.entries(rawPresences)) {
+          const participantJid = normalizeJidForContact(participantRaw || "");
+          if (!participantJid) continue;
+          if (meJids.has(participantJid)) continue;
+          const lastKnownPresence = normalizeIncomingChatPresenceType(rawPresence?.lastKnownPresence || "");
+          if (!lastKnownPresence) continue;
+
+          const sender = resolveMessageSenderName(
+            activeProfileId,
+            chatJid,
+            {
+              fromMe: false,
+              key: {
+                participant: participantJid
+              },
+              pushName: ""
+            }
+          );
+
+          normalizedPresences[participantJid] = {
+            lastKnownPresence,
+            lastSeen: Number(rawPresence?.lastSeen || 0) || 0,
+            senderName: cleanString(sender || "")
+          };
+        }
+
+        if (Object.keys(normalizedPresences).length === 0) return;
+        win?.webContents.send("wa:presence", {
+          profileId: activeProfileId,
+          id: chatJid,
+          presences: normalizedPresences,
+          ts: Date.now()
+        });
+      });
 
       sock.ev.on("connection.update", async (update) => {
         // Ignore late events from old attempts
@@ -3948,6 +4027,10 @@ ipcMain.handle("wa:markChatRead", async (_evt, payload) => {
   const chatJid = normalizeChatJid(src.chatJid || "");
   if (!chatJid) throw new Error("Invalid chat");
   return await markChatReadForProfile(profileId, chatJid);
+});
+
+ipcMain.handle("wa:sendPresence", async (_evt, payload) => {
+  return await sendChatPresence(payload || {});
 });
 
 ipcMain.handle("wa:sendChatMessage", async (_evt, payload) => {

@@ -36,6 +36,7 @@ contextBridge.exposeInMainWorld("api", {
   waGetRecentChats: (options) => ipcRenderer.invoke("wa:getRecentChats", options),
   waGetChatMessages: (payload) => ipcRenderer.invoke("wa:getChatMessages", payload),
   waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
+  waSendPresence: (payload) => ipcRenderer.invoke("wa:sendPresence", payload),
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
   waGetPathForDroppedFile: (file) => {
@@ -58,5 +59,6 @@ contextBridge.exposeInMainWorld("api", {
   onPairingCode: (cb) => ipcRenderer.on("wa:pairingCode", (_e, code) => cb(code)),
   onStatus: (cb) => ipcRenderer.on("wa:status", (_e, s) => cb(s)),
   onWaChatSync: (cb) => ipcRenderer.on("wa:chatSync", (_e, payload) => cb(payload)),
+  onWaPresence: (cb) => ipcRenderer.on("wa:presence", (_e, payload) => cb(payload)),
   onBatchProgress: (cb) => ipcRenderer.on("batch:progress", (_e, p) => cb(p))
 });
