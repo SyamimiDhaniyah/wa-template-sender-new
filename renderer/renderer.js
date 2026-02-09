@@ -427,6 +427,40 @@ function closeWaImageLightbox() {
   img.alt = "Image preview";
 }
 
+async function openWaImageForMessage(msg) {
+  const media = msg && msg.media && typeof msg.media === "object" ? msg.media : null;
+  if (!media) return;
+  const altText = media.fileName || "Image";
+  const thumb = String(media.thumbnailDataUrl || "").trim();
+
+  if (thumb) {
+    openWaImageLightbox(thumb, altText);
+  }
+
+  try {
+    const res = await window.api.waResolveImagePreview({
+      chatJid: msg.chatJid,
+      key: msg.key
+    });
+    const fullDataUrl = String(res?.dataUrl || "").trim();
+    if (!res?.ok || !fullDataUrl) throw new Error("Image preview unavailable");
+
+    if (!thumb) {
+      openWaImageLightbox(fullDataUrl, altText);
+      return;
+    }
+
+    const wrap = el("waImageLightbox");
+    const img = el("waImageLightboxImg");
+    if (!wrap || !img || wrap.classList.contains("hidden")) return;
+    img.src = fullDataUrl;
+  } catch (e) {
+    if (!thumb) {
+      toast("Image preview", String(e?.message || e));
+    }
+  }
+}
+
 function renderWaMessages(options = {}) {
   const opts = options && typeof options === "object" ? options : {};
   const viewport = el("waMessageViewport");
@@ -468,18 +502,27 @@ function renderWaMessages(options = {}) {
     }
 
     if (msg.hasMedia && msg.media) {
+      const isImageMedia = String(msg.media.kind || "").toLowerCase() === "image";
       if (msg.media.thumbnailDataUrl) {
         const img = document.createElement("img");
         img.className = "waMediaThumb";
         img.src = msg.media.thumbnailDataUrl;
         img.alt = msg.media.fileName || msg.media.kind || "media";
-        if (String(msg.media.kind || "").toLowerCase() === "image") {
+        if (isImageMedia) {
           img.classList.add("clickable");
-          img.addEventListener("click", () => {
-            openWaImageLightbox(msg.media.thumbnailDataUrl, msg.media.fileName || "Image");
+          img.addEventListener("click", async () => {
+            await openWaImageForMessage(msg);
           });
         }
         bubble.appendChild(img);
+      } else if (isImageMedia) {
+        const openBtn = document.createElement("button");
+        openBtn.className = "waMediaDownloadBtn";
+        openBtn.textContent = "Open image";
+        openBtn.addEventListener("click", async () => {
+          await openWaImageForMessage(msg);
+        });
+        bubble.appendChild(openBtn);
       }
 
       const mediaMeta = document.createElement("div");

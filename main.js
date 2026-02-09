@@ -49,6 +49,7 @@ const WA_CHAT_STORE_KEY = "waChatByProfile";
 const waChatByProfileMem = {};
 const waChatSyncTimers = new Map();
 const waHistoryWarmupInFlightByProfile = new Map();
+const waImageAutoSaveInFlight = new Set();
 let waChatPersistTimer = null;
 
 const store = new Store();
@@ -607,13 +608,15 @@ function normalizePersistedChatMedia(raw) {
   const fileName = cleanString(src.fileName || "");
   const fileLength = Math.max(0, Number(src.fileLength || 0) || 0);
   const thumbnailDataUrl = cleanString(src.thumbnailDataUrl || "");
-  if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl) return null;
+  const localPath = cleanString(src.localPath || "");
+  if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl && !localPath) return null;
   return {
     kind,
     mimeType,
     fileName,
     fileLength,
-    thumbnailDataUrl
+    thumbnailDataUrl,
+    localPath
   };
 }
 
@@ -1756,6 +1759,7 @@ function summarizeMessagePayload(rawMessage) {
     const caption = textOrEmpty(content.imageMessage.caption);
     const thumb = bytesToBase64(content.imageMessage.jpegThumbnail);
     const localThumb = textOrEmpty(messageNode.__localThumbnailDataUrl);
+    const localPath = textOrEmpty(messageNode.__localImagePath);
     const thumbDataUrl = thumb
       ? `data:image/jpeg;base64,${thumb}`
       : localThumb.startsWith("data:image/") ? localThumb : "";
@@ -1769,7 +1773,8 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.imageMessage.mimetype) || "image/jpeg",
         fileName: textOrEmpty(content.imageMessage.fileName),
         fileLength: Number(content.imageMessage.fileLength || 0) || 0,
-        thumbnailDataUrl: thumbDataUrl
+        thumbnailDataUrl: thumbDataUrl,
+        localPath
       },
       skip: false
     };
@@ -2153,10 +2158,18 @@ function upsertMessagesForProfile(profileId, messages) {
 
     if (existingIndex >= 0) {
       const prev = list[existingIndex];
+      const prevMedia = prev?.media && typeof prev.media === "object" ? prev.media : null;
+      const nextMedia = normalized.media
+        ? {
+            ...(prevMedia || {}),
+            ...(normalized.media || {}),
+            localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || "")
+          }
+        : prevMedia || null;
       list[existingIndex] = {
         ...prev,
         ...normalized,
-        media: normalized.media || prev.media || null,
+        media: nextMedia,
         rawMessage: normalized.rawMessage || prev.rawMessage
       };
       changed++;
@@ -2188,6 +2201,15 @@ function upsertMessagesForProfile(profileId, messages) {
         name: nextName,
         updatedAt: nowIsoShort()
       };
+    }
+
+    if (normalized.hasMedia && String(normalized?.media?.kind || "").toLowerCase() === "image") {
+      const localPath = cleanString(normalized?.media?.localPath || "");
+      if (localPath && fs.existsSync(localPath)) {
+        setLocalImagePathForStoredMessage(profileId, normalized.chatJid, normalized.hash, localPath);
+      } else {
+        queueAutoSaveImageForHash(profileId, normalized.chatJid, normalized.hash);
+      }
     }
   }
 
@@ -2233,9 +2255,19 @@ function applyMessageUpdatesForProfile(profileId, updates) {
     });
     if (!normalized) continue;
 
+    const prevMedia = prev?.media && typeof prev.media === "object" ? prev.media : null;
+    const nextMedia = normalized.media
+      ? {
+          ...(prevMedia || {}),
+          ...(normalized.media || {}),
+          localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || "")
+        }
+      : prevMedia || null;
+
     list[idx] = {
       ...prev,
       ...normalized,
+      media: nextMedia,
       rawMessage: mergedRaw,
       status: Number(updateObj.status || normalized.status || prev.status || 0) || 0
     };
@@ -2342,7 +2374,8 @@ function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
           mimeType: cleanString(msg.media.mimeType || ""),
           fileName: cleanString(msg.media.fileName || ""),
           fileLength: Number(msg.media.fileLength || 0) || 0,
-          thumbnailDataUrl: cleanString(msg.media.thumbnailDataUrl || "")
+          thumbnailDataUrl: cleanString(msg.media.thumbnailDataUrl || ""),
+          localPath: cleanString(msg.media.localPath || "")
         }
       : null,
     status: Number(msg.status || 0) || 0
@@ -2685,6 +2718,148 @@ function buildImagePreviewDataUrlFromFile(filePath) {
   }
 }
 
+function sanitizePathSegment(value, fallback = "item") {
+  const raw = cleanString(value || "");
+  const clean = raw
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+/g, "_")
+    .replace(/\.+$/g, "")
+    .slice(0, 72);
+  return clean || fallback;
+}
+
+function buildStoredImagePath(profileId, messageRecord) {
+  const msg = messageRecord && typeof messageRecord === "object" ? messageRecord : {};
+  const media = msg.media && typeof msg.media === "object" ? msg.media : {};
+  const profilePart = sanitizePathSegment(profileId, "profile");
+  const chatPart = sanitizePathSegment(cleanString(msg.chatJid || "").replaceAll("@", "_"), "chat");
+  const mediaDir = path.join(userDataDir, "wa_media", "images", profilePart, chatPart);
+  ensureDir(mediaDir);
+
+  const keyId = sanitizePathSegment(cleanString(msg?.key?.id || ""), "img_" + Date.now().toString(16));
+  let ext = String(path.extname(cleanString(media.fileName || "")).toLowerCase());
+  if (!ext || ext.length > 10) ext = extensionFromMime(media.mimeType || "") || ".jpg";
+  if (!ext.startsWith(".")) ext = `.${ext}`;
+
+  return path.join(mediaDir, `${keyId}${ext}`);
+}
+
+function imageDataUrlFromFilePath(filePath, mimeHint) {
+  const srcPath = cleanString(filePath);
+  if (!srcPath || !fs.existsSync(srcPath)) return "";
+  try {
+    const buf = fs.readFileSync(srcPath);
+    if (!buf || buf.length === 0) return "";
+    const guess = cleanString(getMimeTypeForPath(srcPath) || "").toLowerCase();
+    const hinted = cleanString(mimeHint || "").toLowerCase();
+    const mime = guess.startsWith("image/") ? guess : hinted.startsWith("image/") ? hinted : "image/jpeg";
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch (e) {
+    log.debug({ err: e, filePath: srcPath }, "Failed to build image data URL from local file");
+    return "";
+  }
+}
+
+function setLocalImagePathForStoredMessage(profileId, chatJid, messageHash, localPath) {
+  const jid = normalizeChatJid(chatJid);
+  const normalizedPath = cleanString(localPath);
+  if (!profileId || !jid || !messageHash || !normalizedPath) return false;
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
+  const idx = list.findIndex((x) => x && x.hash === messageHash);
+  if (idx < 0) return false;
+
+  const prev = list[idx] && typeof list[idx] === "object" ? list[idx] : {};
+  const prevMedia = prev.media && typeof prev.media === "object" ? prev.media : {};
+  const prevPath = cleanString(prevMedia.localPath || "");
+  const thumbFromFile = buildImagePreviewDataUrlFromFile(normalizedPath);
+
+  const nextMedia = {
+    ...prevMedia,
+    kind: cleanString(prevMedia.kind || "image") || "image",
+    localPath: normalizedPath,
+    thumbnailDataUrl: cleanString(prevMedia.thumbnailDataUrl || "") || thumbFromFile || ""
+  };
+
+  const changed =
+    prevPath !== normalizedPath ||
+    (thumbFromFile && cleanString(prevMedia.thumbnailDataUrl || "") !== cleanString(nextMedia.thumbnailDataUrl || ""));
+  if (!changed) return false;
+
+  list[idx] = {
+    ...prev,
+    hasMedia: true,
+    media: nextMedia
+  };
+  schedulePersistWaChatCache();
+  scheduleWaChatSync(profileId, "image_saved");
+  return true;
+}
+
+async function ensureLocalImageForStoredMessage(profileId, chatJid, messageHash) {
+  const jid = normalizeChatJid(chatJid);
+  if (!profileId || !jid || !messageHash) return { ok: false, reason: "invalid_args" };
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
+  const msg = list.find((x) => x && x.hash === messageHash);
+  if (!msg) return { ok: false, reason: "not_found" };
+  if (!msg.hasMedia || String(msg?.media?.kind || "").toLowerCase() !== "image") {
+    return { ok: false, reason: "not_image" };
+  }
+
+  const existingPath = cleanString(msg?.media?.localPath || "");
+  if (existingPath && fs.existsSync(existingPath)) {
+    return { ok: true, localPath: existingPath, fromCache: true };
+  }
+
+  if (!sock || !isConnected) return { ok: false, reason: "not_connected" };
+  if (!msg.rawMessage || typeof msg.rawMessage !== "object") return { ok: false, reason: "raw_missing" };
+
+  const { downloadMediaMessage } = await getBaileys();
+  if (typeof downloadMediaMessage !== "function") return { ok: false, reason: "download_unavailable" };
+
+  let mediaData = null;
+  try {
+    mediaData = await downloadMediaMessage(msg.rawMessage, "buffer", {}, {
+      logger: log,
+      reuploadRequest: sock.updateMediaMessage
+    });
+  } catch (e) {
+    return { ok: false, reason: "download_failed", error: String(e?.message || e) };
+  }
+
+  const buffer = Buffer.isBuffer(mediaData) ? mediaData : mediaData ? Buffer.from(mediaData) : null;
+  if (!buffer || buffer.length === 0) return { ok: false, reason: "empty_buffer" };
+
+  const savePath = buildStoredImagePath(profileId, msg);
+  try {
+    fs.writeFileSync(savePath, buffer);
+  } catch (e) {
+    return { ok: false, reason: "write_failed", error: String(e?.message || e) };
+  }
+
+  setLocalImagePathForStoredMessage(profileId, jid, messageHash, savePath);
+  return { ok: true, localPath: savePath, fromCache: false };
+}
+
+function queueAutoSaveImageForHash(profileId, chatJid, messageHash) {
+  const jid = normalizeChatJid(chatJid);
+  if (!profileId || !jid || !messageHash) return;
+  const ticket = `${profileId}|${jid}|${messageHash}`;
+  if (waImageAutoSaveInFlight.has(ticket)) return;
+  waImageAutoSaveInFlight.add(ticket);
+
+  setTimeout(() => {
+    ensureLocalImageForStoredMessage(profileId, jid, messageHash)
+      .catch(() => {})
+      .finally(() => {
+        waImageAutoSaveInFlight.delete(ticket);
+      });
+  }, 0);
+}
+
 function buildDefaultDownloadFileName(messageRecord) {
   const msg = messageRecord && typeof messageRecord === "object" ? messageRecord : {};
   const media = msg.media && typeof msg.media === "object" ? msg.media : {};
@@ -2723,6 +2898,7 @@ async function sendChatMessage(payload) {
 
   let messagePayload = null;
   let localImagePreviewDataUrl = "";
+  let localImageSourcePath = "";
   if (attachment) {
     const filePath = cleanString(attachment.path || "");
     if (!filePath || !fs.existsSync(filePath)) throw new Error("Attachment file not found");
@@ -2732,6 +2908,7 @@ async function sendChatMessage(payload) {
 
     if (kind === "image") {
       localImagePreviewDataUrl = buildImagePreviewDataUrlFromFile(filePath);
+      localImageSourcePath = filePath;
       messagePayload = {
         image: { url: filePath },
         ...(trimmedText ? { caption: trimmedText } : {})
@@ -2764,6 +2941,9 @@ async function sendChatMessage(payload) {
   if (sentMessage && typeof sentMessage === "object") {
     if (localImagePreviewDataUrl) {
       sentMessage.__localThumbnailDataUrl = localImagePreviewDataUrl;
+    }
+    if (localImageSourcePath) {
+      sentMessage.__localImagePath = localImageSourcePath;
     }
     upsertMessagesForProfile(profileId, [sentMessage]);
   } else {
@@ -2821,6 +3001,51 @@ async function downloadChatMedia(payload) {
     filePath: saveRes.filePath,
     size: buffer.length
   };
+}
+
+async function resolveImagePreview(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeChatJid(src.chatJid || "");
+  if (!chatJid) throw new Error("Invalid chat");
+  if (!src.key || typeof src.key !== "object") throw new Error("Message key is required");
+
+  const found = findMessageRecordForProfile(profileId, chatJid, src.key);
+  if (!found) throw new Error("Message not found");
+  if (!found.hasMedia || String(found?.media?.kind || "").toLowerCase() !== "image") {
+    throw new Error("Message is not an image");
+  }
+
+  let localPath = cleanString(found?.media?.localPath || "");
+  if (!localPath || !fs.existsSync(localPath)) {
+    const ensured = await ensureLocalImageForStoredMessage(profileId, chatJid, found.hash);
+    if (ensured?.ok && ensured.localPath) localPath = cleanString(ensured.localPath);
+  }
+
+  if (localPath && fs.existsSync(localPath)) {
+    const fullDataUrl = imageDataUrlFromFilePath(localPath, found?.media?.mimeType);
+    if (fullDataUrl) {
+      return {
+        ok: true,
+        dataUrl: fullDataUrl,
+        localPath,
+        source: "local"
+      };
+    }
+  }
+
+  const thumb = cleanString(found?.media?.thumbnailDataUrl || "");
+  if (thumb) {
+    return {
+      ok: true,
+      dataUrl: thumb,
+      localPath: "",
+      source: "thumbnail",
+      degraded: true
+    };
+  }
+
+  throw new Error("Image preview unavailable");
 }
 
 /* --------------------------- AI Rewrite (via external backend) ---------------------------- */
@@ -3761,6 +3986,10 @@ ipcMain.handle("wa:pickAttachment", async () => {
 
 ipcMain.handle("wa:downloadMedia", async (_evt, payload) => {
   return await downloadChatMedia(payload || {});
+});
+
+ipcMain.handle("wa:resolveImagePreview", async (_evt, payload) => {
+  return await resolveImagePreview(payload || {});
 });
 
 ipcMain.handle("wa:clearSentForTemplate", async (_evt, templateId) => {

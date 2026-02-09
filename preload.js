@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("api", {
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
   waDownloadMedia: (payload) => ipcRenderer.invoke("wa:downloadMedia", payload),
+  waResolveImagePreview: (payload) => ipcRenderer.invoke("wa:resolveImagePreview", payload),
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
   waSendPreparedBatch: (payload) => ipcRenderer.invoke("wa:sendPreparedBatch", payload),
 
