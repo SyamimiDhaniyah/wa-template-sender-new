@@ -791,6 +791,7 @@ p {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background:
     radial-gradient(circle at 20% 20%, rgba(177, 234, 219, 0.27), transparent 48%),
     radial-gradient(circle at 80% 80%, rgba(191, 224, 255, 0.25), transparent 46%),
@@ -818,6 +819,7 @@ p {
 
 .waMessageViewport {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 12px;
   display: grid;

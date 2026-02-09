@@ -44,9 +44,11 @@ const lastContactNameSyncAtByProfile = new Map();
 let handshakeAttemptId = 0;
 let startupReconnectScheduled = false;
 const WA_CHAT_MAX_MESSAGES_PER_CHAT = 320;
+const WA_HISTORY_LOOKBACK_DAYS = 7;
 const WA_CHAT_STORE_KEY = "waChatByProfile";
 const waChatByProfileMem = {};
 const waChatSyncTimers = new Map();
+const waHistoryWarmupInFlightByProfile = new Map();
 let waChatPersistTimer = null;
 
 const store = new Store();
@@ -2357,6 +2359,125 @@ function getChatMessagesForProfile(profileId, chatJid, options) {
   return clipped.map((msg) => serializeMessageForRenderer(profileId, jid, msg));
 }
 
+function lookbackCutoffMs(days) {
+  const d = Number.isFinite(Number(days)) ? Math.max(1, Math.round(Number(days))) : WA_HISTORY_LOOKBACK_DAYS;
+  return Date.now() - d * 24 * 60 * 60 * 1000;
+}
+
+function pruneChatStoreToLookback(profileId, days) {
+  const state = ensureWaChatStateForProfile(profileId);
+  const cutoff = lookbackCutoffMs(days);
+  let changed = 0;
+
+  for (const [chatJid, listRaw] of Object.entries(state.messagesByChat || {})) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    const next = list.filter((m) => Number(m?.timestampMs || 0) >= cutoff);
+    if (next.length === 0) {
+      if (list.length > 0) changed++;
+      delete state.messagesByChat[chatJid];
+      continue;
+    }
+    if (next.length !== list.length) changed++;
+    state.messagesByChat[chatJid] = next;
+  }
+
+  for (const [chatJid, chatRaw] of Object.entries(state.chatsByJid || {})) {
+    const chat = chatRaw && typeof chatRaw === "object" ? chatRaw : {};
+    const ts = Number(chat.lastMessageTimestampMs || 0);
+    const hasUnread = Number(chat.unreadCount || 0) > 0;
+    const hasRecentMessages = Array.isArray(state.messagesByChat[chatJid]) && state.messagesByChat[chatJid].length > 0;
+    if (hasUnread || hasRecentMessages) continue;
+    if (ts >= cutoff) continue;
+    delete state.chatsByJid[chatJid];
+    changed++;
+  }
+
+  if (changed > 0) {
+    schedulePersistWaChatCache();
+    scheduleWaChatSync(profileId, "prune");
+  }
+  return changed;
+}
+
+async function warmRecentHistoryForProfile(profileId, options) {
+  const opts = options && typeof options === "object" ? options : {};
+  if (!profileId || !isConnected || !sock) return { ok: false, skipped: true, reason: "not_connected" };
+  const force = opts.force === true;
+
+  const existingTask = waHistoryWarmupInFlightByProfile.get(profileId);
+  if (existingTask && !force) return await existingTask;
+
+  const task = (async () => {
+    const cutoff = lookbackCutoffMs(opts.days || WA_HISTORY_LOOKBACK_DAYS);
+    let syncTriggered = false;
+
+    try {
+      if (typeof sock.resyncAppState === "function") {
+        await sock.resyncAppState(
+          ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
+          true
+        );
+        syncTriggered = true;
+      }
+    } catch (e) {
+      log.debug({ err: e, profileId }, "Initial app-state history sync failed");
+    }
+
+    const state = ensureWaChatStateForProfile(profileId);
+    const chats = getRecentChatsForProfile(profileId, { limit: 80 });
+    let fetchRequests = 0;
+
+    if (typeof sock.fetchMessageHistory === "function") {
+      const maxFetchPerWarmup = 12;
+      for (const chat of chats) {
+        if (fetchRequests >= maxFetchPerWarmup) break;
+        const chatJid = normalizeChatJid(chat?.jid || "");
+        if (!chatJid) continue;
+        const list = Array.isArray(state.messagesByChat[chatJid]) ? [...state.messagesByChat[chatJid]] : [];
+        if (list.length === 0) continue;
+        list.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+        const oldest = list[0];
+        const oldestTs = Number(oldest?.timestampMs || 0);
+        if (!oldest?.key?.id || oldestTs <= 0) continue;
+        if (oldestTs <= cutoff) continue;
+
+        try {
+          await sock.fetchMessageHistory(
+            50,
+            {
+              remoteJid: chatJid,
+              id: oldest.key.id,
+              fromMe: oldest.key.fromMe === true,
+              participant: oldest.key.participant || undefined
+            },
+            Math.floor(oldestTs / 1000)
+          );
+          fetchRequests++;
+          await new Promise((r) => setTimeout(r, 140));
+        } catch (e) {
+          log.debug({ err: e, profileId, chatJid }, "Failed to fetch older message history for chat");
+        }
+      }
+    }
+
+    pruneChatStoreToLookback(profileId, opts.days || WA_HISTORY_LOOKBACK_DAYS);
+    schedulePersistWaChatCache();
+    scheduleWaChatSync(profileId, "history_warmup");
+    return {
+      ok: true,
+      profileId,
+      syncTriggered,
+      fetchRequests
+    };
+  })()
+    .finally(() => {
+      waHistoryWarmupInFlightByProfile.delete(profileId);
+    });
+
+  waHistoryWarmupInFlightByProfile.set(profileId, task);
+  return await task;
+}
+
 function findMessageRecordForProfile(profileId, chatJid, key) {
   const jid = normalizeChatJid(chatJid);
   if (!jid) return null;
@@ -2386,11 +2507,42 @@ async function markChatReadForProfile(profileId, chatJid) {
       participant: m.key.participant || undefined
     }));
 
+  const lastMsgInChat =
+    list.length > 0
+      ? [...list].sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0))[list.length - 1]
+      : null;
+  const lastMsgForModify =
+    lastMsgInChat && lastMsgInChat.key && lastMsgInChat.key.id
+      ? {
+          key: {
+            remoteJid: lastMsgInChat.key.remoteJid || jid,
+            id: lastMsgInChat.key.id,
+            fromMe: lastMsgInChat.key.fromMe === true,
+            participant: lastMsgInChat.key.participant || undefined
+          },
+          messageTimestamp: Math.floor(Number(lastMsgInChat.timestampMs || Date.now()) / 1000)
+        }
+      : null;
+
   if (sock && isConnected && unreadKeys.length > 0 && typeof sock.readMessages === "function") {
     try {
       await sock.readMessages(unreadKeys);
     } catch (e) {
       log.debug({ err: e }, "Failed to mark chat as read");
+    }
+  }
+
+  if (sock && isConnected && lastMsgForModify && typeof sock.chatModify === "function") {
+    try {
+      await sock.chatModify(
+        {
+          markRead: true,
+          lastMessages: [lastMsgForModify]
+        },
+        jid
+      );
+    } catch (e) {
+      log.debug({ err: e }, "Failed chatModify markRead");
     }
   }
 
@@ -3095,6 +3247,7 @@ async function connectWA(method, attemptId) {
           invalidSessionProfiles.delete(activeProfileId);
           updateConnectedProfileMeta(activeProfileId, sock?.user || {});
           syncContactNamesForProfile(activeProfileId, { force: false, isInitialSync: false }).catch(() => {});
+          warmRecentHistoryForProfile(activeProfileId, { days: WA_HISTORY_LOOKBACK_DAYS, force: true }).catch(() => {});
           scheduleWaChatSync(activeProfileId, "connection_open");
           win?.webContents.send("wa:status", {
             connected: true,
@@ -3431,6 +3584,13 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
   const opts = options && typeof options === "object" ? options : {};
 
   if (isConnected && sock) {
+    if (opts.ensureHistory === true) {
+      await warmRecentHistoryForProfile(profileId, {
+        days: WA_HISTORY_LOOKBACK_DAYS,
+        force: opts.forceHistory === true
+      });
+    }
+
     if (opts.forceNameSync === true) {
       await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
     }

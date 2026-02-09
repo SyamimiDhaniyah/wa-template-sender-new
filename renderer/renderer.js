@@ -397,9 +397,15 @@ async function handleWaMediaDownload(msg) {
   }
 }
 
-function renderWaMessages() {
+function renderWaMessages(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
   const viewport = el("waMessageViewport");
   if (!viewport) return;
+  const prevScrollTop = Number(viewport.scrollTop || 0);
+  const prevScrollHeight = Number(viewport.scrollHeight || 0);
+  const prevClientHeight = Number(viewport.clientHeight || 0);
+  const prevDistanceFromBottom = Math.max(0, prevScrollHeight - (prevScrollTop + prevClientHeight));
+  const wasNearBottom = prevDistanceFromBottom <= 120;
   viewport.innerHTML = "";
 
   if (!state.waActiveChatJid) {
@@ -473,8 +479,13 @@ function renderWaMessages() {
     row.appendChild(bubble);
     viewport.appendChild(row);
   }
-
-  viewport.scrollTop = viewport.scrollHeight;
+  if (opts.forceBottom || wasNearBottom) {
+    viewport.scrollTop = viewport.scrollHeight;
+    return;
+  }
+  if (prevScrollHeight > 0) {
+    viewport.scrollTop = Math.max(0, viewport.scrollHeight - prevDistanceFromBottom);
+  }
 }
 
 async function refreshWaMessages(options = {}) {
@@ -483,7 +494,7 @@ async function refreshWaMessages(options = {}) {
     state.waMessages = [];
     state.waLoadingMessages = false;
     renderWaConversationHead();
-    renderWaMessages();
+    renderWaMessages({ forceBottom: false });
     return;
   }
 
@@ -492,7 +503,7 @@ async function refreshWaMessages(options = {}) {
   if (shouldShowLoading) {
     state.waLoadingMessages = true;
     renderWaConversationHead();
-    renderWaMessages();
+    renderWaMessages({ forceBottom: false });
   } else {
     state.waLoadingMessages = false;
   }
@@ -508,7 +519,7 @@ async function refreshWaMessages(options = {}) {
     if (requestId !== state.waMessagesReqSeq) return;
     state.waLoadingMessages = false;
     renderWaConversationHead();
-    renderWaMessages();
+    renderWaMessages({ forceBottom: opts.forceBottom === true });
   }
 
   if (opts.markRead !== false) {
@@ -537,7 +548,7 @@ async function openWaChat(chatJid) {
   state.waActiveChatJid = next;
   renderWaChatList();
   renderWaConversationHead();
-  await refreshWaMessages({ markRead: true });
+  await refreshWaMessages({ markRead: true, forceBottom: true, showLoading: true });
 }
 
 async function refreshWaChats(options = {}) {
@@ -554,6 +565,8 @@ async function refreshWaChats(options = {}) {
       search: state.waChatSearch || "",
       limit: 220,
       includePhotos: opts.includePhotos !== false,
+      ensureHistory: opts.ensureHistory === true,
+      forceHistory: opts.forceHistory === true,
       maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 35,
       minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
         ? Number(opts.minMinutesBetweenPhotoChecks)
@@ -575,7 +588,7 @@ async function refreshWaChats(options = {}) {
   renderWaConversationHead();
 
   if (!state.waActiveChatJid) {
-    renderWaMessages();
+    renderWaMessages({ forceBottom: false });
   } else if (opts.refreshMessages !== false) {
     await refreshWaMessages({
       markRead: opts.markRead !== false,
@@ -627,7 +640,7 @@ async function sendWaComposerMessage() {
     await window.api.waSendChatMessage(payload);
     el("waComposerInput").value = "";
     setWaPendingAttachment(null);
-    await refreshWaMessages({ markRead: false });
+    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false });
     await refreshWaChats({ refreshMessages: false, markRead: false });
   } finally {
     el("btnWaSend").disabled = false;
@@ -1508,7 +1521,13 @@ async function loadInitialDataAfterLogin() {
   el("waChatSearchInput").value = "";
 
   await reloadTemplateData();
-  await refreshWaChats({ refreshMessages: true, markRead: true });
+  await refreshWaChats({
+    refreshMessages: true,
+    markRead: true,
+    ensureHistory: true,
+    forceHistory: true,
+    includePhotos: true
+  });
   await loadAppointments();
   renderMarketingRecipients();
   renderActivity();
@@ -1582,7 +1601,12 @@ function bindEvents() {
       setActiveTab(btn.dataset.tab);
       if (btn.dataset.tab === "whatsapp") {
         try {
-          await refreshWaChats({ refreshMessages: true, markRead: true });
+          await refreshWaChats({
+            refreshMessages: true,
+            markRead: true,
+            ensureHistory: true,
+            includePhotos: true
+          });
         } catch (e) {
           toast("WhatsApp", String(e?.message || e));
         }
@@ -1592,7 +1616,13 @@ function bindEvents() {
 
   el("btnWaRefreshChats").addEventListener("click", async () => {
     try {
-      await refreshWaChats({ refreshMessages: true, markRead: true });
+      await refreshWaChats({
+        refreshMessages: true,
+        markRead: true,
+        ensureHistory: true,
+        forceHistory: true,
+        includePhotos: true
+      });
     } catch (e) {
       toast("WhatsApp", String(e?.message || e));
     }
@@ -1942,7 +1972,12 @@ function bindEvents() {
       await refreshProfiles();
       const status = await window.api.waGetConnectionState();
       setConnectionBadge(!!status?.connected, status?.text || "Not connected");
-      await refreshWaChats({ refreshMessages: true, markRead: true });
+      await refreshWaChats({
+        refreshMessages: true,
+        markRead: true,
+        ensureHistory: true,
+        includePhotos: true
+      });
     } catch (e) {
       toast("Profile", String(e?.message || e));
     }
