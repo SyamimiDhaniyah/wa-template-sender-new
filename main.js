@@ -716,7 +716,21 @@ function nowIsoShort() {
 }
 
 function normalizeJidForContact(jid) {
-  return String(jid || "").split(":")[0].trim();
+  const raw = String(jid || "").trim();
+  if (!raw) return "";
+
+  const atIndex = raw.indexOf("@");
+  if (atIndex < 0) return raw;
+
+  const userPart = raw.slice(0, atIndex);
+  const serverPart = raw.slice(atIndex + 1);
+  if (!serverPart) return raw;
+
+  // Baileys can emit device-qualified JIDs like user:device@server.
+  // Keep the server part, strip only the device segment.
+  const normalizedUser = userPart.split(":")[0];
+  if (!normalizedUser) return raw;
+  return `${normalizedUser}@${serverPart}`;
 }
 
 function msisdnFromUserJid(jid) {
@@ -1422,6 +1436,10 @@ function isIgnoredChatJid(jid) {
 
 function normalizeChatJid(input) {
   const jid = normalizeJidForContact(input);
+  if (!jid) return "";
+  if (!jid.includes("@") && /^\d{6,}$/.test(jid)) {
+    return `${jid}@s.whatsapp.net`;
+  }
   return isIgnoredChatJid(jid) ? "" : jid;
 }
 
