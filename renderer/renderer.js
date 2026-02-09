@@ -36,7 +36,9 @@ const state = {
   waExplicitOpenChatJid: "",
   waMessages: [],
   waChatSearch: "",
-  waPendingAttachment: null,
+  waPendingAttachments: [],
+  waComposerSending: false,
+  waDropDepth: 0,
   waSyncTimer: null,
   waLoadingChats: false,
   waLoadingMessages: false,
@@ -291,27 +293,158 @@ function canMarkReadForChat(chatJid) {
   return jid === String(state.waActiveChatJid || "") && jid === String(state.waExplicitOpenChatJid || "");
 }
 
+function waAttachmentKindFromMimeOrPath(mimeType, filePath) {
+  const mime = String(mimeType || "")
+    .trim()
+    .toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+
+  const ext = String(filePath || "")
+    .trim()
+    .toLowerCase()
+    .match(/\.([a-z0-9]+)$/);
+  const value = ext ? `.${ext[1]}` : "";
+  if ([".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"].includes(value)) return "image";
+  if ([".mp4", ".mov", ".avi", ".mkv"].includes(value)) return "video";
+  if ([".mp3", ".ogg", ".wav", ".m4a"].includes(value)) return "audio";
+  return "document";
+}
+
+function normalizeWaAttachment(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const filePath = String(src.path || src.filePath || "").trim();
+  if (!filePath) return null;
+
+  const fileNameRaw = String(src.fileName || src.name || "").trim();
+  const fileName =
+    fileNameRaw ||
+    String(filePath)
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .pop() ||
+    "Attachment";
+  const mimeType = String(src.mimeType || src.type || "").trim();
+  const size = Math.max(0, Number(src.size || 0) || 0);
+  const kind = waAttachmentKindFromMimeOrPath(mimeType, filePath);
+
+  return {
+    path: filePath,
+    fileName,
+    mimeType,
+    kind,
+    size
+  };
+}
+
+function normalizeWaAttachmentList(list) {
+  const rows = Array.isArray(list) ? list : [];
+  const out = [];
+  const seen = new Set();
+  for (const item of rows) {
+    const normalized = normalizeWaAttachment(item);
+    if (!normalized) continue;
+    const key = normalized.path.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function waDroppedFilesToAttachments(fileList) {
+  const files = Array.from(fileList || []);
+  return normalizeWaAttachmentList(
+    files.map((file) => ({
+      path: file?.path || "",
+      fileName: file?.name || "",
+      mimeType: file?.type || "",
+      size: Number(file?.size || 0) || 0
+    }))
+  );
+}
+
+function waAttachmentSupportsCaption(attachment) {
+  const kind = String(attachment?.kind || "").toLowerCase();
+  return kind !== "audio";
+}
+
+function removeWaPendingAttachmentAt(indexToRemove) {
+  const next = (state.waPendingAttachments || []).filter((_item, idx) => idx !== indexToRemove);
+  setWaPendingAttachments(next);
+}
+
 function renderWaAttachmentRow() {
   const row = el("waAttachmentRow");
   const label = el("waAttachmentMeta");
-  const att = state.waPendingAttachment;
-  if (!att) {
+  const listWrap = el("waAttachmentList");
+  const clearBtn = el("btnWaClearAttachment");
+  if (!row || !label || !listWrap) return;
+
+  const list = Array.isArray(state.waPendingAttachments) ? state.waPendingAttachments : [];
+  if (list.length === 0) {
     row.classList.add("hidden");
     label.textContent = "Attachment";
+    listWrap.innerHTML = "";
+    if (clearBtn) clearBtn.disabled = state.waComposerSending;
     return;
   }
 
-  const bits = [];
-  bits.push(att.fileName || "Attachment");
-  if (att.kind) bits.push(att.kind);
-  const sizeText = formatWaBytes(att.size);
-  if (sizeText) bits.push(sizeText);
-  label.textContent = bits.join(" | ");
+  const totalSize = list.reduce((sum, item) => sum + Math.max(0, Number(item?.size || 0) || 0), 0);
+  const sizeText = formatWaBytes(totalSize);
+  label.textContent = sizeText ? `${list.length} file${list.length > 1 ? "s" : ""} | ${sizeText}` : `${list.length} file${
+    list.length > 1 ? "s" : ""
+  }`;
+
+  listWrap.innerHTML = "";
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    const chip = document.createElement("div");
+    chip.className = "waAttachmentChip";
+
+    const name = document.createElement("span");
+    name.className = "waAttachmentChipName";
+    const readableName = String(item.fileName || "Attachment").trim() || "Attachment";
+    const chipSizeText = formatWaBytes(item.size);
+    name.textContent = chipSizeText ? `${readableName} (${chipSizeText})` : readableName;
+    name.title = readableName;
+
+    const removeBtn = document.createElement("button");
+    removeBtn.type = "button";
+    removeBtn.className = "waAttachmentChipRemove";
+    removeBtn.textContent = "x";
+    removeBtn.title = `Remove ${readableName}`;
+    removeBtn.disabled = state.waComposerSending;
+    removeBtn.addEventListener("click", () => removeWaPendingAttachmentAt(i));
+
+    chip.append(name, removeBtn);
+    listWrap.appendChild(chip);
+  }
+
+  if (clearBtn) clearBtn.disabled = state.waComposerSending;
   row.classList.remove("hidden");
 }
 
-function setWaPendingAttachment(attachment) {
-  state.waPendingAttachment = attachment || null;
+function setWaPendingAttachments(attachments) {
+  state.waPendingAttachments = normalizeWaAttachmentList(attachments);
+  renderWaAttachmentRow();
+}
+
+function appendWaPendingAttachments(attachments) {
+  const merged = [...(state.waPendingAttachments || []), ...(Array.isArray(attachments) ? attachments : [])];
+  setWaPendingAttachments(merged);
+}
+
+function setWaComposerSending(sending) {
+  state.waComposerSending = !!sending;
+  const busy = state.waComposerSending;
+  const sendBtn = el("btnWaSend");
+  const attachBtn = el("btnWaAttach");
+  const input = el("waComposerInput");
+  if (sendBtn) sendBtn.disabled = busy;
+  if (attachBtn) attachBtn.disabled = busy;
+  if (input) input.disabled = busy;
   renderWaAttachmentRow();
 }
 
@@ -723,32 +856,109 @@ async function pickWaAttachment() {
   const res = await window.api.waPickAttachment();
   if (!res?.ok && res?.canceled) return;
   if (!res?.ok) throw new Error("Attachment selection failed");
-  setWaPendingAttachment(res.attachment || null);
+  const next = Array.isArray(res?.attachments)
+    ? res.attachments
+    : res?.attachment
+      ? [res.attachment]
+      : [];
+  appendWaPendingAttachments(next);
 }
 
 async function sendWaComposerMessage() {
   if (!state.waActiveChatJid) throw new Error("Please select a chat");
+  if (state.waComposerSending) return;
 
-  const text = String(el("waComposerInput").value || "");
-  const payload = {
-    chatJid: state.waActiveChatJid,
-    text,
-    attachment: state.waPendingAttachment || null
-  };
-  const hasText = text.trim().length > 0;
-  const hasAttachment = !!state.waPendingAttachment;
+  const textRaw = String(el("waComposerInput").value || "");
+  const trimmedText = textRaw.trim();
+  const queued = normalizeWaAttachmentList(state.waPendingAttachments);
+  const hasText = trimmedText.length > 0;
+  const hasAttachment = queued.length > 0;
   if (!hasText && !hasAttachment) return;
 
-  el("btnWaSend").disabled = true;
+  const activeChatJid = state.waActiveChatJid;
+  setWaComposerSending(true);
   try {
-    await window.api.waSendChatMessage(payload);
+    if (queued.length === 0) {
+      await window.api.waSendChatMessage({
+        chatJid: activeChatJid,
+        text: trimmedText,
+        attachment: null
+      });
+    } else {
+      let textSent = !trimmedText;
+
+      if (!textSent && !waAttachmentSupportsCaption(queued[0])) {
+        await window.api.waSendChatMessage({
+          chatJid: activeChatJid,
+          text: trimmedText,
+          attachment: null
+        });
+        textSent = true;
+      }
+
+      for (let i = 0; i < queued.length; i++) {
+        const attachment = queued[i];
+        const withText = !textSent && waAttachmentSupportsCaption(attachment) ? trimmedText : "";
+        await window.api.waSendChatMessage({
+          chatJid: activeChatJid,
+          text: withText,
+          attachment
+        });
+        if (withText) textSent = true;
+      }
+
+      if (!textSent && trimmedText) {
+        await window.api.waSendChatMessage({
+          chatJid: activeChatJid,
+          text: trimmedText,
+          attachment: null
+        });
+      }
+    }
+
     el("waComposerInput").value = "";
-    setWaPendingAttachment(null);
+    setWaPendingAttachments([]);
     await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false });
     await refreshWaChats({ refreshMessages: false, markRead: false });
   } finally {
-    el("btnWaSend").disabled = false;
+    setWaComposerSending(false);
   }
+}
+
+function isWaFileDragEvent(evt) {
+  const types = evt?.dataTransfer?.types;
+  if (!types) return false;
+  try {
+    return Array.from(types).includes("Files");
+  } catch {
+    return false;
+  }
+}
+
+function setWaDropActive(active) {
+  const panel = document.querySelector(".waConversation");
+  if (!panel) return;
+  panel.classList.toggle("waDropActive", !!active);
+}
+
+async function handleWaFileDrop(fileList) {
+  if (!state.waActiveChatJid) {
+    toast("WhatsApp", "Please select a chat before dropping files");
+    return;
+  }
+  if (state.waComposerSending) {
+    toast("WhatsApp", "Upload in progress. Please wait.");
+    return;
+  }
+
+  const attachments = waDroppedFilesToAttachments(fileList);
+  if (attachments.length === 0) {
+    toast("WhatsApp", "No valid files were dropped");
+    return;
+  }
+
+  appendWaPendingAttachments(attachments);
+  toast("WhatsApp", `Attached ${attachments.length} file${attachments.length > 1 ? "s" : ""}. Press Send when ready.`);
 }
 function renderActivity() {
   const tbody = el("activityBody");
@@ -1622,7 +1832,10 @@ async function loadInitialDataAfterLogin() {
   state.waRefreshQueued = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
-  setWaPendingAttachment(null);
+  state.waDropDepth = 0;
+  setWaDropActive(false);
+  setWaComposerSending(false);
+  setWaPendingAttachments([]);
   el("waChatSearchInput").value = "";
 
   await reloadTemplateData();
@@ -1653,7 +1866,10 @@ function showLoginScreen() {
   state.waRefreshQueued = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
-  setWaPendingAttachment(null);
+  state.waDropDepth = 0;
+  setWaDropActive(false);
+  setWaComposerSending(false);
+  setWaPendingAttachments([]);
   el("waChatSearchInput").value = "";
   el("waComposerInput").value = "";
   if (state.waSyncTimer) {
@@ -1749,7 +1965,7 @@ function bindEvents() {
   });
 
   el("btnWaClearAttachment").addEventListener("click", () => {
-    setWaPendingAttachment(null);
+    setWaPendingAttachments([]);
   });
 
   el("btnWaSend").addEventListener("click", async () => {
@@ -1768,6 +1984,62 @@ function bindEvents() {
     } catch (e) {
       toast("WhatsApp", String(e?.message || e));
     }
+  });
+
+  const waConversation = document.querySelector(".waConversation");
+  if (waConversation) {
+    waConversation.addEventListener("dragenter", (evt) => {
+      if (!isWaFileDragEvent(evt)) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      state.waDropDepth += 1;
+      setWaDropActive(true);
+    });
+
+    waConversation.addEventListener("dragover", (evt) => {
+      if (!isWaFileDragEvent(evt)) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      evt.dataTransfer.dropEffect = state.waActiveChatJid ? "copy" : "none";
+      setWaDropActive(true);
+    });
+
+    waConversation.addEventListener("dragleave", (evt) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      state.waDropDepth = Math.max(0, state.waDropDepth - 1);
+      if (state.waDropDepth === 0) setWaDropActive(false);
+    });
+
+    waConversation.addEventListener("drop", async (evt) => {
+      if (!isWaFileDragEvent(evt)) return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      state.waDropDepth = 0;
+      setWaDropActive(false);
+      try {
+        await handleWaFileDrop(evt.dataTransfer?.files);
+      } catch (e) {
+        toast("WhatsApp", String(e?.message || e));
+      }
+    });
+  }
+
+  document.addEventListener("dragover", (evt) => {
+    if (!isWaFileDragEvent(evt)) return;
+    evt.preventDefault();
+  });
+
+  document.addEventListener("drop", (evt) => {
+    if (!isWaFileDragEvent(evt)) return;
+    evt.preventDefault();
+    state.waDropDepth = 0;
+    setWaDropActive(false);
+  });
+
+  document.addEventListener("dragend", () => {
+    state.waDropDepth = 0;
+    setWaDropActive(false);
   });
 
   el("loginForm").addEventListener("submit", async (evt) => {

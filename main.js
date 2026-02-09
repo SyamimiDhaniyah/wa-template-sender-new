@@ -2902,6 +2902,8 @@ async function sendChatMessage(payload) {
   if (attachment) {
     const filePath = cleanString(attachment.path || "");
     if (!filePath || !fs.existsSync(filePath)) throw new Error("Attachment file not found");
+    const fileStat = fs.statSync(filePath);
+    if (!fileStat || !fileStat.isFile()) throw new Error("Attachment must be a file");
     const fileName = cleanString(attachment.fileName || path.basename(filePath));
     const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(filePath));
     const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
@@ -3955,7 +3957,7 @@ ipcMain.handle("wa:sendChatMessage", async (_evt, payload) => {
 ipcMain.handle("wa:pickAttachment", async () => {
   const openRes = await dialog.showOpenDialog({
     title: "Select attachment",
-    properties: ["openFile"],
+    properties: ["openFile", "multiSelections"],
     filters: [
       { name: "Images", extensions: ["jpg", "jpeg", "png", "gif", "webp", "bmp"] },
       { name: "Videos", extensions: ["mp4", "mov", "avi", "mkv"] },
@@ -3967,20 +3969,30 @@ ipcMain.handle("wa:pickAttachment", async () => {
     return { ok: false, canceled: true };
   }
 
-  const filePath = openRes.filePaths[0];
-  const stat = fs.statSync(filePath);
-  const fileName = path.basename(filePath);
-  const mimeType = getMimeTypeForPath(filePath);
-  const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
-  return {
-    ok: true,
-    attachment: {
+  const attachments = [];
+  for (const filePathRaw of openRes.filePaths) {
+    const filePath = cleanString(filePathRaw);
+    if (!filePath) continue;
+    if (!fs.existsSync(filePath)) continue;
+    const stat = fs.statSync(filePath);
+    if (!stat || !stat.isFile()) continue;
+    const fileName = path.basename(filePath);
+    const mimeType = getMimeTypeForPath(filePath);
+    const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
+    attachments.push({
       path: filePath,
       fileName,
       mimeType,
       kind,
       size: Number(stat.size || 0) || 0
-    }
+    });
+  }
+  if (attachments.length === 0) return { ok: false, canceled: true };
+
+  return {
+    ok: true,
+    attachment: attachments[0],
+    attachments
   };
 });
 

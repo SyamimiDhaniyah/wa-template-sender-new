@@ -819,6 +819,7 @@ p {
 }
 
 .waConversation {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -828,6 +829,26 @@ p {
     radial-gradient(circle at 20% 20%, rgba(177, 234, 219, 0.27), transparent 48%),
     radial-gradient(circle at 80% 80%, rgba(191, 224, 255, 0.25), transparent 46%),
     #e9f4f0;
+}
+
+.waConversation.waDropActive {
+  box-shadow: inset 0 0 0 3px rgba(17, 157, 131, 0.45);
+}
+
+.waConversation.waDropActive::after {
+  content: "Drop files to upload now";
+  position: absolute;
+  inset: 54px 12px 84px;
+  border: 2px dashed rgba(17, 157, 131, 0.8);
+  background: rgba(240, 255, 251, 0.76);
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1f6660;
+  pointer-events: none;
+  z-index: 3;
 }
 
 .waConversationHead {
@@ -962,6 +983,11 @@ p {
   background: #eef9f6;
   border-radius: 10px;
   padding: 7px 9px;
+  display: grid;
+  gap: 7px;
+}
+
+.waAttachmentHead {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -971,10 +997,58 @@ p {
 .waAttachmentMeta {
   font-size: 12px;
   color: #2a5855;
+  font-weight: 700;
+  min-width: 0;
+}
+
+.waAttachmentList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.waAttachmentChip {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid #b8d9d2;
+  background: #f6fffd;
+  border-radius: 999px;
+  padding: 3px 4px 3px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.waAttachmentChipName {
+  font-size: 12px;
+  color: #2a5855;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.waAttachmentChipRemove {
+  width: 20px;
+  height: 20px;
+  border: 1px solid #b5d2cd;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #215553;
+  font-size: 12px;
+  line-height: 1;
+  font-weight: 700;
+  padding: 0;
+  cursor: pointer;
+}
+
+.waAttachmentChipRemove:hover {
+  background: #e4f4f0;
+}
+
+.waAttachmentChipRemove:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .waComposerRow {
