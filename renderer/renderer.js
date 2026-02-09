@@ -43,6 +43,7 @@ const state = {
   waRefreshQueued: false,
   waChatsReqSeq: 0,
   waMessagesReqSeq: 0,
+  waHistoryWarmAtByChat: {},
   profiles: [],
   activeProfileId: null,
   activityRows: [],
@@ -493,6 +494,7 @@ function renderWaMessages(options = {}) {
 
     const bubble = document.createElement("div");
     bubble.className = "waBubble";
+    let hasVisibleContent = false;
 
     if (!msg.fromMe && msg.senderName) {
       const sender = document.createElement("div");
@@ -541,6 +543,7 @@ function renderWaMessages(options = {}) {
       });
       mediaMeta.appendChild(dlBtn);
       bubble.appendChild(mediaMeta);
+      hasVisibleContent = true;
     }
 
     if (msg.text) {
@@ -548,6 +551,20 @@ function renderWaMessages(options = {}) {
       text.className = "waMessageText";
       text.textContent = msg.text;
       bubble.appendChild(text);
+      hasVisibleContent = true;
+    } else {
+      const previewText = String(msg.preview || "").trim();
+      if (previewText) {
+        const preview = document.createElement("div");
+        preview.className = "waMessageText";
+        preview.textContent = previewText;
+        bubble.appendChild(preview);
+        hasVisibleContent = true;
+      }
+    }
+
+    if (!hasVisibleContent) {
+      continue;
     }
 
     const ts = document.createElement("div");
@@ -623,6 +640,30 @@ async function refreshWaMessages(options = {}) {
   }
 }
 
+function maybeWarmHistoryForOpenedChat(chatJid, options = {}) {
+  const jid = String(chatJid || "");
+  if (!jid) return;
+  const opts = options && typeof options === "object" ? options : {};
+  const force = opts.force === true;
+  const now = Date.now();
+  const cooldownMs = Number.isFinite(Number(opts.cooldownMs)) ? Math.max(0, Number(opts.cooldownMs)) : 4 * 60 * 1000;
+  const lastTs = Number(state.waHistoryWarmAtByChat[jid] || 0);
+  if (!force && now - lastTs < cooldownMs) return;
+
+  state.waHistoryWarmAtByChat[jid] = now;
+  window.api
+    .waWarmChatHistory({
+      chatJid: jid,
+      days: Number.isFinite(Number(opts.days)) ? Number(opts.days) : 120,
+      maxFetch: Number.isFinite(Number(opts.maxFetch)) ? Number(opts.maxFetch) : 12
+    })
+    .then(() => {
+      if (state.waActiveChatJid !== jid) return;
+      refreshWaMessages({ markRead: false, showLoading: false }).catch(() => {});
+    })
+    .catch(() => {});
+}
+
 async function openWaChat(chatJid) {
   const next = String(chatJid || "");
   if (!next) return;
@@ -631,6 +672,7 @@ async function openWaChat(chatJid) {
   renderWaChatList();
   renderWaConversationHead();
   await refreshWaMessages({ markRead: true, forceBottom: true, showLoading: true });
+  maybeWarmHistoryForOpenedChat(next, { force: false });
 }
 
 async function refreshWaChats(options = {}) {
@@ -647,8 +689,6 @@ async function refreshWaChats(options = {}) {
       search: state.waChatSearch || "",
       limit: 220,
       includePhotos: opts.includePhotos !== false,
-      ensureHistory: opts.ensureHistory === true,
-      forceHistory: opts.forceHistory === true,
       maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 35,
       minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
         ? Number(opts.minMinutesBetweenPhotoChecks)
@@ -1606,6 +1646,7 @@ async function loadInitialDataAfterLogin() {
   state.waRefreshQueued = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
+  state.waHistoryWarmAtByChat = {};
   setWaPendingAttachment(null);
   el("waChatSearchInput").value = "";
 
@@ -1613,8 +1654,6 @@ async function loadInitialDataAfterLogin() {
   await refreshWaChats({
     refreshMessages: true,
     markRead: true,
-    ensureHistory: true,
-    forceHistory: true,
     includePhotos: true
   });
   await loadAppointments();
@@ -1637,6 +1676,7 @@ function showLoginScreen() {
   state.waRefreshQueued = false;
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
+  state.waHistoryWarmAtByChat = {};
   setWaPendingAttachment(null);
   el("waChatSearchInput").value = "";
   el("waComposerInput").value = "";
@@ -1695,7 +1735,6 @@ function bindEvents() {
           await refreshWaChats({
             refreshMessages: true,
             markRead: true,
-            ensureHistory: true,
             includePhotos: true
           });
         } catch (e) {
@@ -1710,8 +1749,6 @@ function bindEvents() {
       await refreshWaChats({
         refreshMessages: true,
         markRead: true,
-        ensureHistory: true,
-        forceHistory: true,
         includePhotos: true
       });
     } catch (e) {
@@ -2062,6 +2099,7 @@ function bindEvents() {
       state.waActiveChatJid = "";
       state.waExplicitOpenChatJid = "";
       state.waMessages = [];
+      state.waHistoryWarmAtByChat = {};
       await window.api.setActiveProfile(id);
       await refreshProfiles();
       const status = await window.api.waGetConnectionState();
@@ -2069,7 +2107,6 @@ function bindEvents() {
       await refreshWaChats({
         refreshMessages: true,
         markRead: true,
-        ensureHistory: true,
         includePhotos: true
       });
     } catch (e) {
