@@ -1294,6 +1294,36 @@ function msisdnFromContactAddress(value) {
   return "";
 }
 
+function findContactByJidForProfile(profileId, jidOrAddress) {
+  if (!profileId) return null;
+  const target = normalizeJidForContact(jidOrAddress);
+  if (!target) return null;
+
+  const byPhone =
+    waContactsByProfileMem &&
+    waContactsByProfileMem[profileId] &&
+    typeof waContactsByProfileMem[profileId] === "object"
+      ? waContactsByProfileMem[profileId]
+      : {};
+
+  const msisdn = msisdnFromContactAddress(target);
+  if (msisdn && byPhone[msisdn] && typeof byPhone[msisdn] === "object") {
+    return byPhone[msisdn];
+  }
+
+  const targetLower = String(target).toLowerCase();
+  for (const contactRaw of Object.values(byPhone)) {
+    const contact = contactRaw && typeof contactRaw === "object" ? contactRaw : null;
+    if (!contact) continue;
+    const jid = normalizeJidForContact(contact.jid || "");
+    if (jid && String(jid).toLowerCase() === targetLower) return contact;
+    const lid = normalizeJidForContact(contact.lid || "");
+    if (lid && String(lid).toLowerCase() === targetLower) return contact;
+  }
+
+  return null;
+}
+
 function upsertContactsForProfile(profileId, contacts) {
   if (!profileId || !Array.isArray(contacts) || contacts.length === 0) return 0;
 
@@ -1302,10 +1332,14 @@ function upsertContactsForProfile(profileId, contacts) {
   let changed = 0;
 
   for (const c of contacts) {
-    const jidSource = c?.jid || c?.id || c?.pnJid || "";
-    const jid = normalizeJidForContact(jidSource);
-    const msisdn = msisdnFromContactAddress(jidSource);
+    const primaryJidSource = c?.pnJid || c?.jid || c?.id || "";
+    const secondaryJidSource = c?.jid || c?.id || "";
+    const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
+
+    const secondaryJid = normalizeJidForContact(secondaryJidSource);
+    const secondaryLid = secondaryJid.endsWith("@lid") ? secondaryJid : "";
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
     const nameCandidate = firstNonEmptyString([
@@ -1319,7 +1353,7 @@ function upsertContactsForProfile(profileId, contacts) {
     ]);
     const notify = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname, existing?.notify]);
     const verifiedName = firstNonEmptyString([c?.verifiedName, c?.vname, existing?.verifiedName]);
-    const lid = firstNonEmptyString([c?.lid, c?.lidJid, existing?.lid]);
+    const lid = firstNonEmptyString([c?.lid, c?.lidJid, secondaryLid, existing?.lid]);
     const imgUrl =
       c?.imgUrl === null || c?.imgUrl === undefined
         ? existing?.imgUrl ?? null
@@ -1370,17 +1404,19 @@ function upsertChatsAsContactsForProfile(profileId, chats) {
 
   const contacts = [];
   for (const chat of chats) {
-    const jidSource = chat?.id || chat?.jid || "";
-    const jid = normalizeJidForContact(jidSource);
-    const msisdn = msisdnFromContactAddress(jidSource);
+    const primaryJidSource = chat?.pnJid || chat?.id || chat?.jid || "";
+    const secondaryJidSource = chat?.id || chat?.jid || "";
+    const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
 
+    const secondaryJid = normalizeJidForContact(secondaryJidSource);
     const name = firstNonEmptyString([chat?.name, chat?.notify, chat?.pushName]);
     const notify = firstNonEmptyString([chat?.notify, chat?.pushName, name]);
     contacts.push({
       id: jid || `${msisdn}@s.whatsapp.net`,
       jid: jid || `${msisdn}@s.whatsapp.net`,
-      lid: firstNonEmptyString([chat?.lid, chat?.lidJid]),
+      lid: firstNonEmptyString([chat?.lid, chat?.lidJid, secondaryJid.endsWith("@lid") ? secondaryJid : ""]),
       name,
       notify,
       verifiedName: sanitizeContactName(chat?.verifiedName)
@@ -1396,11 +1432,13 @@ function upsertMessagesAsContactsForProfile(profileId, messages) {
   const contacts = [];
   for (const msg of messages) {
     const key = msg?.key && typeof msg.key === "object" ? msg.key : {};
-    const jidSource = key.participant || key.remoteJid || "";
-    const jid = normalizeJidForContact(jidSource);
-    const msisdn = msisdnFromContactAddress(jidSource);
+    const primaryJidSource = key.participantPn || key.remoteJidPn || key.participant || key.remoteJid || "";
+    const secondaryJidSource = key.participant || key.remoteJid || "";
+    const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
 
+    const secondaryJid = normalizeJidForContact(secondaryJidSource);
     const notify = firstNonEmptyString([msg?.pushName, msg?.notifyName, msg?.notify, msg?.participantName]);
     const verifiedName = firstNonEmptyString([msg?.verifiedBizName, msg?.verifiedName]);
     if (!notify && !verifiedName) continue;
@@ -1408,6 +1446,7 @@ function upsertMessagesAsContactsForProfile(profileId, messages) {
     contacts.push({
       id: jid || `${msisdn}@s.whatsapp.net`,
       jid: jid || `${msisdn}@s.whatsapp.net`,
+      lid: secondaryJid.endsWith("@lid") ? secondaryJid : "",
       notify,
       verifiedName
     });
@@ -1661,7 +1700,6 @@ function isIgnoredChatJid(jid) {
   if (!chatJid.includes("@")) return true;
   if (chatJid === "status@broadcast") return true;
   if (chatJid.endsWith("@broadcast")) return true;
-  if (chatJid.endsWith("@lid")) return true;
   return false;
 }
 
@@ -1672,6 +1710,19 @@ function normalizeChatJid(input) {
     return `${jid}@s.whatsapp.net`;
   }
   return isIgnoredChatJid(jid) ? "" : jid;
+}
+
+function canonicalizeChatJidForProfile(profileId, chatJid) {
+  const normalized = normalizeChatJid(chatJid);
+  if (!normalized) return "";
+  if (!profileId) return normalized;
+  if (normalized.endsWith("@s.whatsapp.net")) return normalized;
+  if (!normalized.endsWith("@lid")) return normalized;
+
+  const contact = findContactByJidForProfile(profileId, normalized);
+  const preferred = normalizeJidForContact(contact?.jid || "");
+  if (preferred && preferred.endsWith("@s.whatsapp.net")) return preferred;
+  return normalized;
 }
 
 function normalizeSendTargetJid(input) {
@@ -1953,15 +2004,7 @@ function messageKeyHash(key) {
 }
 
 function getContactByChatJid(profileId, chatJid) {
-  const msisdn = msisdnFromContactAddress(chatJid);
-  if (!msisdn) return null;
-  const byPhone =
-    waContactsByProfileMem &&
-    waContactsByProfileMem[profileId] &&
-    typeof waContactsByProfileMem[profileId] === "object"
-      ? waContactsByProfileMem[profileId]
-      : {};
-  return byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : null;
+  return findContactByJidForProfile(profileId, chatJid);
 }
 
 function ensureContactsFromChatsForProfile(profileId) {
@@ -2011,18 +2054,11 @@ function resolveMessageSenderName(profileId, chatJid, messageRecord) {
 
   const participant = normalizeJidForContact(messageRecord?.key?.participant || "");
   const fromJid = participant || normalizeJidForContact(chatJid);
-  const fromContactMsisdn = msisdnFromContactAddress(fromJid);
-  if (fromContactMsisdn) {
-    const byPhone =
-      waContactsByProfileMem &&
-      waContactsByProfileMem[profileId] &&
-      typeof waContactsByProfileMem[profileId] === "object"
-        ? waContactsByProfileMem[profileId]
-        : {};
-    const contact = byPhone[fromContactMsisdn];
+  const contact = findContactByJidForProfile(profileId, fromJid);
+  if (contact) {
     const name = getContactDisplayName(contact);
     if (name) return name;
-    return fromContactMsisdn;
+    if (contact.msisdn) return String(contact.msisdn);
   }
 
   return messageRecord.pushName || "";
@@ -2030,7 +2066,7 @@ function resolveMessageSenderName(profileId, chatJid, messageRecord) {
 
 function ensureChatSummary(profileId, chatJid) {
   const state = ensureWaChatStateForProfile(profileId);
-  const jid = normalizeChatJid(chatJid);
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) return null;
   if (!state.chatsByJid[jid] || typeof state.chatsByJid[jid] !== "object") {
     state.chatsByJid[jid] = {
@@ -2056,7 +2092,7 @@ function upsertChatsForProfile(profileId, chats) {
 
   for (const raw of chats) {
     const src = raw && typeof raw === "object" ? raw : {};
-    const chatJid = normalizeChatJid(src.id || src.jid || "");
+    const chatJid = canonicalizeChatJidForProfile(profileId, src.id || src.jid || "");
     if (!chatJid) continue;
 
     const chat = ensureChatSummary(profileId, chatJid);
@@ -2107,10 +2143,11 @@ function upsertChatsForProfile(profileId, chats) {
   return changed;
 }
 
-function normalizeMessageRecord(rawMessage) {
+function normalizeMessageRecord(profileId, rawMessage) {
   const msg = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
   const key = normalizeMessageKey(msg.key, msg?.key?.remoteJid || msg?.remoteJid || "");
-  const chatJid = key.remoteJid || normalizeChatJid(msg?.chatId || msg?.jid || "");
+  const rawChatJid = key.remoteJid || normalizeChatJid(msg?.chatId || msg?.jid || "");
+  const chatJid = canonicalizeChatJidForProfile(profileId, rawChatJid);
   if (!chatJid) return null;
   if (!key.id) return null;
 
@@ -2151,7 +2188,7 @@ function upsertMessagesForProfile(profileId, messages) {
   let changed = 0;
 
   for (const item of messages) {
-    const normalized = normalizeMessageRecord(item);
+    const normalized = normalizeMessageRecord(profileId, item);
     if (!normalized) continue;
 
     const chat = ensureChatSummary(profileId, normalized.chatJid);
@@ -2236,7 +2273,8 @@ function applyMessageUpdatesForProfile(profileId, updates) {
     const src = patch && typeof patch === "object" ? patch : {};
     const key = normalizeMessageKey(src.key, src?.key?.remoteJid || "");
     if (!key.remoteJid || !key.id) continue;
-    const chatJid = key.remoteJid;
+    const chatJid = canonicalizeChatJidForProfile(profileId, key.remoteJid);
+    if (!chatJid) continue;
     const list = state.messagesByChat[chatJid];
     if (!Array.isArray(list) || list.length === 0) continue;
 
@@ -2254,7 +2292,7 @@ function applyMessageUpdatesForProfile(profileId, updates) {
       mergedRaw.message = updateObj.message;
     }
 
-    const normalized = normalizeMessageRecord({
+    const normalized = normalizeMessageRecord(profileId, {
       ...prev.rawMessage,
       key: prev.key,
       ...updateObj,
@@ -2302,7 +2340,7 @@ function applyMessageUpdatesForProfile(profileId, updates) {
 
 function serializeChatSummary(profileId, chat) {
   const c = chat && typeof chat === "object" ? chat : {};
-  const jid = normalizeChatJid(c.jid || "");
+  const jid = canonicalizeChatJidForProfile(profileId, c.jid || "");
   if (!jid) return null;
   const contact = getContactByChatJid(profileId, jid);
   const title = resolveChatTitle(profileId, c);
@@ -2390,7 +2428,7 @@ function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
 }
 
 function getChatMessagesForProfile(profileId, chatJid, options) {
-  const jid = normalizeChatJid(chatJid);
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) return [];
   const opts = options && typeof options === "object" ? options : {};
   const limitRaw = Number(opts.limit);
@@ -2523,7 +2561,7 @@ async function warmRecentHistoryForProfile(profileId, options) {
 }
 
 async function resetChatHistoryForProfile(profileId, chatJid, options) {
-  const jid = normalizeChatJid(chatJid);
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) throw new Error("Invalid chat");
   const opts = options && typeof options === "object" ? options : {};
 
@@ -2624,9 +2662,10 @@ async function resetChatHistoryForProfile(profileId, chatJid, options) {
 }
 
 function findMessageRecordForProfile(profileId, chatJid, key) {
-  const jid = normalizeChatJid(chatJid);
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) return null;
   const normalizedKey = normalizeMessageKey(key, jid);
+  normalizedKey.remoteJid = canonicalizeChatJidForProfile(profileId, normalizedKey.remoteJid || jid) || jid;
   if (!normalizedKey.id) return null;
   const state = ensureWaChatStateForProfile(profileId);
   const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
@@ -2635,7 +2674,7 @@ function findMessageRecordForProfile(profileId, chatJid, key) {
 }
 
 async function markChatReadForProfile(profileId, chatJid) {
-  const jid = normalizeChatJid(chatJid);
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) throw new Error("Invalid chat JID");
   const state = ensureWaChatStateForProfile(profileId);
   const chat = ensureChatSummary(profileId, jid);
