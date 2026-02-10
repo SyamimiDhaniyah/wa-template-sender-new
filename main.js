@@ -2522,6 +2522,107 @@ async function warmRecentHistoryForProfile(profileId, options) {
   return await task;
 }
 
+async function resetChatHistoryForProfile(profileId, chatJid, options) {
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) throw new Error("Invalid chat");
+  const opts = options && typeof options === "object" ? options : {};
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const previousList = Array.isArray(state.messagesByChat[jid]) ? [...state.messagesByChat[jid]] : [];
+  previousList.sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0));
+  const fallbackNewest = previousList.length > 0 ? previousList[previousList.length - 1] : null;
+  const clearedCount = previousList.length;
+
+  delete state.messagesByChat[jid];
+  const chat = ensureChatSummary(profileId, jid);
+  if (chat) {
+    state.chatsByJid[jid] = {
+      ...chat,
+      updatedAt: nowIsoShort()
+    };
+  }
+  schedulePersistWaChatCache();
+  scheduleWaChatSync(profileId, "chat_reset");
+
+  let resyncTriggered = false;
+  let fetchRequests = 0;
+
+  if (isConnected && sock && typeof sock.resyncAppState === "function") {
+    try {
+      await sock.resyncAppState(["regular_high", "regular_low", "regular"], false);
+      resyncTriggered = true;
+      await new Promise((r) => setTimeout(r, 180));
+    } catch (e) {
+      log.debug({ err: e, profileId, chatJid: jid }, "Chat reset app-state resync failed");
+    }
+  }
+
+  if (isConnected && sock && typeof sock.fetchMessageHistory === "function") {
+    const maxPages = clampInt(opts.maxPages, 1, 20, 12);
+    const perPage = clampInt(opts.perPage, 1, 50, 50);
+    const seenCursorHashes = new Set();
+    let fallbackCursorUsed = false;
+
+    for (let i = 0; i < maxPages; i++) {
+      const currentList = Array.isArray(state.messagesByChat[jid]) ? [...state.messagesByChat[jid]] : [];
+      currentList.sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0));
+
+      let cursor = currentList.length > 0 ? currentList[0] : null;
+      if (!cursor && !fallbackCursorUsed && fallbackNewest) {
+        cursor = fallbackNewest;
+        fallbackCursorUsed = true;
+      }
+      if (!cursor) break;
+
+      const key = normalizeMessageKey(cursor.key || {}, jid);
+      const timestampMs = Number(cursor.timestampMs || 0) || 0;
+      if (!key.id || !key.remoteJid || timestampMs <= 0) break;
+
+      const cursorHash = messageKeyHash({
+        remoteJid: key.remoteJid,
+        id: key.id,
+        fromMe: key.fromMe === true,
+        participant: key.participant || ""
+      });
+      if (seenCursorHashes.has(cursorHash)) break;
+      seenCursorHashes.add(cursorHash);
+
+      try {
+        await sock.fetchMessageHistory(
+          perPage,
+          {
+            remoteJid: key.remoteJid,
+            id: key.id,
+            fromMe: key.fromMe === true,
+            participant: key.participant || undefined
+          },
+          Math.floor(timestampMs / 1000)
+        );
+        fetchRequests++;
+      } catch (e) {
+        log.debug({ err: e, profileId, chatJid: jid }, "Chat reset fetchMessageHistory failed");
+        break;
+      }
+
+      await new Promise((r) => setTimeout(r, 170));
+    }
+  }
+
+  schedulePersistWaChatCache();
+  scheduleWaChatSync(profileId, "chat_reset_fetch");
+
+  const downloadedCount = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid].length : 0;
+  return {
+    ok: true,
+    profileId,
+    chatJid: jid,
+    clearedCount,
+    downloadedCount,
+    resyncTriggered,
+    fetchRequests
+  };
+}
+
 function findMessageRecordForProfile(profileId, chatJid, key) {
   const jid = normalizeChatJid(chatJid);
   if (!jid) return null;
@@ -4059,6 +4160,14 @@ ipcMain.handle("wa:markChatRead", async (_evt, payload) => {
   const chatJid = normalizeChatJid(src.chatJid || "");
   if (!chatJid) throw new Error("Invalid chat");
   return await markChatReadForProfile(profileId, chatJid);
+});
+
+ipcMain.handle("wa:resetChatHistory", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const profileId = getActiveProfileId();
+  const chatJid = normalizeChatJid(src.chatJid || "");
+  if (!chatJid) throw new Error("Invalid chat");
+  return await resetChatHistoryForProfile(profileId, chatJid, src || {});
 });
 
 ipcMain.handle("wa:sendPresence", async (_evt, payload) => {

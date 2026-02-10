@@ -856,6 +856,15 @@ p {
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(2px);
   padding: 11px 14px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.waHeadMain {
+  min-width: 0;
+  flex: 1;
 }
 
 .waHeadTitle {
@@ -868,6 +877,18 @@ p {
   margin-top: 2px;
   font-size: 12px;
   color: #5f7b79;
+}
+
+.waHeadActions {
+  display: flex;
+  align-items: flex-start;
+  flex-shrink: 0;
+}
+
+.waHeadActionBtn {
+  padding: 6px 10px;
+  font-size: 12px;
+  border-radius: 10px;
 }
 
 .waMessageViewport {

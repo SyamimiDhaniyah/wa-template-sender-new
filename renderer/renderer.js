@@ -42,6 +42,7 @@ const state = {
   waSyncTimer: null,
   waLoadingChats: false,
   waLoadingMessages: false,
+  waResettingChatHistory: false,
   waRefreshQueued: false,
   waForceHistoryRefreshOnConnected: false,
   waPresenceByChat: {},
@@ -870,10 +871,15 @@ function renderWaChatList() {
 
 function renderWaConversationHead() {
   const titleEl = document.querySelector("#waConversationHead .waHeadTitle");
+  const resetBtn = el("btnWaResetChatHistory");
   const activeChat = getActiveWaChat();
   if (!activeChat) {
     if (titleEl) titleEl.textContent = "WhatsApp";
     el("waHeadMeta").textContent = "Select a conversation";
+    if (resetBtn) {
+      resetBtn.disabled = true;
+      resetBtn.textContent = "Reset";
+    }
     return;
   }
   if (titleEl) titleEl.textContent = activeChat.title || activeChat.jid || "WhatsApp";
@@ -884,6 +890,53 @@ function renderWaConversationHead() {
   if (activeChat.unreadCount) bits.push(`${activeChat.unreadCount} unread`);
   bits.push(activeChat.jid);
   el("waHeadMeta").textContent = bits.join(" | ");
+  if (resetBtn) {
+    resetBtn.disabled = !!state.waResettingChatHistory;
+    resetBtn.textContent = state.waResettingChatHistory ? "Resetting..." : "Reset";
+  }
+}
+
+function setWaResettingChatHistory(busy) {
+  state.waResettingChatHistory = !!busy;
+  const resetBtn = el("btnWaResetChatHistory");
+  if (resetBtn) {
+    const hasChat = !!state.waActiveChatJid;
+    resetBtn.disabled = !hasChat || state.waResettingChatHistory;
+    resetBtn.textContent = state.waResettingChatHistory ? "Resetting..." : "Reset";
+  }
+}
+
+async function resetActiveWaChatHistory() {
+  const chatJid = String(state.waActiveChatJid || "");
+  if (!chatJid) throw new Error("Please select a chat");
+  if (state.waResettingChatHistory) return;
+  const activeChat = getActiveWaChat();
+  const label = String(activeChat?.title || chatJid);
+  const confirmed = window.confirm(`Reset local history for \"${label}\" and download fresh history for this chat?`);
+  if (!confirmed) return;
+
+  setWaResettingChatHistory(true);
+  try {
+    const res = await window.api.waResetChatHistory({
+      chatJid,
+      maxPages: 12,
+      perPage: 50
+    });
+    if (chatJid === String(state.waActiveChatJid || "")) {
+      await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: true });
+    }
+    await refreshWaChats({ refreshMessages: false, markRead: false, includePhotos: false });
+
+    const downloadedCount = Math.max(0, Number(res?.downloadedCount || 0) || 0);
+    if (downloadedCount > 0) {
+      toast("WhatsApp", `History reset. Loaded ${downloadedCount} messages.`);
+    } else {
+      toast("WhatsApp", "History reset. Fresh sync requested for this chat.");
+    }
+  } finally {
+    setWaResettingChatHistory(false);
+    renderWaConversationHead();
+  }
 }
 
 async function handleWaMediaDownload(msg) {
@@ -2138,6 +2191,7 @@ async function activateProfileAndSync(profileId) {
 
   stopWaOutgoingTyping({ sendPaused: true });
   clearAllWaPresenceState({ render: false });
+  setWaResettingChatHistory(false);
   state.waActiveChatJid = "";
   state.waExplicitOpenChatJid = "";
   state.waMessages = [];
@@ -2239,6 +2293,7 @@ async function loadInitialDataAfterLogin() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   setWaDropActive(false);
+  setWaResettingChatHistory(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
   setWaComposerSending(false);
@@ -2276,6 +2331,7 @@ function showLoginScreen() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   setWaDropActive(false);
+  setWaResettingChatHistory(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
   setWaComposerSending(false);
@@ -2391,6 +2447,14 @@ function bindEvents() {
     evt.preventDefault();
     try {
       await sendWaComposerMessage();
+    } catch (e) {
+      toast("WhatsApp", String(e?.message || e));
+    }
+  });
+
+  el("btnWaResetChatHistory").addEventListener("click", async () => {
+    try {
+      await resetActiveWaChatHistory();
     } catch (e) {
       toast("WhatsApp", String(e?.message || e));
     }

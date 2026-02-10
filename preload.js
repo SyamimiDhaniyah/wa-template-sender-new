@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("api", {
   waGetChatMessages: (payload) => ipcRenderer.invoke("wa:getChatMessages", payload),
   waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
   waSendPresence: (payload) => ipcRenderer.invoke("wa:sendPresence", payload),
+  waResetChatHistory: (payload) => ipcRenderer.invoke("wa:resetChatHistory", payload),
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
   waSetTyping: (payload) => ipcRenderer.invoke("wa:setTyping", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
