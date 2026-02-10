@@ -2988,6 +2988,38 @@ async function sendChatMessage(payload) {
   };
 }
 
+function normalizeWaPresenceStatus(input) {
+  const value = cleanString(input).toLowerCase();
+  if (value === "composing" || value === "paused") return value;
+  return "";
+}
+
+async function sendChatTypingPresence(payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  if (!sock || !isConnected) return { ok: false, skipped: true, reason: "not_connected" };
+
+  const chatJid = normalizeSendTargetJid(src.chatJid);
+  if (!chatJid) throw new Error("Invalid chat");
+
+  const status = normalizeWaPresenceStatus(src.status);
+  if (!status) throw new Error("Invalid typing status");
+
+  if (typeof sock.sendPresenceUpdate !== "function") {
+    return { ok: false, skipped: true, reason: "unsupported" };
+  }
+
+  try {
+    if (typeof sock.presenceSubscribe === "function") {
+      await sock.presenceSubscribe(chatJid);
+    }
+  } catch {
+    // continue even if subscribe fails
+  }
+
+  await sock.sendPresenceUpdate(status, chatJid);
+  return { ok: true, chatJid, status };
+}
+
 async function downloadChatMedia(payload) {
   const src = payload && typeof payload === "object" ? payload : {};
   if (!sock || !isConnected) throw new Error("WhatsApp not connected");
@@ -4035,6 +4067,10 @@ ipcMain.handle("wa:sendPresence", async (_evt, payload) => {
 
 ipcMain.handle("wa:sendChatMessage", async (_evt, payload) => {
   return await sendChatMessage(payload || {});
+});
+
+ipcMain.handle("wa:setTyping", async (_evt, payload) => {
+  return await sendChatTypingPresence(payload || {});
 });
 
 ipcMain.handle("wa:pickAttachment", async () => {

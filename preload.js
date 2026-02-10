@@ -38,6 +38,7 @@ contextBridge.exposeInMainWorld("api", {
   waMarkChatRead: (payload) => ipcRenderer.invoke("wa:markChatRead", payload),
   waSendPresence: (payload) => ipcRenderer.invoke("wa:sendPresence", payload),
   waSendChatMessage: (payload) => ipcRenderer.invoke("wa:sendChatMessage", payload),
+  waSetTyping: (payload) => ipcRenderer.invoke("wa:setTyping", payload),
   waPickAttachment: () => ipcRenderer.invoke("wa:pickAttachment"),
   waGetPathForDroppedFile: (file) => {
     try {
