@@ -23,3 +23,6 @@ npm run dist
 ## Notes
 - Uses Baileys (`@whiskeysockets/baileys`).
 - Auth state uses `useMultiFileAuthState` for now (ok for desktop tool, not meant for server-scale).
+
+## Developer Docs
+- See `docs/DEVELOPER.md` for architecture and WhatsApp flow details (receive/send/read/typing/reset history).
