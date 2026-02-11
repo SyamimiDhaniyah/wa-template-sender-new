@@ -666,6 +666,17 @@ function getMappedPnJidForProfile(profileId, inputJid) {
   return mapped;
 }
 
+function getMappedLidJidForProfile(profileId, inputJid) {
+  const key = cleanString(profileId);
+  if (!key) return "";
+  const jid = normalizeJidForContact(inputJid);
+  if (!jid) return "";
+  const state = waLidPnMapByProfileMem[key];
+  if (!state || typeof state !== "object") return "";
+  const mapped = normalizeLidJid(state?.pnToLid?.[jid] || "");
+  return mapped;
+}
+
 function rebuildLidPnMappingsFromContactsCache() {
   for (const key of Object.keys(waLidPnMapByProfileMem)) delete waLidPnMapByProfileMem[key];
   const root = getContactsStoreObj();
@@ -2276,7 +2287,7 @@ function canonicalizeChatJidForProfile(profileId, chatJid) {
     return preferred;
   }
 
-  const mappedMsisdn = normalizeMsisdnSafe(contact?.msisdn || msisdnFromContactAddress(normalized));
+  const mappedMsisdn = normalizeMsisdnSafe(contact?.msisdn || contact?.phoneNumber || "");
   if (mappedMsisdn) {
     const fallbackPn = `${mappedMsisdn}@s.whatsapp.net`;
     rememberLidPnMappingForProfile(profileId, normalized, fallbackPn);
@@ -2296,6 +2307,71 @@ function normalizeSendTargetJid(input) {
   } catch (e) {
     return "";
   }
+}
+
+function resolveRecentRemoteJidForChat(profileId, chatJid) {
+  if (!profileId) return "";
+  const jid = normalizeChatJid(chatJid);
+  if (!jid) return "";
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const msg = list[i] && typeof list[i] === "object" ? list[i] : null;
+    if (!msg) continue;
+    const raw = msg.rawMessage && typeof msg.rawMessage === "object" ? msg.rawMessage : {};
+    const key = raw.key && typeof raw.key === "object" ? raw.key : {};
+    const candidates = [key.remoteJid, key.remoteJidAlt, key.remoteJidPn, raw.remoteJid, raw.chatId];
+    for (const candidate of candidates) {
+      const normalized = normalizeChatJid(candidate);
+      if (!normalized) continue;
+      if (normalized.endsWith("@g.us")) return normalized;
+      if (isPnJid(normalized) || isLidJid(normalized)) return normalized;
+    }
+  }
+
+  return "";
+}
+
+function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
+  const target = normalizeSendTargetJid(chatJidOrPhone);
+  if (!target) return [];
+
+  const out = [];
+  const seen = new Set();
+  const push = (candidate) => {
+    const normalized = normalizeChatJid(candidate);
+    if (!normalized) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  push(target);
+
+  const profileKey = cleanString(profileId);
+  if (!profileKey) return out;
+
+  if (isLidJid(target)) {
+    push(getMappedPnJidForProfile(profileKey, target));
+  } else if (isPnJid(target)) {
+    push(getMappedLidJidForProfile(profileKey, target));
+  }
+
+  const contact = findContactByJidForProfile(profileKey, target);
+  if (contact && typeof contact === "object") {
+    push(normalizePhoneNumberJid(contact.jid || contact.phoneNumber || contact.pnJid || ""));
+    push(normalizeLidJid(contact.lid || contact.lidJid || ""));
+  }
+
+  const recent = resolveRecentRemoteJidForChat(profileKey, target);
+  push(recent);
+  if (recent) {
+    if (isLidJid(recent)) push(getMappedPnJidForProfile(profileKey, recent));
+    if (isPnJid(recent)) push(getMappedLidJidForProfile(profileKey, recent));
+  }
+
+  return out;
 }
 
 function normalizeStoredMessageForChatJid(rawMessage, targetChatJid) {
@@ -3958,13 +4034,55 @@ function buildDefaultDownloadFileName(messageRecord) {
   return `wa_${kind}_${stamp}${ext}`;
 }
 
+function shouldRetrySendWithAlternateTarget(error) {
+  const status = extractErrorStatusCode(error);
+  if ([400, 404, 406, 410].includes(status)) return true;
+
+  const msg = String(error?.message || error || "").toLowerCase();
+  if (!msg) return false;
+  if (msg.includes("connection closed") || msg.includes("timed out") || msg.includes("stream erro")) return false;
+  if (msg.includes("invalid jid")) return true;
+  if (msg.includes("not a whatsapp user")) return true;
+  if (msg.includes("recipient") && (msg.includes("invalid") || msg.includes("unknown") || msg.includes("not found"))) {
+    return true;
+  }
+  if (msg.includes("jid") && (msg.includes("invalid") || msg.includes("unknown") || msg.includes("not found"))) {
+    return true;
+  }
+  return false;
+}
+
+async function sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions = {}) {
+  const candidates = Array.isArray(targetCandidates)
+    ? targetCandidates.map((x) => normalizeChatJid(x)).filter(Boolean)
+    : [];
+  if (candidates.length === 0) throw new Error("Invalid chat");
+
+  let lastError = null;
+  for (let i = 0; i < candidates.length; i++) {
+    const jid = candidates[i];
+    try {
+      const sentMessage = await sock.sendMessage(jid, messagePayload, sendOptions);
+      return { sentMessage, targetJid: jid };
+    } catch (error) {
+      lastError = error;
+      const canRetry = i < candidates.length - 1 && shouldRetrySendWithAlternateTarget(error);
+      if (!canRetry) break;
+    }
+  }
+
+  throw lastError || new Error("Message send failed");
+}
+
 async function sendChatMessage(payload) {
   const src = payload && typeof payload === "object" ? payload : {};
   if (!sock || !isConnected) throw new Error("WhatsApp not connected");
 
   const profileId = getActiveProfileId();
-  const chatJid = normalizeSendTargetJid(src.chatJid);
-  if (!chatJid) throw new Error("Invalid chat");
+  const requestedChatJid = normalizeSendTargetJid(src.chatJid);
+  if (!requestedChatJid) throw new Error("Invalid chat");
+  const targetCandidates = buildSendTargetCandidatesForProfile(profileId, requestedChatJid);
+  if (targetCandidates.length === 0) throw new Error("Invalid chat");
 
   const text = String(src.text || "");
   const trimmedText = text.trim();
@@ -3973,7 +4091,7 @@ async function sendChatMessage(payload) {
 
   const sendOptions = {};
   if (src.quotedKey && typeof src.quotedKey === "object") {
-    const quoted = findMessageRecordForProfile(profileId, chatJid, src.quotedKey);
+    const quoted = findMessageRecordForProfile(profileId, requestedChatJid, src.quotedKey);
     if (quoted?.rawMessage) sendOptions.quoted = quoted.rawMessage;
   }
 
@@ -4020,7 +4138,7 @@ async function sendChatMessage(payload) {
     messagePayload = { text: trimmedText };
   }
 
-  const sentMessage = await sock.sendMessage(chatJid, messagePayload, sendOptions);
+  const { sentMessage, targetJid } = await sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions);
   if (sentMessage && typeof sentMessage === "object") {
     if (localImagePreviewDataUrl) {
       sentMessage.__localThumbnailDataUrl = localImagePreviewDataUrl;
@@ -4035,7 +4153,8 @@ async function sendChatMessage(payload) {
 
   return {
     ok: true,
-    chatJid,
+    chatJid: requestedChatJid,
+    targetJid,
     messageId: cleanString(sentMessage?.key?.id || "")
   };
 }
@@ -4874,9 +4993,11 @@ function getConnectionState() {
 }
 
 async function sendText(msisdn, text) {
-  if (!sock) throw new Error("WhatsApp not connected");
-  const jid = `${msisdn}@s.whatsapp.net`;
-  await sock.sendMessage(jid, { text: String(text || "") });
+  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
+  const profileId = getActiveProfileId();
+  const candidates = buildSendTargetCandidatesForProfile(profileId, msisdn);
+  if (candidates.length === 0) throw new Error("Invalid phone number");
+  await sendMessageWithTargetCandidates(candidates, { text: String(text || "") });
 }
 
 /* --------------------------- IPC ---------------------------- */
