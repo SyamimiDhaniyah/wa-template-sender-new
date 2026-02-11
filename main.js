@@ -2347,14 +2347,25 @@ function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
     out.push(normalized);
   };
 
-  push(target);
-
   const profileKey = cleanString(profileId);
-  if (!profileKey) return out;
+  if (!profileKey) {
+    push(target);
+    return out;
+  }
 
+  // Prefer phone-number JIDs for direct chats because they are the most
+  // reliable send target across Baileys v7 RC builds.
   if (isLidJid(target)) {
     push(getMappedPnJidForProfile(profileKey, target));
-  } else if (isPnJid(target)) {
+    const lidUser = jidUserPart(target);
+    if (/^\d{8,15}$/.test(lidUser)) {
+      push(`${lidUser}@s.whatsapp.net`);
+    }
+  }
+
+  push(target);
+
+  if (isPnJid(target)) {
     push(getMappedLidJidForProfile(profileKey, target));
   }
 
@@ -2365,11 +2376,17 @@ function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
   }
 
   const recent = resolveRecentRemoteJidForChat(profileKey, target);
-  push(recent);
   if (recent) {
-    if (isLidJid(recent)) push(getMappedPnJidForProfile(profileKey, recent));
+    if (isLidJid(recent)) {
+      push(getMappedPnJidForProfile(profileKey, recent));
+      const recentUser = jidUserPart(recent);
+      if (/^\d{8,15}$/.test(recentUser)) {
+        push(`${recentUser}@s.whatsapp.net`);
+      }
+    }
     if (isPnJid(recent)) push(getMappedLidJidForProfile(profileKey, recent));
   }
+  push(recent);
 
   return out;
 }
@@ -4119,6 +4136,25 @@ async function expandSendTargetCandidatesWithSignalMappings(targetCandidates) {
   return out;
 }
 
+function sendTargetPriority(jid) {
+  const normalized = normalizeChatJid(jid);
+  if (!normalized) return 99;
+  if (normalized.endsWith("@g.us")) return 0;
+  if (isPnJid(normalized)) return 1;
+  if (isLidJid(normalized)) return 2;
+  return 3;
+}
+
+function prioritizeSendTargets(candidates) {
+  const list = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
+  if (list.length <= 1) return list;
+  return [...list].sort((a, b) => {
+    const scoreDiff = sendTargetPriority(a) - sendTargetPriority(b);
+    if (scoreDiff !== 0) return scoreDiff;
+    return String(a).localeCompare(String(b));
+  });
+}
+
 async function sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions = {}) {
   const baseCandidates = Array.isArray(targetCandidates)
     ? targetCandidates.map((x) => normalizeChatJid(x)).filter(Boolean)
@@ -4129,8 +4165,9 @@ async function sendMessageWithTargetCandidates(targetCandidates, messagePayload,
   const attempted = new Set();
 
   const trySendList = async (candidates) => {
-    for (let i = 0; i < candidates.length; i++) {
-      const jid = normalizeChatJid(candidates[i]);
+    const ordered = prioritizeSendTargets(candidates);
+    for (let i = 0; i < ordered.length; i++) {
+      const jid = normalizeChatJid(ordered[i]);
       if (!jid || attempted.has(jid)) continue;
       attempted.add(jid);
 
@@ -4139,8 +4176,11 @@ async function sendMessageWithTargetCandidates(targetCandidates, messagePayload,
         return { sentMessage, targetJid: jid };
       } catch (error) {
         lastError = error;
-        const canRetry = i < candidates.length - 1 && shouldRetrySendWithAlternateTarget(error);
-        if (!canRetry) break;
+        const hasMoreCandidates = i < ordered.length - 1;
+        if (!hasMoreCandidates) break;
+        const shouldTryNext =
+          shouldRetrySendWithAlternateTarget(error) || shouldExpandSendTargetsAfterFailure(error);
+        if (!shouldTryNext) break;
       }
     }
     return null;
