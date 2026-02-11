@@ -4069,13 +4069,24 @@ function shouldRetrySendWithAlternateTarget(error) {
   return false;
 }
 
+function isSendConnectionError(error) {
+  const status = extractErrorStatusCode(error);
+  if ([408, 428, 440, 499].includes(status)) return true;
+
+  const msg = String(error?.message || error || "").toLowerCase();
+  if (!msg) return false;
+  if (msg.includes("connection closed")) return true;
+  if (msg.includes("not connected")) return true;
+  if (msg.includes("timed out")) return true;
+  if (msg.includes("stream erro")) return true;
+  if (msg.includes("connection lost")) return true;
+  return false;
+}
+
 function shouldExpandSendTargetsAfterFailure(error) {
+  if (isSendConnectionError(error)) return false;
   const msg = String(error?.message || error || "").toLowerCase();
   if (!msg) return true;
-  if (msg.includes("connection closed")) return false;
-  if (msg.includes("timed out")) return false;
-  if (msg.includes("stream erro")) return false;
-  if (msg.includes("not connected")) return false;
   return true;
 }
 
@@ -4136,6 +4147,50 @@ async function expandSendTargetCandidatesWithSignalMappings(targetCandidates) {
   return out;
 }
 
+async function expandSendTargetCandidatesWithOnWhatsApp(targetCandidates) {
+  const out = [];
+  const seen = new Set();
+  const push = (candidate) => {
+    const normalized = normalizeChatJid(candidate);
+    if (!normalized) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  for (const candidate of Array.isArray(targetCandidates) ? targetCandidates : []) {
+    push(candidate);
+  }
+
+  if (!sock || typeof sock.onWhatsApp !== "function") return out;
+
+  const lookupPhones = [];
+  const lookupSeen = new Set();
+  for (const candidate of out) {
+    if (!isPnJid(candidate)) continue;
+    const pnJid = normalizePhoneNumberJid(candidate);
+    if (!pnJid || lookupSeen.has(pnJid)) continue;
+    lookupSeen.add(pnJid);
+    lookupPhones.push(pnJid);
+  }
+  if (lookupPhones.length === 0) return out;
+
+  try {
+    const rows = await sock.onWhatsApp(...lookupPhones);
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const src = row && typeof row === "object" ? row : {};
+      if (src.exists === false) continue;
+      push(src.jid || src.id || "");
+      push(normalizePhoneNumberJid(src.jid || src.id || ""));
+      push(normalizeLidJid(src.lid || src.lidJid || ""));
+    }
+  } catch (e) {
+    log.debug({ err: e, lookupCount: lookupPhones.length }, "Failed onWhatsApp send target lookup");
+  }
+
+  return out;
+}
+
 function sendTargetPriority(jid) {
   const normalized = normalizeChatJid(jid);
   if (!normalized) return 99;
@@ -4189,22 +4244,43 @@ async function sendMessageWithTargetCandidates(targetCandidates, messagePayload,
   const firstTry = await trySendList(baseCandidates);
   if (firstTry) return firstTry;
 
+  if (isSendConnectionError(lastError)) {
+    const recovered = await ensureConnectedForSend(getActiveProfileId());
+    if (recovered) {
+      attempted.clear();
+      const recoveredTry = await trySendList(baseCandidates);
+      if (recoveredTry) return recoveredTry;
+    }
+  }
+
   if (!shouldExpandSendTargetsAfterFailure(lastError)) {
     throw lastError || new Error("Message send failed");
   }
 
-  const expandedCandidates = await expandSendTargetCandidatesWithSignalMappings(baseCandidates);
+  const expandedBySignal = await expandSendTargetCandidatesWithSignalMappings(baseCandidates);
+  const expandedCandidates = await expandSendTargetCandidatesWithOnWhatsApp(expandedBySignal);
   const secondTry = await trySendList(expandedCandidates);
   if (secondTry) return secondTry;
+
+  if (isSendConnectionError(lastError)) {
+    const recovered = await ensureConnectedForSend(getActiveProfileId());
+    if (recovered) {
+      attempted.clear();
+      const thirdTry = await trySendList(expandedCandidates.length > 0 ? expandedCandidates : baseCandidates);
+      if (thirdTry) return thirdTry;
+    }
+  }
 
   throw lastError || new Error("Message send failed");
 }
 
 async function sendChatMessage(payload) {
   const src = payload && typeof payload === "object" ? payload : {};
-  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
-
   const profileId = getActiveProfileId();
+  if (!(await ensureConnectedForSend(profileId)) || !sock || !isConnected) {
+    throw new Error("WhatsApp not connected");
+  }
+
   const requestedChatJid = normalizeSendTargetJid(src.chatJid);
   if (!requestedChatJid) throw new Error("Invalid chat");
   const targetCandidates = buildSendTargetCandidatesForProfile(profileId, requestedChatJid);
@@ -5118,9 +5194,39 @@ function getConnectionState() {
   };
 }
 
+async function waitForConnectedState(timeoutMs = 15000) {
+  const timeout = Math.max(1000, Number(timeoutMs || 15000));
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeout) {
+    if (sock && isConnected) return true;
+    await new Promise((r) => setTimeout(r, 180));
+  }
+  return !!(sock && isConnected);
+}
+
+async function ensureConnectedForSend(profileId) {
+  if (sock && isConnected) return true;
+  if (isConnecting) {
+    return await waitForConnectedState(16000);
+  }
+
+  const targetProfileId = cleanString(profileId) || getActiveProfileId();
+  if (!hasRegisteredSession(targetProfileId)) return false;
+
+  try {
+    await autoReconnectActiveProfile();
+  } catch (e) {
+    log.debug({ err: e, profileId: targetProfileId }, "Auto reconnect before send failed");
+  }
+
+  return await waitForConnectedState(16000);
+}
+
 async function sendText(msisdn, text) {
-  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
   const profileId = getActiveProfileId();
+  if (!(await ensureConnectedForSend(profileId)) || !sock || !isConnected) {
+    throw new Error("WhatsApp not connected");
+  }
   const candidates = buildSendTargetCandidatesForProfile(profileId, msisdn);
   if (candidates.length === 0) throw new Error("Invalid phone number");
   await sendMessageWithTargetCandidates(candidates, { text: String(text || "") });
@@ -5572,10 +5678,14 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     throw new Error("AI rewrite requires Authorization token. Please log in first.");
   }
 
+  const activeProfileIdForBatch = getActiveProfileId();
+  if (!(await ensureConnectedForSend(activeProfileIdForBatch)) || !isConnected || !sock) {
+    throw new Error("WhatsApp not connected");
+  }
+
   let sent = 0;
   let failed = 0;
   let skipped = 0;
-  const activeProfileIdForBatch = getActiveProfileId();
 
   for (let i = 0; i < recipients.length; i++) {
     const rawPhone = recipients[i];
@@ -5699,7 +5809,10 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   const src = payload && typeof payload === "object" ? payload : {};
   const items = Array.isArray(src.items) ? src.items : [];
   if (items.length === 0) throw new Error("No messages to send");
-  if (!isConnected || !sock) throw new Error("WhatsApp not connected");
+  const activeProfileIdForPreparedBatch = getActiveProfileId();
+  if (!(await ensureConnectedForSend(activeProfileIdForPreparedBatch)) || !isConnected || !sock) {
+    throw new Error("WhatsApp not connected");
+  }
 
   const pacing = src.pacing && typeof src.pacing === "object" ? src.pacing : {};
   const pattern = pacing.pattern === "cycle" ? "cycle" : "random";
@@ -5722,7 +5835,6 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
-  const activeProfileIdForPreparedBatch = getActiveProfileId();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i] && typeof items[i] === "object" ? items[i] : {};
