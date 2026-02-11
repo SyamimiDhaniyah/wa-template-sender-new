@@ -422,7 +422,8 @@ function setConnectionBadge(connected, text, connecting = false) {
   }
   const msg = text || (connected ? "Connected" : "Not connected");
   el("connText").textContent = msg;
-  el("waStatusText").textContent = msg;
+  const waStatusText = el("waStatusText");
+  if (waStatusText) waStatusText.textContent = msg;
   refreshConnectionControls();
 }
 

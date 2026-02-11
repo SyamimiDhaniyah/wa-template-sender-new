@@ -722,6 +722,10 @@ p {
   margin-bottom: 8px;
 }
 
+.connectPreviewCard {
+  grid-column: 1 / -1;
+}
+
 .connectProfilesCard {
   grid-column: 1 / -1;
 }
