@@ -879,18 +879,6 @@ p {
   color: #5f7b79;
 }
 
-.waHeadActions {
-  display: flex;
-  align-items: flex-start;
-  flex-shrink: 0;
-}
-
-.waHeadActionBtn {
-  padding: 6px 10px;
-  font-size: 12px;
-  border-radius: 10px;
-}
-
 .waMessageViewport {
   flex: 1;
   min-height: 0;
