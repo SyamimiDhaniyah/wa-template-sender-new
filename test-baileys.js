@@ -1,8 +1,9 @@
-const makeWASocket = require("@whiskeysockets/baileys").default;
-const { useMultiFileAuthState, DisconnectReason } = require("@whiskeysockets/baileys");
 const pino = require("pino");
 
 (async () => {
+  const mod = await import("@whiskeysockets/baileys");
+  const makeWASocket = mod.makeWASocket || mod.default;
+  const { useMultiFileAuthState, DisconnectReason } = mod;
   const { state, saveCreds } = await useMultiFileAuthState("./_test_auth");
 
   const sock = makeWASocket({

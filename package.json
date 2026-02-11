@@ -8,7 +8,7 @@
     "dist": "electron-builder"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.16",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "electron-store": "^8.2.0",
     "pino": "^9.3.2",
     "qrcode": "^1.5.4"

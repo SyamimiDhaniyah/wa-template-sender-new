@@ -44,6 +44,7 @@ const appStateResyncBackoffUntilByProfile = new Map();
 const contactPhotoEnrichInFlightByProfile = new Map();
 const contactPhotoBackoffUntilByProfile = new Map();
 const contactLookupCacheByProfile = new Map();
+const waLidPnMapByProfileMem = {};
 const startupPhotoBackfillDoneByProfile = new Set();
 
 // Used to ignore late events from old sockets
@@ -532,6 +533,7 @@ function clearPersistedContactsCache() {
   }
   waContactsByProfileMem = {};
   contactLookupCacheByProfile.clear();
+  for (const key of Object.keys(waLidPnMapByProfileMem)) delete waLidPnMapByProfileMem[key];
   startupPhotoBackfillDoneByProfile.clear();
 }
 
@@ -553,11 +555,14 @@ function normalizeContactsCacheRoot(raw) {
       }
       if (!msisdn) continue;
 
-      const jid = normalizeJidForContact(contactRaw.jid || `${msisdn}@s.whatsapp.net`);
+      const jid =
+        normalizePhoneNumberJid(contactRaw.phoneNumber || contactRaw.jid || "") ||
+        `${msisdn}@s.whatsapp.net`;
+      const lid = normalizeLidJid(contactRaw.lid || contactRaw.lidJid || "");
       byPhone[msisdn] = {
         msisdn,
-        jid: jid || `${msisdn}@s.whatsapp.net`,
-        lid: sanitizeContactName(contactRaw.lid),
+        jid,
+        lid: sanitizeContactName(lid || contactRaw.lid || contactRaw.lidJid || ""),
         name: sanitizeContactName(contactRaw.name),
         notify: sanitizeContactName(contactRaw.notify),
         verifiedName: sanitizeContactName(contactRaw.verifiedName),
@@ -589,16 +594,91 @@ function loadPersistedContactsCache() {
     waContactsByProfileMem = {};
   }
   contactLookupCacheByProfile.clear();
+  rebuildLidPnMappingsFromContactsCache();
 }
 
 function clearContactsCacheForProfile(profileId) {
   if (!profileId) return;
+  clearLidPnMappingsForProfile(profileId);
   if (!waContactsByProfileMem || typeof waContactsByProfileMem !== "object") return;
   if (!Object.prototype.hasOwnProperty.call(waContactsByProfileMem, profileId)) return;
   delete waContactsByProfileMem[profileId];
   persistContactsCache();
   contactLookupCacheByProfile.delete(profileId);
   startupPhotoBackfillDoneByProfile.delete(profileId);
+}
+
+function ensureLidPnMapStateForProfile(profileId) {
+  const key = cleanString(profileId);
+  if (!key) return null;
+  const existing = waLidPnMapByProfileMem[key];
+  if (existing && typeof existing === "object") {
+    if (!existing.lidToPn || typeof existing.lidToPn !== "object") existing.lidToPn = {};
+    if (!existing.pnToLid || typeof existing.pnToLid !== "object") existing.pnToLid = {};
+    return existing;
+  }
+  const created = { lidToPn: {}, pnToLid: {} };
+  waLidPnMapByProfileMem[key] = created;
+  return created;
+}
+
+function clearLidPnMappingsForProfile(profileId) {
+  const key = cleanString(profileId);
+  if (!key) return;
+  if (!Object.prototype.hasOwnProperty.call(waLidPnMapByProfileMem, key)) return;
+  delete waLidPnMapByProfileMem[key];
+}
+
+function rememberLidPnMappingForProfile(profileId, lidInput, pnInput) {
+  const key = cleanString(profileId);
+  if (!key) return 0;
+  const lid = normalizeLidJid(lidInput);
+  const pn = normalizePhoneNumberJid(pnInput);
+  if (!lid || !pn) return 0;
+  const state = ensureLidPnMapStateForProfile(key);
+  if (!state) return 0;
+
+  let changed = 0;
+  if (state.lidToPn[lid] !== pn) {
+    state.lidToPn[lid] = pn;
+    changed++;
+  }
+
+  const knownLid = cleanString(state.pnToLid[pn] || "");
+  if (!knownLid || knownLid === lid) {
+    if (knownLid !== lid) {
+      state.pnToLid[pn] = lid;
+      changed++;
+    }
+  }
+
+  return changed;
+}
+
+function getMappedPnJidForProfile(profileId, inputJid) {
+  const key = cleanString(profileId);
+  if (!key) return "";
+  const jid = normalizeJidForContact(inputJid);
+  if (!jid) return "";
+  const state = waLidPnMapByProfileMem[key];
+  if (!state || typeof state !== "object") return "";
+  const mapped = normalizePhoneNumberJid(state?.lidToPn?.[jid] || "");
+  return mapped;
+}
+
+function rebuildLidPnMappingsFromContactsCache() {
+  for (const key of Object.keys(waLidPnMapByProfileMem)) delete waLidPnMapByProfileMem[key];
+  const root = getContactsStoreObj();
+  for (const [profileId, byPhoneRaw] of Object.entries(root || {})) {
+    const byPhone = byPhoneRaw && typeof byPhoneRaw === "object" ? byPhoneRaw : {};
+    for (const contactRaw of Object.values(byPhone)) {
+      const contact = contactRaw && typeof contactRaw === "object" ? contactRaw : {};
+      const pn = normalizePhoneNumberJid(contact.jid || "");
+      const lid = normalizeLidJid(contact.lid || "");
+      if (!pn || !lid) continue;
+      rememberLidPnMappingForProfile(profileId, lid, pn);
+    }
+  }
 }
 
 function compactThumbnailDataUrl(value) {
@@ -1002,9 +1082,52 @@ function normalizeJidForContact(jid) {
   return `${normalizedUser}@${serverPart}`;
 }
 
+function jidUserPart(jid) {
+  const normalized = normalizeJidForContact(jid);
+  if (!normalized) return "";
+  const at = normalized.indexOf("@");
+  return at > 0 ? normalized.slice(0, at) : "";
+}
+
+function isPnJid(jid) {
+  const normalized = normalizeJidForContact(jid).toLowerCase();
+  if (!normalized) return false;
+  return (
+    normalized.endsWith("@s.whatsapp.net") ||
+    normalized.endsWith("@hosted") ||
+    normalized.endsWith("@c.us")
+  );
+}
+
+function isLidJid(jid) {
+  const normalized = normalizeJidForContact(jid).toLowerCase();
+  if (!normalized) return false;
+  return normalized.endsWith("@lid") || normalized.endsWith("@hosted.lid");
+}
+
+function normalizePhoneNumberJid(input) {
+  const normalized = normalizeJidForContact(input);
+  if (normalized && normalized.includes("@")) {
+    return isPnJid(normalized) ? normalized : "";
+  }
+  const msisdn = normalizeMsisdnSafe(input);
+  if (!msisdn) return "";
+  return `${msisdn}@s.whatsapp.net`;
+}
+
+function normalizeLidJid(input) {
+  const normalized = normalizeJidForContact(input);
+  if (normalized && normalized.includes("@")) {
+    return isLidJid(normalized) ? normalized : "";
+  }
+  const user = cleanString(input).replace(/\s+/g, "");
+  if (!/^\d{4,}$/.test(user)) return "";
+  return `${user}@lid`;
+}
+
 function msisdnFromUserJid(jid) {
   const j = normalizeJidForContact(jid);
-  if (!j.endsWith("@s.whatsapp.net")) return "";
+  if (!isPnJid(j)) return "";
   const raw = j.slice(0, j.indexOf("@"));
   if (!/^\d{6,}$/.test(raw)) return "";
   return raw;
@@ -1321,8 +1444,8 @@ function isLikelyFallbackIdentityLabel(value) {
   const s = sanitizeContactName(value).toLowerCase();
   if (!s) return false;
   if (/^\d{6,}$/.test(s)) return true;
-  if (/^\d+@lid$/.test(s)) return true;
-  if (/^\d+@s\.whatsapp\.net$/.test(s)) return true;
+  if (/^\d+@(lid|hosted\.lid)$/.test(s)) return true;
+  if (/^\d+@(s\.whatsapp\.net|hosted)$/.test(s)) return true;
   if (/^\d+@c\.us$/.test(s)) return true;
   if (s === "unknown" || s === "unknown chat" || s === "someone") return true;
   const compact = s.replace(/[\s()+-]/g, "");
@@ -1362,9 +1485,8 @@ function msisdnFromContactAddress(value) {
   const norm = normalizeJidForContact(value);
   const fromJid = msisdnFromUserJid(norm);
   if (fromJid) return fromJid;
-  if (norm.endsWith("@lid")) {
-    const at = norm.indexOf("@");
-    const user = at > 0 ? norm.slice(0, at) : "";
+  if (isLidJid(norm)) {
+    const user = jidUserPart(norm);
     if (/^\d{6,}$/.test(user)) return user;
   }
   if (/^\d{6,}$/.test(norm)) return norm;
@@ -1382,6 +1504,12 @@ function findContactByJidForProfile(profileId, jidOrAddress) {
     typeof waContactsByProfileMem[profileId] === "object"
       ? waContactsByProfileMem[profileId]
       : {};
+
+  const mappedPnJid = getMappedPnJidForProfile(profileId, target);
+  const mappedMsisdn = msisdnFromContactAddress(mappedPnJid);
+  if (mappedMsisdn && byPhone[mappedMsisdn] && typeof byPhone[mappedMsisdn] === "object") {
+    return byPhone[mappedMsisdn];
+  }
 
   const msisdn = msisdnFromContactAddress(target);
   if (msisdn && byPhone[msisdn] && typeof byPhone[msisdn] === "object") {
@@ -1426,16 +1554,22 @@ function upsertContactsForProfile(profileId, contacts) {
   const root = getContactsStoreObj();
   const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
   let changed = 0;
+  let mappingChanged = 0;
 
   for (const c of contacts) {
-    const primaryJidSource = c?.pnJid || c?.jid || c?.id || "";
-    const secondaryJidSource = c?.jid || c?.id || "";
-    const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
-    const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
+    const contactPhoneJid = normalizePhoneNumberJid(c?.phoneNumber || c?.pnJid || c?.pn || "");
+    const contactLidJid = normalizeLidJid(c?.lid || c?.lidJid || "");
+    const primaryJidSource = contactPhoneJid || c?.pnJid || c?.phoneNumber || c?.jid || c?.id || "";
+    const secondaryJidSource = c?.jid || c?.id || contactLidJid || "";
+    const jid = contactPhoneJid || normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const msisdn =
+      normalizeMsisdnSafe(c?.phoneNumber || c?.msisdn || "") ||
+      msisdnFromContactAddress(contactPhoneJid || primaryJidSource) ||
+      msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
 
     const secondaryJid = normalizeJidForContact(secondaryJidSource);
-    const secondaryLid = secondaryJid.endsWith("@lid") ? secondaryJid : "";
+    const secondaryLid = isLidJid(secondaryJid) ? secondaryJid : "";
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
     const incomingName = firstNonEmptyString([
@@ -1451,16 +1585,17 @@ function upsertContactsForProfile(profileId, contacts) {
     const notify = choosePreferredIdentityLabel(existing?.notify, incomingNotify);
     const incomingVerifiedName = firstNonEmptyString([c?.verifiedName, c?.vname]);
     const verifiedName = choosePreferredIdentityLabel(existing?.verifiedName, incomingVerifiedName);
-    const lid = firstNonEmptyString([c?.lid, c?.lidJid, secondaryLid, existing?.lid]);
+    const lid = firstNonEmptyString([contactLidJid, c?.lid, c?.lidJid, secondaryLid, existing?.lid]);
     const imgUrl =
       c?.imgUrl === null || c?.imgUrl === undefined
         ? existing?.imgUrl ?? null
         : String(c.imgUrl || "").trim() || null;
     const status = sanitizeContactName(c?.status) || sanitizeContactName(existing?.status);
+    const preferredPnJid = normalizePhoneNumberJid(jid || existing?.jid || `${msisdn}@s.whatsapp.net`) || `${msisdn}@s.whatsapp.net`;
 
     const next = {
       msisdn,
-      jid: jid || existing?.jid || `${msisdn}@s.whatsapp.net`,
+      jid: preferredPnJid,
       lid,
       name: nameCandidate,
       notify,
@@ -1487,6 +1622,9 @@ function upsertContactsForProfile(profileId, contacts) {
       byPhone[msisdn] = next;
       changed++;
     }
+
+    mappingChanged += rememberLidPnMappingForProfile(profileId, next.lid, next.jid);
+    mappingChanged += rememberLidPnMappingForProfile(profileId, contactLidJid || secondaryLid, contactPhoneJid || next.jid);
   }
 
   if (changed > 0) {
@@ -1494,6 +1632,8 @@ function upsertContactsForProfile(profileId, contacts) {
     persistContactsCache();
     contactLookupCacheByProfile.delete(profileId);
     promoteChatNamesFromContactsForProfile(profileId);
+  }
+  if (changed > 0 || mappingChanged > 0) {
     scheduleChatAliasReconcileForProfile(profileId);
   }
 
@@ -1505,19 +1645,26 @@ function upsertChatsAsContactsForProfile(profileId, chats) {
 
   const contacts = [];
   for (const chat of chats) {
-    const primaryJidSource = chat?.pnJid || chat?.id || chat?.jid || "";
-    const secondaryJidSource = chat?.id || chat?.jid || "";
-    const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
-    const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
+    const chatPhoneJid = normalizePhoneNumberJid(chat?.phoneNumber || chat?.pnJid || "");
+    const chatLidJid = normalizeLidJid(chat?.lid || chat?.lidJid || "");
+    const primaryJidSource = chatPhoneJid || chat?.pnJid || chat?.phoneNumber || chat?.id || chat?.jid || "";
+    const secondaryJidSource = chat?.id || chat?.jid || chatLidJid || "";
+    const jid = chatPhoneJid || normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const msisdn =
+      normalizeMsisdnSafe(chat?.phoneNumber || "") ||
+      msisdnFromContactAddress(chatPhoneJid || primaryJidSource) ||
+      msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
 
     const secondaryJid = normalizeJidForContact(secondaryJidSource);
     const name = firstNonEmptyString([chat?.name, chat?.notify, chat?.pushName]);
     const notify = firstNonEmptyString([chat?.notify, chat?.pushName, name]);
+    const lid = firstNonEmptyString([chatLidJid, chat?.lid, chat?.lidJid, isLidJid(secondaryJid) ? secondaryJid : ""]);
     contacts.push({
       id: jid || `${msisdn}@s.whatsapp.net`,
       jid: jid || `${msisdn}@s.whatsapp.net`,
-      lid: firstNonEmptyString([chat?.lid, chat?.lidJid, secondaryJid.endsWith("@lid") ? secondaryJid : ""]),
+      lid,
+      phoneNumber: chatPhoneJid || "",
       name,
       notify,
       verifiedName: sanitizeContactName(chat?.verifiedName)
@@ -1533,21 +1680,31 @@ function upsertMessagesAsContactsForProfile(profileId, messages) {
   const contacts = [];
   for (const msg of messages) {
     const key = msg?.key && typeof msg.key === "object" ? msg.key : {};
-    const primaryJidSource = key.participantPn || key.remoteJidPn || key.participant || key.remoteJid || "";
+    const primaryJidSource =
+      key.participantAlt ||
+      key.remoteJidAlt ||
+      key.participantPn ||
+      key.remoteJidPn ||
+      key.participant ||
+      key.remoteJid ||
+      "";
     const secondaryJidSource = key.participant || key.remoteJid || "";
     const jid = normalizeJidForContact(primaryJidSource) || normalizeJidForContact(secondaryJidSource);
+    const altPhoneJid = normalizePhoneNumberJid(key.participantAlt || key.remoteJidAlt || key.participantPn || key.remoteJidPn || "");
     const msisdn = msisdnFromContactAddress(primaryJidSource) || msisdnFromContactAddress(secondaryJidSource);
     if (!msisdn) continue;
 
     const secondaryJid = normalizeJidForContact(secondaryJidSource);
+    const lid = isLidJid(secondaryJid) ? secondaryJid : isLidJid(jid) ? jid : "";
     const notify = firstNonEmptyString([msg?.pushName, msg?.notifyName, msg?.notify, msg?.participantName]);
     const verifiedName = firstNonEmptyString([msg?.verifiedBizName, msg?.verifiedName]);
     if (!notify && !verifiedName) continue;
 
     contacts.push({
-      id: jid || `${msisdn}@s.whatsapp.net`,
-      jid: jid || `${msisdn}@s.whatsapp.net`,
-      lid: secondaryJid.endsWith("@lid") ? secondaryJid : "",
+      id: altPhoneJid || jid || `${msisdn}@s.whatsapp.net`,
+      jid: altPhoneJid || jid || `${msisdn}@s.whatsapp.net`,
+      lid,
+      phoneNumber: altPhoneJid || "",
       notify,
       verifiedName
     });
@@ -2082,15 +2239,26 @@ function canonicalizeChatJidForProfile(profileId, chatJid) {
   const normalized = normalizeChatJid(chatJid);
   if (!normalized) return "";
   if (!profileId) return normalized;
-  if (normalized.endsWith("@s.whatsapp.net")) return normalized;
-  if (!normalized.endsWith("@lid")) return normalized;
+  if (isPnJid(normalized)) return normalized;
+
+  const mappedByCache = getMappedPnJidForProfile(profileId, normalized);
+  if (mappedByCache) return mappedByCache;
+
+  if (!isLidJid(normalized)) return normalized;
 
   const contact = findContactByJidForProfile(profileId, normalized);
-  const preferred = normalizeJidForContact(contact?.jid || "");
-  if (preferred && preferred.endsWith("@s.whatsapp.net")) return preferred;
+  const preferred = normalizePhoneNumberJid(contact?.jid || contact?.phoneNumber || contact?.pnJid || "");
+  if (preferred) {
+    rememberLidPnMappingForProfile(profileId, normalized, preferred);
+    return preferred;
+  }
 
   const mappedMsisdn = normalizeMsisdnSafe(contact?.msisdn || msisdnFromContactAddress(normalized));
-  if (mappedMsisdn) return `${mappedMsisdn}@s.whatsapp.net`;
+  if (mappedMsisdn) {
+    const fallbackPn = `${mappedMsisdn}@s.whatsapp.net`;
+    rememberLidPnMappingForProfile(profileId, normalized, fallbackPn);
+    return fallbackPn;
+  }
 
   return normalized;
 }
@@ -2595,12 +2763,41 @@ function summarizeMessagePayload(rawMessage) {
   };
 }
 
-function normalizeMessageKey(key, fallbackRemoteJid) {
+function normalizeMessageKey(key, fallbackRemoteJid, profileId = "") {
   const src = key && typeof key === "object" ? key : {};
-  const remoteJid = normalizeChatJid(src.remoteJidPn || src.remoteJid || fallbackRemoteJid || "");
+  const remotePrimary = normalizeChatJid(src.remoteJid || fallbackRemoteJid || "");
+  const remoteAlt = normalizeChatJid(src.remoteJidAlt || src.remoteJidPn || "");
+  let remoteJid = remoteAlt || remotePrimary;
   const id = cleanString(src.id || "");
-  const participant = normalizeJidForContact(src.participantPn || src.participant || "");
+  const participantPrimary = normalizeJidForContact(src.participant || "");
+  const participantAlt = normalizeJidForContact(src.participantAlt || src.participantPn || "");
+  let participant = participantAlt || participantPrimary;
   const fromMe = src.fromMe === true;
+
+  const profileKey = cleanString(profileId);
+  if (profileKey) {
+    if (isLidJid(remotePrimary) && isPnJid(remoteAlt)) {
+      rememberLidPnMappingForProfile(profileKey, remotePrimary, remoteAlt);
+    } else if (isLidJid(remoteAlt) && isPnJid(remotePrimary)) {
+      rememberLidPnMappingForProfile(profileKey, remoteAlt, remotePrimary);
+    }
+
+    if (isLidJid(participantPrimary) && isPnJid(participantAlt)) {
+      rememberLidPnMappingForProfile(profileKey, participantPrimary, participantAlt);
+    } else if (isLidJid(participantAlt) && isPnJid(participantPrimary)) {
+      rememberLidPnMappingForProfile(profileKey, participantAlt, participantPrimary);
+    }
+
+    if (remoteJid) {
+      remoteJid = canonicalizeChatJidForProfile(profileKey, remoteJid);
+    }
+
+    if (isLidJid(participant)) {
+      const mappedParticipant = getMappedPnJidForProfile(profileKey, participant);
+      if (mappedParticipant) participant = mappedParticipant;
+    }
+  }
+
   return { remoteJid, id, participant, fromMe };
 }
 
@@ -2623,11 +2820,13 @@ function ensureContactsFromChatsForProfile(profileId) {
   for (const chat of chats) {
     const chatJid = normalizeChatJid(chat?.jid || "");
     if (!chatJid) continue;
-    const isDirectContact = chatJid.endsWith("@s.whatsapp.net") || chatJid.endsWith("@lid");
+    const isDirectContact = isPnJid(chatJid) || isLidJid(chatJid);
     if (!isDirectContact) continue;
+    const canonicalJid = canonicalizeChatJidForProfile(profileId, chatJid) || chatJid;
     contacts.push({
-      id: chatJid,
-      jid: chatJid,
+      id: canonicalJid,
+      jid: canonicalJid,
+      lid: isLidJid(chatJid) ? chatJid : "",
       name: cleanString(chat?.name || ""),
       notify: cleanString(chat?.name || "")
     });
@@ -2700,10 +2899,16 @@ function upsertChatsForProfile(profileId, chats) {
   if (!profileId || !Array.isArray(chats) || chats.length === 0) return 0;
   const state = ensureWaChatStateForProfile(profileId);
   let changed = 0;
+  let mappingChanged = 0;
 
   for (const raw of chats) {
     const src = raw && typeof raw === "object" ? raw : {};
-    const chatJid = canonicalizeChatJidForProfile(profileId, src.pnJid || src.id || src.jid || "");
+    const chatPhoneJid = normalizePhoneNumberJid(src.phoneNumber || src.pnJid || "");
+    const chatLidJid = normalizeLidJid(src.lid || src.lidJid || "");
+    if (chatPhoneJid && chatLidJid) {
+      mappingChanged += rememberLidPnMappingForProfile(profileId, chatLidJid, chatPhoneJid);
+    }
+    const chatJid = canonicalizeChatJidForProfile(profileId, chatPhoneJid || src.id || src.jid || chatLidJid || "");
     if (!chatJid) continue;
 
     const chat = ensureChatSummary(profileId, chatJid);
@@ -2753,12 +2958,15 @@ function upsertChatsForProfile(profileId, chats) {
     scheduleWaChatSync(profileId, "chats");
     schedulePersistWaChatCache();
   }
+  if (mappingChanged > 0) {
+    scheduleChatAliasReconcileForProfile(profileId, 120);
+  }
   return changed;
 }
 
 function normalizeMessageRecord(profileId, rawMessage) {
   const msg = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
-  const key = normalizeMessageKey(msg.key, msg?.key?.remoteJid || msg?.remoteJid || "");
+  const key = normalizeMessageKey(msg.key, msg?.key?.remoteJid || msg?.remoteJid || "", profileId);
   const rawChatJid = key.remoteJid || normalizeChatJid(msg?.chatId || msg?.jid || "");
   const chatJid = canonicalizeChatJidForProfile(profileId, rawChatJid);
   if (!chatJid) return null;
@@ -2913,6 +3121,7 @@ function upsertMessagesForProfile(profileId, messages) {
     changed += enforceWaChatStorageLimitsForProfile(profileId);
     scheduleWaChatSync(profileId, "messages");
     schedulePersistWaChatCache();
+    scheduleChatAliasReconcileForProfile(profileId, 120);
   }
   return changed;
 }
@@ -2924,7 +3133,7 @@ function applyMessageUpdatesForProfile(profileId, updates) {
 
   for (const patch of updates) {
     const src = patch && typeof patch === "object" ? patch : {};
-    const key = normalizeMessageKey(src.key, src?.key?.remoteJid || "");
+    const key = normalizeMessageKey(src.key, src?.key?.remoteJid || "", profileId);
     if (!key.remoteJid || !key.id) continue;
     const chatJid = canonicalizeChatJidForProfile(profileId, key.remoteJid);
     if (!chatJid) continue;
@@ -3288,7 +3497,7 @@ async function resetChatHistoryForProfile(profileId, chatJid, options) {
       }
       if (!cursor) break;
 
-      const key = normalizeMessageKey(cursor.key || {}, jid);
+      const key = normalizeMessageKey(cursor.key || {}, jid, profileId);
       const timestampMs = Number(cursor.timestampMs || 0) || 0;
       if (!key.id || !key.remoteJid || timestampMs <= 0) break;
 
@@ -3340,7 +3549,7 @@ async function resetChatHistoryForProfile(profileId, chatJid, options) {
 function findMessageRecordForProfile(profileId, chatJid, key) {
   const jid = canonicalizeChatJidForProfile(profileId, chatJid);
   if (!jid) return null;
-  const normalizedKey = normalizeMessageKey(key, jid);
+  const normalizedKey = normalizeMessageKey(key, jid, profileId);
   normalizedKey.remoteJid = canonicalizeChatJidForProfile(profileId, normalizedKey.remoteJid || jid) || jid;
   if (!normalizedKey.id) return null;
   const state = ensureWaChatStateForProfile(profileId);
@@ -4355,6 +4564,24 @@ async function connectWA(method, attemptId) {
           scheduleWaChatSync(activeProfileId, "contacts");
         }
       });
+      sock.ev.on("lid-mapping.update", (evt) => {
+        const src = evt && typeof evt === "object" ? evt : {};
+        const changed = rememberLidPnMappingForProfile(activeProfileId, src.lid, src.pn);
+        if (changed > 0) {
+          const pn = normalizePhoneNumberJid(src.pn || "");
+          const lid = normalizeLidJid(src.lid || "");
+          if (pn && lid) {
+            upsertContactsForProfile(activeProfileId, [
+              {
+                id: pn,
+                jid: pn,
+                lid
+              }
+            ]);
+          }
+          scheduleChatAliasReconcileForProfile(activeProfileId, 80);
+        }
+      });
       sock.ev.on("chats.upsert", (chats) => {
         const rows = Array.isArray(chats) ? chats : [];
         upsertChatsAsContactsForProfile(activeProfileId, rows);
@@ -4841,7 +5068,7 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
       const fallbackRows = seedChats.filter((row) => {
         const title = cleanString(row?.title || "");
         if (!title) return true;
-        if (title.endsWith("@lid")) return true;
+        if (isLidJid(title)) return true;
         return isLikelyFallbackIdentityLabel(title);
       });
       if (seedChats.length > 0 && fallbackRows.length >= Math.ceil(seedChats.length * 0.45)) {
