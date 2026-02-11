@@ -4052,24 +4052,110 @@ function shouldRetrySendWithAlternateTarget(error) {
   return false;
 }
 
-async function sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions = {}) {
-  const candidates = Array.isArray(targetCandidates)
-    ? targetCandidates.map((x) => normalizeChatJid(x)).filter(Boolean)
-    : [];
-  if (candidates.length === 0) throw new Error("Invalid chat");
+function shouldExpandSendTargetsAfterFailure(error) {
+  const msg = String(error?.message || error || "").toLowerCase();
+  if (!msg) return true;
+  if (msg.includes("connection closed")) return false;
+  if (msg.includes("timed out")) return false;
+  if (msg.includes("stream erro")) return false;
+  if (msg.includes("not connected")) return false;
+  return true;
+}
 
-  let lastError = null;
-  for (let i = 0; i < candidates.length; i++) {
-    const jid = candidates[i];
-    try {
-      const sentMessage = await sock.sendMessage(jid, messagePayload, sendOptions);
-      return { sentMessage, targetJid: jid };
-    } catch (error) {
-      lastError = error;
-      const canRetry = i < candidates.length - 1 && shouldRetrySendWithAlternateTarget(error);
-      if (!canRetry) break;
+async function expandSendTargetCandidatesWithSignalMappings(targetCandidates) {
+  const out = [];
+  const seen = new Set();
+  const push = (candidate) => {
+    const normalized = normalizeChatJid(candidate);
+    if (!normalized) return;
+    if (seen.has(normalized)) return;
+    seen.add(normalized);
+    out.push(normalized);
+  };
+
+  for (const candidate of Array.isArray(targetCandidates) ? targetCandidates : []) {
+    push(candidate);
+  }
+
+  const lidMapping = sock?.signalRepository?.lidMapping;
+  const canMapPnToLid = lidMapping && typeof lidMapping.getLIDForPN === "function";
+  const canMapLidToPn = lidMapping && typeof lidMapping.getPNForLID === "function";
+
+  for (const candidate of [...out]) {
+    if (isPnJid(candidate)) {
+      if (canMapPnToLid) {
+        try {
+          const mappedLid = await lidMapping.getLIDForPN(candidate);
+          push(mappedLid);
+        } catch {
+          // ignore and continue best-effort
+        }
+      }
+
+      const user = jidUserPart(candidate);
+      if (/^\d{8,15}$/.test(user)) {
+        push(`${user}@lid`);
+      }
+      continue;
+    }
+
+    if (!isLidJid(candidate)) continue;
+
+    if (canMapLidToPn) {
+      try {
+        const mappedPn = await lidMapping.getPNForLID(candidate);
+        push(mappedPn);
+      } catch {
+        // ignore and continue best-effort
+      }
+    }
+
+    const user = jidUserPart(candidate);
+    if (/^\d{8,15}$/.test(user)) {
+      push(`${user}@s.whatsapp.net`);
     }
   }
+
+  return out;
+}
+
+async function sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions = {}) {
+  const baseCandidates = Array.isArray(targetCandidates)
+    ? targetCandidates.map((x) => normalizeChatJid(x)).filter(Boolean)
+    : [];
+  if (baseCandidates.length === 0) throw new Error("Invalid chat");
+
+  let lastError = null;
+  const attempted = new Set();
+
+  const trySendList = async (candidates) => {
+    for (let i = 0; i < candidates.length; i++) {
+      const jid = normalizeChatJid(candidates[i]);
+      if (!jid || attempted.has(jid)) continue;
+      attempted.add(jid);
+
+      try {
+        const sentMessage = await sock.sendMessage(jid, messagePayload, sendOptions);
+        return { sentMessage, targetJid: jid };
+      } catch (error) {
+        lastError = error;
+        const canRetry = i < candidates.length - 1 && shouldRetrySendWithAlternateTarget(error);
+        if (!canRetry) break;
+      }
+    }
+    return null;
+  };
+
+  const firstTry = await trySendList(baseCandidates);
+  if (firstTry) return firstTry;
+
+  if (!shouldExpandSendTargetsAfterFailure(lastError)) {
+    throw lastError || new Error("Message send failed");
+  }
+
+  const expandedCandidates = await expandSendTargetCandidatesWithSignalMappings(baseCandidates);
+  const secondTry = await trySendList(expandedCandidates);
+  if (secondTry) return secondTry;
 
   throw lastError || new Error("Message send failed");
 }
