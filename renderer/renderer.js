@@ -807,6 +807,22 @@ function setWaComposerSending(sending) {
   renderWaAttachmentRow();
 }
 
+function focusWaComposerInput() {
+  const input = el("waComposerInput");
+  if (!input || input.disabled) return;
+  try {
+    input.focus({ preventScroll: true });
+  } catch {
+    input.focus();
+  }
+  const len = String(input.value || "").length;
+  try {
+    input.setSelectionRange(len, len);
+  } catch {
+    // Ignore browsers/input types that do not support selection ranges.
+  }
+}
+
 function renderWaChatList() {
   const wrap = el("waChatList");
   if (!wrap) return;
@@ -1213,6 +1229,7 @@ async function refreshWaChats(options = {}) {
       includePhotos: opts.includePhotos !== false,
       ensureHistory: opts.ensureHistory === true,
       forceHistory: opts.forceHistory === true,
+      forceNameSync: opts.forceNameSync === true,
       maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 35,
       minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
         ? Number(opts.minMinutesBetweenPhotoChecks)
@@ -1255,7 +1272,8 @@ async function refreshWaChats(options = {}) {
   }
 }
 
-function scheduleWaSyncRefresh() {
+function scheduleWaSyncRefresh(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
   if (state.waSyncTimer) clearTimeout(state.waSyncTimer);
   state.waSyncTimer = setTimeout(() => {
     state.waSyncTimer = null;
@@ -1264,7 +1282,11 @@ function scheduleWaSyncRefresh() {
       refreshMessages: true,
       markRead: shouldMarkRead,
       showLoadingMessages: false,
-      includePhotos: false
+      includePhotos: opts.includePhotos === true,
+      maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 24,
+      minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
+        ? Number(opts.minMinutesBetweenPhotoChecks)
+        : 90
     }).catch(() => {});
   }, 160);
 }
@@ -1341,6 +1363,7 @@ async function sendWaComposerMessage() {
     await refreshWaChats({ refreshMessages: false, markRead: false });
   } finally {
     setWaComposerSending(false);
+    focusWaComposerInput();
   }
 }
 
@@ -2410,6 +2433,7 @@ function bindEvents() {
         markRead: true,
         ensureHistory: true,
         forceHistory: true,
+        forceNameSync: true,
         includePhotos: true
       });
     } catch (e) {
@@ -2895,6 +2919,15 @@ function bindEvents() {
     if (!prevConnected && connected && state.waForceHistoryRefreshOnConnected) {
       state.waForceHistoryRefreshOnConnected = false;
       refreshWaChatsWithHistoryWarmup().catch(() => {});
+      return;
+    }
+
+    if (!prevConnected && connected) {
+      scheduleWaSyncRefresh({
+        includePhotos: true,
+        maxPhotoFetch: 24,
+        minMinutesBetweenPhotoChecks: 45
+      });
       return;
     }
 

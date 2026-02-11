@@ -39,19 +39,30 @@ let lastFetchedWaVersion = null;
 let lastFetchedWaVersionAt = 0;
 const contactNameSyncByProfile = new Map();
 const lastContactNameSyncAtByProfile = new Map();
+const appStateResyncInFlightByProfile = new Map();
+const appStateResyncBackoffUntilByProfile = new Map();
+const contactPhotoEnrichInFlightByProfile = new Map();
+const contactPhotoBackoffUntilByProfile = new Map();
+const contactLookupCacheByProfile = new Map();
+const startupPhotoBackfillDoneByProfile = new Set();
 
 // Used to ignore late events from old sockets
 let handshakeAttemptId = 0;
 let startupReconnectScheduled = false;
-const WA_CHAT_MAX_MESSAGES_PER_CHAT = 320;
+const WA_CHAT_MAX_MESSAGES_PER_CHAT = 180;
 const WA_HISTORY_LOOKBACK_DAYS = 7;
+const WA_CHAT_MAX_STORED_CHATS = 360;
 const WA_CHAT_STORE_KEY = "waChatByProfile";
 const waChatByProfileMem = {};
 const waChatSyncTimers = new Map();
 const waHistoryWarmupInFlightByProfile = new Map();
+const waAliasReconcileTimers = new Map();
 const waImageAutoSaveInFlight = new Set();
 const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recording"]);
 const WA_ALLOWED_INCOMING_CHAT_PRESENCE = new Set(["composing", "recording", "paused", "available", "unavailable"]);
+const WA_CHAT_PERSIST_DEBOUNCE_MS = 2200;
+const WA_PERSISTED_THUMB_MAX_CHARS = 18 * 1024;
+const WA_ENABLE_AUTO_IMAGE_PRESAVE = false;
 let waChatPersistTimer = null;
 
 const store = new Store();
@@ -520,6 +531,8 @@ function clearPersistedContactsCache() {
     store.set("waContactsByProfile", {});
   }
   waContactsByProfileMem = {};
+  contactLookupCacheByProfile.clear();
+  startupPhotoBackfillDoneByProfile.clear();
 }
 
 function normalizeContactsCacheRoot(raw) {
@@ -575,6 +588,7 @@ function loadPersistedContactsCache() {
   } catch (e) {
     waContactsByProfileMem = {};
   }
+  contactLookupCacheByProfile.clear();
 }
 
 function clearContactsCacheForProfile(profileId) {
@@ -583,6 +597,15 @@ function clearContactsCacheForProfile(profileId) {
   if (!Object.prototype.hasOwnProperty.call(waContactsByProfileMem, profileId)) return;
   delete waContactsByProfileMem[profileId];
   persistContactsCache();
+  contactLookupCacheByProfile.delete(profileId);
+  startupPhotoBackfillDoneByProfile.delete(profileId);
+}
+
+function compactThumbnailDataUrl(value) {
+  const src = cleanString(value || "");
+  if (!src) return "";
+  if (src.length <= WA_PERSISTED_THUMB_MAX_CHARS) return src;
+  return "";
 }
 
 function normalizePersistedChatSummary(raw, fallbackJid) {
@@ -609,7 +632,7 @@ function normalizePersistedChatMedia(raw) {
   const mimeType = cleanString(src.mimeType || "");
   const fileName = cleanString(src.fileName || "");
   const fileLength = Math.max(0, Number(src.fileLength || 0) || 0);
-  const thumbnailDataUrl = cleanString(src.thumbnailDataUrl || "");
+  const thumbnailDataUrl = compactThumbnailDataUrl(cleanString(src.thumbnailDataUrl || ""));
   const localPath = cleanString(src.localPath || "");
   if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl && !localPath) return null;
   return {
@@ -791,7 +814,7 @@ function schedulePersistWaChatCache() {
   waChatPersistTimer = setTimeout(() => {
     waChatPersistTimer = null;
     persistWaChatCache();
-  }, 260);
+  }, WA_CHAT_PERSIST_DEBOUNCE_MS);
 }
 
 function loadPersistedWaChatCache() {
@@ -801,6 +824,7 @@ function loadPersistedWaChatCache() {
     for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
     for (const [profileId, profileState] of Object.entries(normalized)) {
       waChatByProfileMem[profileId] = profileState;
+      enforceWaChatStorageLimitsForProfile(profileId);
     }
   } catch (e) {
     for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
@@ -978,6 +1002,14 @@ function normalizeMsisdn(input) {
   s = s.replace(/\D/g, "");
   if (!s || s.length < 8) throw new Error("Invalid phone number");
   return s;
+}
+
+function normalizeMsisdnSafe(input) {
+  try {
+    return normalizeMsisdn(input);
+  } catch (e) {
+    return "";
+  }
 }
 
 function renderTemplate(body, vars) {
@@ -1269,13 +1301,37 @@ function sanitizeContactName(v) {
   return String(v || "").trim();
 }
 
+function isLikelyFallbackIdentityLabel(value) {
+  const s = sanitizeContactName(value).toLowerCase();
+  if (!s) return false;
+  if (/^\d{6,}$/.test(s)) return true;
+  if (/^\d+@lid$/.test(s)) return true;
+  if (/^\d+@s\.whatsapp\.net$/.test(s)) return true;
+  if (/^\d+@c\.us$/.test(s)) return true;
+  if (s === "unknown" || s === "unknown chat" || s === "someone") return true;
+  const compact = s.replace(/[\s()+-]/g, "");
+  return /^\d{6,}$/.test(compact);
+}
+
+function choosePreferredIdentityLabel(existingValue, incomingValue) {
+  const existing = sanitizeContactName(existingValue);
+  const incoming = sanitizeContactName(incomingValue);
+  if (!incoming) return existing;
+  if (!existing) return incoming;
+  const existingFallback = isLikelyFallbackIdentityLabel(existing);
+  const incomingFallback = isLikelyFallbackIdentityLabel(incoming);
+  if (existingFallback && !incomingFallback) return incoming;
+  if (!existingFallback && incomingFallback) return existing;
+  if (!existingFallback && !incomingFallback && incoming.length > existing.length + 2) return incoming;
+  return existing;
+}
+
 function getContactDisplayName(c) {
-  return (
-    sanitizeContactName(c?.name) ||
-    sanitizeContactName(c?.notify) ||
-    sanitizeContactName(c?.verifiedName) ||
-    ""
-  );
+  let best = "";
+  best = choosePreferredIdentityLabel(best, c?.name);
+  best = choosePreferredIdentityLabel(best, c?.notify);
+  best = choosePreferredIdentityLabel(best, c?.verifiedName);
+  return best;
 }
 
 function firstNonEmptyString(values) {
@@ -1290,6 +1346,11 @@ function msisdnFromContactAddress(value) {
   const norm = normalizeJidForContact(value);
   const fromJid = msisdnFromUserJid(norm);
   if (fromJid) return fromJid;
+  if (norm.endsWith("@lid")) {
+    const at = norm.indexOf("@");
+    const user = at > 0 ? norm.slice(0, at) : "";
+    if (/^\d{6,}$/.test(user)) return user;
+  }
   if (/^\d{6,}$/.test(norm)) return norm;
   return "";
 }
@@ -1312,15 +1373,34 @@ function findContactByJidForProfile(profileId, jidOrAddress) {
   }
 
   const targetLower = String(target).toLowerCase();
+  let cache = contactLookupCacheByProfile.get(profileId);
+  if (!cache) {
+    cache = new Map();
+    contactLookupCacheByProfile.set(profileId, cache);
+  }
+  if (cache.has(targetLower)) {
+    const cachedMsisdn = cleanString(cache.get(targetLower));
+    if (!cachedMsisdn) return null;
+    const cached = byPhone[cachedMsisdn];
+    return cached && typeof cached === "object" ? cached : null;
+  }
+
   for (const contactRaw of Object.values(byPhone)) {
     const contact = contactRaw && typeof contactRaw === "object" ? contactRaw : null;
     if (!contact) continue;
     const jid = normalizeJidForContact(contact.jid || "");
-    if (jid && String(jid).toLowerCase() === targetLower) return contact;
+    if (jid && String(jid).toLowerCase() === targetLower) {
+      cache.set(targetLower, cleanString(contact.msisdn || ""));
+      return contact;
+    }
     const lid = normalizeJidForContact(contact.lid || "");
-    if (lid && String(lid).toLowerCase() === targetLower) return contact;
+    if (lid && String(lid).toLowerCase() === targetLower) {
+      cache.set(targetLower, cleanString(contact.msisdn || ""));
+      return contact;
+    }
   }
 
+  cache.set(targetLower, "");
   return null;
 }
 
@@ -1342,17 +1422,19 @@ function upsertContactsForProfile(profileId, contacts) {
     const secondaryLid = secondaryJid.endsWith("@lid") ? secondaryJid : "";
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
-    const nameCandidate = firstNonEmptyString([
+    const incomingName = firstNonEmptyString([
       c?.name,
       c?.fullName,
       c?.firstName,
       c?.shortName,
       c?.short,
-      c?.username,
-      existing?.name
+      c?.username
     ]);
-    const notify = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname, existing?.notify]);
-    const verifiedName = firstNonEmptyString([c?.verifiedName, c?.vname, existing?.verifiedName]);
+    const nameCandidate = choosePreferredIdentityLabel(existing?.name, incomingName);
+    const incomingNotify = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname]);
+    const notify = choosePreferredIdentityLabel(existing?.notify, incomingNotify);
+    const incomingVerifiedName = firstNonEmptyString([c?.verifiedName, c?.vname]);
+    const verifiedName = choosePreferredIdentityLabel(existing?.verifiedName, incomingVerifiedName);
     const lid = firstNonEmptyString([c?.lid, c?.lidJid, secondaryLid, existing?.lid]);
     const imgUrl =
       c?.imgUrl === null || c?.imgUrl === undefined
@@ -1394,6 +1476,9 @@ function upsertContactsForProfile(profileId, contacts) {
   if (changed > 0) {
     root[profileId] = byPhone;
     persistContactsCache();
+    contactLookupCacheByProfile.delete(profileId);
+    promoteChatNamesFromContactsForProfile(profileId);
+    scheduleChatAliasReconcileForProfile(profileId);
   }
 
   return changed;
@@ -1476,6 +1561,120 @@ function contactHasAnyName(contact) {
   return !!getContactDisplayName(contact);
 }
 
+function rememberRecipientNameForProfile(profileId, recipient, rawName) {
+  const key = cleanString(profileId);
+  if (!key) return 0;
+
+  const name = sanitizeContactName(rawName);
+  if (!name || isLikelyFallbackIdentityLabel(name)) return 0;
+
+  const normalizedRecipient = cleanString(recipient);
+  const recipientJid = normalizeJidForContact(normalizedRecipient);
+  const msisdn = msisdnFromContactAddress(recipientJid || normalizedRecipient) || normalizeMsisdnSafe(normalizedRecipient);
+  if (!msisdn) return 0;
+
+  const jid =
+    (recipientJid && recipientJid.includes("@") ? recipientJid : "") ||
+    `${msisdn}@s.whatsapp.net`;
+
+  return upsertContactsForProfile(key, [
+    {
+      id: jid,
+      jid,
+      name,
+      notify: name
+    }
+  ]);
+}
+
+function promoteChatNamesFromContactsForProfile(profileId) {
+  if (!profileId) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  let changed = 0;
+
+  for (const [chatJid, chatRaw] of Object.entries(state.chatsByJid || {})) {
+    const chat = chatRaw && typeof chatRaw === "object" ? chatRaw : {};
+    const contact = getContactByChatJid(profileId, chatJid);
+    const contactName = getContactDisplayName(contact);
+    const nextName = choosePreferredIdentityLabel(chat.name, contactName);
+    if (!nextName || nextName === String(chat.name || "")) continue;
+    state.chatsByJid[chatJid] = {
+      ...chat,
+      name: nextName,
+      updatedAt: nowIsoShort()
+    };
+    changed++;
+  }
+
+  if (changed > 0) {
+    schedulePersistWaChatCache();
+  }
+  return changed;
+}
+
+function isKnownAppStatePatchConflictError(err) {
+  const msg = String(err?.message || err || "");
+  return /tried remove, but no previous op/i.test(msg);
+}
+
+async function resyncAppStateForProfile(profileId, collections, isInitialSync, source) {
+  const key = cleanString(profileId);
+  if (!key || !isConnected || !sock || typeof sock.resyncAppState !== "function") {
+    return { ok: false, skipped: true, reason: "not_available", profileId: key };
+  }
+
+  const now = Date.now();
+  const blockedUntil = Number(appStateResyncBackoffUntilByProfile.get(key) || 0);
+  if (blockedUntil > now) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: "backoff",
+      profileId: key,
+      retryAt: blockedUntil,
+      retryAfterMs: blockedUntil - now
+    };
+  }
+
+  const inFlight = appStateResyncInFlightByProfile.get(key);
+  if (inFlight) return await inFlight;
+
+  const categories = Array.isArray(collections)
+    ? collections.map((x) => cleanString(x)).filter(Boolean)
+    : [];
+  if (categories.length === 0) {
+    return { ok: false, skipped: true, reason: "empty_categories", profileId: key };
+  }
+
+  const task = (async () => {
+    try {
+      await sock.resyncAppState(categories, isInitialSync === true);
+      appStateResyncBackoffUntilByProfile.delete(key);
+      return { ok: true, synced: true, profileId: key };
+    } catch (e) {
+      const conflict = isKnownAppStatePatchConflictError(e);
+      const backoffMs = conflict ? 90 * 1000 : 20 * 1000;
+      appStateResyncBackoffUntilByProfile.set(key, Date.now() + backoffMs);
+      log.warn(
+        { err: e, profileId: key, source: cleanString(source), conflict, backoffMs },
+        "App-state resync failed; applying cooldown"
+      );
+      return {
+        ok: false,
+        profileId: key,
+        conflict,
+        error: String(e?.message || e),
+        backoffMs
+      };
+    } finally {
+      appStateResyncInFlightByProfile.delete(key);
+    }
+  })();
+
+  appStateResyncInFlightByProfile.set(key, task);
+  return await task;
+}
+
 async function syncContactNamesForProfile(profileId, options) {
   const opts = options && typeof options === "object" ? options : {};
   const force = !!opts.force;
@@ -1499,10 +1698,13 @@ async function syncContactNamesForProfile(profileId, options) {
 
   const syncTask = (async () => {
     try {
-      await sock.resyncAppState(
+      const resync = await resyncAppStateForProfile(
+        profileId,
         ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
-        isInitialSync
+        isInitialSync,
+        "contact_name_sync"
       );
+      if (!resync.ok) return { ...resync, synced: false };
       lastContactNameSyncAtByProfile.set(profileId, Date.now());
       return { ok: true, synced: true, profileId };
     } catch (e) {
@@ -1517,14 +1719,55 @@ async function syncContactNamesForProfile(profileId, options) {
   return await syncTask;
 }
 
-function shouldRefreshContactPhoto(contact, minMinutesBetweenChecks) {
+function resolveContactPhotoFetchJid(contact) {
+  if (!contact || typeof contact !== "object") return "";
+  const jid = normalizeJidForContact(contact.jid || "");
+  if (jid && !jid.endsWith("@g.us") && !jid.endsWith("@broadcast")) {
+    return jid;
+  }
+  const msisdn = normalizeMsisdnSafe(contact.msisdn || "");
+  return msisdn ? `${msisdn}@s.whatsapp.net` : "";
+}
+
+function shouldRefreshContactPhoto(contact, minMinutesBetweenChecks, forceMissing) {
   if (!contact || typeof contact !== "object") return false;
   if (contact.imgUrl) return false;
-  if (!contact.jid || !String(contact.jid).endsWith("@s.whatsapp.net")) return false;
+  const fetchJid = resolveContactPhotoFetchJid(contact);
+  if (!fetchJid) return false;
+  if (forceMissing === true) return true;
   const mins = Math.max(1, Number(minMinutesBetweenChecks || 180));
   const last = Date.parse(String(contact.photoCheckedAt || ""));
   if (!Number.isFinite(last)) return true;
   return Date.now() - last >= mins * 60 * 1000;
+}
+
+function extractErrorStatusCode(err) {
+  const direct = Number(err?.statusCode || err?.status || err?.code || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const output = Number(err?.output?.statusCode || err?.output?.status || 0);
+  if (Number.isFinite(output) && output > 0) return output;
+  const data = Number(err?.data?.statusCode || err?.data?.status || 0);
+  if (Number.isFinite(data) && data > 0) return data;
+  return 0;
+}
+
+function isRateLimitPhotoFetchError(err) {
+  const status = extractErrorStatusCode(err);
+  if (status === 429) return true;
+  const msg = String(err?.message || err || "").toLowerCase();
+  return msg.includes("rate") || msg.includes("too many");
+}
+
+function isPermanentPhotoFetchError(err) {
+  const status = extractErrorStatusCode(err);
+  if ([401, 403, 404].includes(status)) return true;
+  const msg = String(err?.message || err || "").toLowerCase();
+  return (
+    msg.includes("not-authorized") ||
+    msg.includes("not authorized") ||
+    msg.includes("privacy") ||
+    msg.includes("forbidden")
+  );
 }
 
 async function enrichContactPhotosForProfile(profileId, options) {
@@ -1532,67 +1775,129 @@ async function enrichContactPhotosForProfile(profileId, options) {
   if (!isConnected || !sock) return getContactsForProfile(profileId);
   if (!profileId) return [];
 
+  const existingTask = contactPhotoEnrichInFlightByProfile.get(profileId);
+  if (existingTask) return await existingTask;
+
+  const now = Date.now();
+  const blockedUntil = Number(contactPhotoBackoffUntilByProfile.get(profileId) || 0);
+  if (blockedUntil > now) return getContactsForProfile(profileId);
+
   const maxPhotoFetchRaw = Number(opts.maxPhotoFetch);
-  const maxPhotoFetch = Number.isFinite(maxPhotoFetchRaw) ? Math.max(1, Math.min(200, maxPhotoFetchRaw)) : 40;
+  const maxPhotoFetch = Number.isFinite(maxPhotoFetchRaw) ? Math.max(1, Math.min(200, maxPhotoFetchRaw)) : 24;
   const minMinutesRaw = Number(opts.minMinutesBetweenPhotoChecks);
   const minMinutesBetweenPhotoChecks = Number.isFinite(minMinutesRaw)
     ? Math.max(1, Math.min(1440, minMinutesRaw))
-    : 180;
+    : 90;
+  const forceMissing = opts.forceMissing === true;
   const concurrencyRaw = Number(opts.photoFetchConcurrency);
-  const photoFetchConcurrency = Number.isFinite(concurrencyRaw) ? Math.max(1, Math.min(8, concurrencyRaw)) : 3;
+  const photoFetchConcurrency = Number.isFinite(concurrencyRaw) ? Math.max(1, Math.min(6, concurrencyRaw)) : 2;
+  const fetchDelayRaw = Number(opts.photoFetchDelayMs);
+  const photoFetchDelayMs = Number.isFinite(fetchDelayRaw) ? Math.max(0, Math.min(600, fetchDelayRaw)) : 120;
+  const backoffMsRaw = Number(opts.photoRateLimitBackoffMs);
+  const photoRateLimitBackoffMs = Number.isFinite(backoffMsRaw)
+    ? Math.max(30 * 1000, Math.min(15 * 60 * 1000, backoffMsRaw))
+    : 3 * 60 * 1000;
 
-  const root = getContactsStoreObj();
-  const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
-  const contacts = Object.values(byPhone).filter((x) => x && typeof x === "object");
-  const targets = contacts
-    .filter((c) => shouldRefreshContactPhoto(c, minMinutesBetweenPhotoChecks))
-    .slice(0, maxPhotoFetch);
+  const task = (async () => {
+    const root = getContactsStoreObj();
+    const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
+    const contacts = Object.values(byPhone).filter((x) => x && typeof x === "object");
+    const preferredSet = new Set(
+      (Array.isArray(opts.preferredMsisdns) ? opts.preferredMsisdns : [])
+        .map((x) => normalizeMsisdnSafe(x))
+        .filter(Boolean)
+    );
+    const targets = contacts
+      .map((contact) => {
+        const msisdn = cleanString(contact?.msisdn || "");
+        if (!msisdn) return null;
+        const fetchJid = resolveContactPhotoFetchJid(contact);
+        if (!fetchJid) return null;
+        return { contact, fetchJid, msisdn };
+      })
+      .filter((entry) => {
+        if (!entry || !entry.contact) return false;
+        return shouldRefreshContactPhoto(entry.contact, minMinutesBetweenPhotoChecks, forceMissing);
+      })
+      .sort((a, b) => {
+        const aPref = preferredSet.has(cleanString(a?.msisdn || "")) ? 1 : 0;
+        const bPref = preferredSet.has(cleanString(b?.msisdn || "")) ? 1 : 0;
+        if (aPref !== bPref) return bPref - aPref;
+        return String(a?.msisdn || "").localeCompare(String(b?.msisdn || ""));
+      })
+      .slice(0, maxPhotoFetch);
 
-  if (targets.length === 0) return getContactsForProfile(profileId);
+    if (targets.length === 0) return getContactsForProfile(profileId);
 
-  let index = 0;
-  let changed = 0;
-  async function worker() {
-    while (index < targets.length) {
-      const currIndex = index++;
-      const item = targets[currIndex];
-      const now = nowIsoShort();
+    let index = 0;
+    let changed = 0;
+    let rateLimited = false;
+    async function worker() {
+      while (index < targets.length) {
+        if (rateLimited) break;
+        const currIndex = index++;
+        const item = targets[currIndex];
+        if (!item || !item.contact || !item.fetchJid) continue;
+        const contact = item.contact;
+        const nowText = nowIsoShort();
 
-      try {
-        const photo = await sock.profilePictureUrl(item.jid, "image");
-        const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : item;
-        const next = {
-          ...prev,
-          imgUrl: photo ? String(photo) : null,
-          photoCheckedAt: now,
-          updatedAt: now
-        };
+        try {
+          const photo = await sock.profilePictureUrl(item.fetchJid, "image");
+          const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : contact;
+          const next = {
+            ...prev,
+            imgUrl: photo ? String(photo) : null,
+            photoCheckedAt: nowText,
+            updatedAt: nowText
+          };
 
-        const same =
-          String(prev.imgUrl || "") === String(next.imgUrl || "") &&
-          String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
-        if (!same) {
-          byPhone[item.msisdn] = next;
-          changed++;
+          const same =
+            String(prev.imgUrl || "") === String(next.imgUrl || "") &&
+            String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
+          if (!same) {
+            byPhone[item.msisdn] = next;
+            changed++;
+          }
+          contactPhotoBackoffUntilByProfile.delete(profileId);
+        } catch (e) {
+          if (isRateLimitPhotoFetchError(e)) {
+            contactPhotoBackoffUntilByProfile.set(profileId, Date.now() + photoRateLimitBackoffMs);
+            rateLimited = true;
+            break;
+          }
+          if (isPermanentPhotoFetchError(e)) {
+            const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : contact;
+            const next = { ...prev, photoCheckedAt: nowText, updatedAt: nowText };
+            const same = String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
+            if (!same) {
+              byPhone[item.msisdn] = next;
+              changed++;
+            }
+          }
         }
-      } catch (e) {
-        const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : item;
-        byPhone[item.msisdn] = { ...prev, photoCheckedAt: now };
-        changed++;
+
+        if (photoFetchDelayMs > 0) {
+          await new Promise((r) => setTimeout(r, photoFetchDelayMs));
+        }
       }
     }
-  }
 
-  const workers = [];
-  for (let i = 0; i < photoFetchConcurrency; i++) workers.push(worker());
-  await Promise.all(workers);
+    const workers = [];
+    for (let i = 0; i < photoFetchConcurrency; i++) workers.push(worker());
+    await Promise.all(workers);
 
-  if (changed > 0) {
-    root[profileId] = byPhone;
-    persistContactsCache();
-  }
+    if (changed > 0) {
+      root[profileId] = byPhone;
+      persistContactsCache();
+    }
 
-  return getContactsForProfile(profileId);
+    return getContactsForProfile(profileId);
+  })().finally(() => {
+    contactPhotoEnrichInFlightByProfile.delete(profileId);
+  });
+
+  contactPhotoEnrichInFlightByProfile.set(profileId, task);
+  return await task;
 }
 
 /* --------------------------- WhatsApp Chat Store (recent chats + messages) ---------------------------- */
@@ -1623,6 +1928,51 @@ function ensureWaChatStateForProfile(profileId) {
     root[profileId].messagesByChat = {};
   }
   return root[profileId];
+}
+
+function enforceWaChatStorageLimitsForProfile(profileId) {
+  if (!profileId) return 0;
+  const state = ensureWaChatStateForProfile(profileId);
+  const rows = Object.values(state.chatsByJid || {})
+    .filter((x) => x && typeof x === "object" && normalizeChatJid(x.jid || ""))
+    .map((chat) => {
+      const jid = normalizeChatJid(chat.jid || "");
+      const ts = Number(chat.lastMessageTimestampMs || 0) || 0;
+      const pinned = chat.pinned === true;
+      const unread = Math.max(0, Number(chat.unreadCount || 0) || 0);
+      return { jid, ts, pinned, unread };
+    });
+
+  if (rows.length <= WA_CHAT_MAX_STORED_CHATS) return 0;
+
+  rows.sort((a, b) => {
+    const ap = a.pinned ? 1 : 0;
+    const bp = b.pinned ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    const au = a.unread > 0 ? 1 : 0;
+    const bu = b.unread > 0 ? 1 : 0;
+    if (au !== bu) return bu - au;
+    if (a.ts !== b.ts) return b.ts - a.ts;
+    return a.jid.localeCompare(b.jid);
+  });
+
+  const keep = new Set(rows.slice(0, WA_CHAT_MAX_STORED_CHATS).map((x) => x.jid));
+  let changed = 0;
+
+  for (const jid of Object.keys(state.chatsByJid || {})) {
+    const normalized = normalizeChatJid(jid);
+    if (normalized && keep.has(normalized)) continue;
+    delete state.chatsByJid[jid];
+    changed++;
+  }
+  for (const jid of Object.keys(state.messagesByChat || {})) {
+    const normalized = normalizeChatJid(jid);
+    if (normalized && keep.has(normalized)) continue;
+    delete state.messagesByChat[jid];
+    changed++;
+  }
+
+  return changed;
 }
 
 function scheduleWaChatSync(profileId, reason) {
@@ -1737,6 +2087,229 @@ function normalizeSendTargetJid(input) {
   }
 }
 
+function normalizeStoredMessageForChatJid(rawMessage, targetChatJid) {
+  const targetJid = normalizeChatJid(targetChatJid);
+  if (!targetJid) return null;
+
+  const src = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
+  const key = normalizeMessageKey(src.key || {}, src.chatJid || targetJid || "");
+  if (!key.id) return null;
+
+  const fromMe = src.fromMe === true || key.fromMe === true;
+  const participant = cleanString(key.participant || "");
+  const media = normalizePersistedChatMedia(src.media);
+  const text = String(src.text || "");
+  const preview = String(src.preview || text || "");
+  const type = cleanString(src.type || "unknown");
+  const timestampMs = normalizeEpochMs(src.timestampMs || src?.rawMessage?.messageTimestamp || Date.now(), Date.now());
+
+  return {
+    key: {
+      remoteJid: targetJid,
+      id: key.id,
+      fromMe,
+      participant
+    },
+    hash: messageKeyHash({
+      remoteJid: targetJid,
+      id: key.id,
+      fromMe,
+      participant
+    }),
+    chatJid: targetJid,
+    fromMe,
+    pushName: cleanString(src.pushName || ""),
+    timestampMs: Number(timestampMs || Date.now()),
+    type,
+    text,
+    preview,
+    hasMedia: src.hasMedia === true || !!media,
+    media,
+    status: Math.max(0, Number(src.status || 0) || 0),
+    rawMessage: src.rawMessage && typeof src.rawMessage === "object" ? src.rawMessage : null
+  };
+}
+
+function mergeStoredMessageListsForChat(targetChatJid, lists) {
+  const targetJid = normalizeChatJid(targetChatJid);
+  if (!targetJid) return [];
+
+  const combined = [];
+  for (const listRaw of Array.isArray(lists) ? lists : []) {
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    for (const raw of list) {
+      const normalized = normalizeStoredMessageForChatJid(raw, targetJid);
+      if (!normalized) continue;
+      combined.push(normalized);
+    }
+  }
+  if (combined.length === 0) return [];
+
+  combined.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
+  const byHash = new Map();
+
+  for (const msg of combined) {
+    const prev = byHash.get(msg.hash);
+    if (!prev) {
+      byHash.set(msg.hash, msg);
+      continue;
+    }
+
+    const prevMedia = prev?.media && typeof prev.media === "object" ? prev.media : null;
+    const nextMedia = msg?.media && typeof msg.media === "object" ? msg.media : null;
+    const mergedMedia =
+      prevMedia || nextMedia
+        ? {
+            ...(prevMedia || {}),
+            ...(nextMedia || {}),
+            localPath: cleanString(nextMedia?.localPath || prevMedia?.localPath || ""),
+            thumbnailDataUrl: compactThumbnailDataUrl(
+              cleanString(nextMedia?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+            )
+          }
+        : null;
+
+    byHash.set(msg.hash, {
+      ...prev,
+      ...msg,
+      key: {
+        ...msg.key,
+        remoteJid: targetJid
+      },
+      hash: msg.hash,
+      chatJid: targetJid,
+      timestampMs: Math.max(Number(prev.timestampMs || 0), Number(msg.timestampMs || 0)),
+      text: String(msg.text || prev.text || ""),
+      preview: String(msg.preview || prev.preview || msg.text || prev.text || ""),
+      pushName: cleanString(msg.pushName || prev.pushName || ""),
+      hasMedia: prev.hasMedia === true || msg.hasMedia === true || !!mergedMedia,
+      media: mergedMedia,
+      status: Math.max(Number(prev.status || 0), Number(msg.status || 0)),
+      rawMessage: msg.rawMessage || prev.rawMessage || null
+    });
+  }
+
+  return Array.from(byHash.values())
+    .sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0))
+    .slice(-WA_CHAT_MAX_MESSAGES_PER_CHAT);
+}
+
+function mergeChatSummaryForCanonicalJid(targetChatJid, primaryChat, aliasChat, mergedMessages) {
+  const targetJid = normalizeChatJid(targetChatJid);
+  if (!targetJid) return null;
+
+  const primary = primaryChat && typeof primaryChat === "object" ? primaryChat : {};
+  const alias = aliasChat && typeof aliasChat === "object" ? aliasChat : {};
+  const messageList = Array.isArray(mergedMessages) ? mergedMessages : [];
+  const latestMessage = messageList.length > 0 ? messageList[messageList.length - 1] : null;
+
+  const primaryTs = Number(primary.lastMessageTimestampMs || 0) || 0;
+  const aliasTs = Number(alias.lastMessageTimestampMs || 0) || 0;
+  const latestTs = Math.max(primaryTs, aliasTs, Number(latestMessage?.timestampMs || 0) || 0);
+  const newestChat = aliasTs > primaryTs ? alias : primary;
+
+  return {
+    jid: targetJid,
+    name: choosePreferredIdentityLabel(primary.name, alias.name),
+    lastMessageTimestampMs: latestTs,
+    lastMessagePreview: String(
+      firstNonEmptyString([latestMessage?.preview, newestChat.lastMessagePreview, primary.lastMessagePreview, alias.lastMessagePreview])
+    ),
+    lastMessageType: cleanString(
+      firstNonEmptyString([latestMessage?.type, newestChat.lastMessageType, primary.lastMessageType, alias.lastMessageType])
+    ),
+    lastMessageFromMe:
+      latestMessage
+        ? latestMessage.fromMe === true
+        : newestChat.lastMessageFromMe === true || primary.lastMessageFromMe === true || alias.lastMessageFromMe === true,
+    unreadCount: Math.max(Number(primary.unreadCount || 0) || 0, Number(alias.unreadCount || 0) || 0),
+    archived: primary.archived === true || alias.archived === true,
+    pinned: primary.pinned === true || alias.pinned === true,
+    updatedAt: nowIsoShort()
+  };
+}
+
+function mergeChatAliasIntoCanonicalForProfile(profileId, aliasJid, canonicalJid) {
+  if (!profileId) return false;
+  const alias = normalizeChatJid(aliasJid);
+  const canonical = normalizeChatJid(canonicalJid);
+  if (!alias || !canonical || alias === canonical) return false;
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const aliasChat = state.chatsByJid[alias] && typeof state.chatsByJid[alias] === "object" ? state.chatsByJid[alias] : null;
+  const canonicalChat =
+    state.chatsByJid[canonical] && typeof state.chatsByJid[canonical] === "object" ? state.chatsByJid[canonical] : null;
+  const aliasMessages = Array.isArray(state.messagesByChat[alias]) ? state.messagesByChat[alias] : [];
+  const canonicalMessages = Array.isArray(state.messagesByChat[canonical]) ? state.messagesByChat[canonical] : [];
+
+  if (!aliasChat && aliasMessages.length === 0) return false;
+
+  const mergedMessages = mergeStoredMessageListsForChat(canonical, [canonicalMessages, aliasMessages]);
+  if (mergedMessages.length > 0) {
+    state.messagesByChat[canonical] = mergedMessages;
+  } else if (!Array.isArray(state.messagesByChat[canonical]) || state.messagesByChat[canonical].length === 0) {
+    delete state.messagesByChat[canonical];
+  }
+  delete state.messagesByChat[alias];
+
+  const mergedChat = mergeChatSummaryForCanonicalJid(canonical, canonicalChat, aliasChat, mergedMessages);
+  if (mergedChat) {
+    state.chatsByJid[canonical] = mergedChat;
+  }
+  delete state.chatsByJid[alias];
+
+  return true;
+}
+
+function reconcileCanonicalChatAliasesForProfile(profileId) {
+  if (!profileId) return 0;
+
+  const state = ensureWaChatStateForProfile(profileId);
+  const keys = new Set([...Object.keys(state.chatsByJid || {}), ...Object.keys(state.messagesByChat || {})]);
+  let changed = 0;
+
+  for (const sourceJid of Array.from(keys)) {
+    const canonicalJid = canonicalizeChatJidForProfile(profileId, sourceJid);
+    if (!canonicalJid || canonicalJid === sourceJid) continue;
+    if (mergeChatAliasIntoCanonicalForProfile(profileId, sourceJid, canonicalJid)) {
+      changed++;
+    }
+  }
+
+  if (changed > 0) {
+    schedulePersistWaChatCache();
+    scheduleWaChatSync(profileId, "jid_alias_reconcile");
+  }
+
+  return changed;
+}
+
+function reconcileCanonicalChatAliasesForAllProfiles() {
+  let changed = 0;
+  for (const profileId of Object.keys(waChatByProfileMem || {})) {
+    changed += reconcileCanonicalChatAliasesForProfile(profileId);
+  }
+  return changed;
+}
+
+function scheduleChatAliasReconcileForProfile(profileId, delayMs = 420) {
+  const key = cleanString(profileId);
+  if (!key) return;
+  const oldTimer = waAliasReconcileTimers.get(key);
+  if (oldTimer) clearTimeout(oldTimer);
+
+  const timer = setTimeout(() => {
+    waAliasReconcileTimers.delete(key);
+    try {
+      reconcileCanonicalChatAliasesForProfile(key);
+    } catch (e) {
+      log.debug({ err: e, profileId: key }, "Alias chat reconcile failed");
+    }
+  }, Math.max(80, Number(delayMs || 420)));
+
+  waAliasReconcileTimers.set(key, timer);
+}
+
 function normalizeIncomingChatPresenceType(raw) {
   const value = cleanString(raw).toLowerCase();
   return WA_ALLOWED_INCOMING_CHAT_PRESENCE.has(value) ? value : "";
@@ -1818,9 +2391,9 @@ function summarizeMessagePayload(rawMessage) {
     const thumb = bytesToBase64(content.imageMessage.jpegThumbnail);
     const localThumb = textOrEmpty(messageNode.__localThumbnailDataUrl);
     const localPath = textOrEmpty(messageNode.__localImagePath);
-    const thumbDataUrl = thumb
-      ? `data:image/jpeg;base64,${thumb}`
-      : localThumb.startsWith("data:image/") ? localThumb : "";
+    const thumbDataUrl = compactThumbnailDataUrl(
+      thumb ? `data:image/jpeg;base64,${thumb}` : localThumb.startsWith("data:image/") ? localThumb : ""
+    );
     return {
       type: "image",
       text: caption,
@@ -1851,7 +2424,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.videoMessage.mimetype) || "video/mp4",
         fileName: textOrEmpty(content.videoMessage.fileName),
         fileLength: Number(content.videoMessage.fileLength || 0) || 0,
-        thumbnailDataUrl: thumb ? `data:image/jpeg;base64,${thumb}` : ""
+        thumbnailDataUrl: compactThumbnailDataUrl(thumb ? `data:image/jpeg;base64,${thumb}` : "")
       },
       skip: false
     };
@@ -1991,9 +2564,9 @@ function summarizeMessagePayload(rawMessage) {
 
 function normalizeMessageKey(key, fallbackRemoteJid) {
   const src = key && typeof key === "object" ? key : {};
-  const remoteJid = normalizeChatJid(src.remoteJid || fallbackRemoteJid || "");
+  const remoteJid = normalizeChatJid(src.remoteJidPn || src.remoteJid || fallbackRemoteJid || "");
   const id = cleanString(src.id || "");
-  const participant = normalizeJidForContact(src.participant || "");
+  const participant = normalizeJidForContact(src.participantPn || src.participant || "");
   const fromMe = src.fromMe === true;
   return { remoteJid, id, participant, fromMe };
 }
@@ -2016,7 +2589,9 @@ function ensureContactsFromChatsForProfile(profileId) {
   const contacts = [];
   for (const chat of chats) {
     const chatJid = normalizeChatJid(chat?.jid || "");
-    if (!chatJid || !chatJid.endsWith("@s.whatsapp.net")) continue;
+    if (!chatJid) continue;
+    const isDirectContact = chatJid.endsWith("@s.whatsapp.net") || chatJid.endsWith("@lid");
+    if (!isDirectContact) continue;
     contacts.push({
       id: chatJid,
       jid: chatJid,
@@ -2041,11 +2616,14 @@ function fallbackTitleForChatJid(chatJid) {
 function resolveChatTitle(profileId, chat) {
   const c = chat && typeof chat === "object" ? chat : {};
   const direct = firstNonEmptyString([c.name, c.subject, c.notify, c.pushName]);
-  if (direct) return direct;
   const byContact = getContactByChatJid(profileId, c.jid);
   const contactName = getContactDisplayName(byContact);
-  if (contactName) return contactName;
-  return fallbackTitleForChatJid(c.jid);
+  const fallback = fallbackTitleForChatJid(c.jid);
+  let best = "";
+  best = choosePreferredIdentityLabel(best, direct);
+  best = choosePreferredIdentityLabel(best, contactName);
+  if (!best) best = fallback;
+  return best || fallback;
 }
 
 function resolveMessageSenderName(profileId, chatJid, messageRecord) {
@@ -2092,13 +2670,14 @@ function upsertChatsForProfile(profileId, chats) {
 
   for (const raw of chats) {
     const src = raw && typeof raw === "object" ? raw : {};
-    const chatJid = canonicalizeChatJidForProfile(profileId, src.id || src.jid || "");
+    const chatJid = canonicalizeChatJidForProfile(profileId, src.pnJid || src.id || src.jid || "");
     if (!chatJid) continue;
 
     const chat = ensureChatSummary(profileId, chatJid);
     if (!chat) continue;
 
-    const nextName = firstNonEmptyString([src.name, src.subject, src.notify, src.pushName, chat.name]);
+    const incomingName = firstNonEmptyString([src.name, src.subject, src.notify, src.pushName]);
+    const nextName = choosePreferredIdentityLabel(chat.name, incomingName);
     const nextTs = normalizeEpochMs(
       src.conversationTimestamp || src.lastMessageRecvTimestamp || src.lastMessageTimestamp || src.timestamp,
       chat.lastMessageTimestampMs || 0
@@ -2137,6 +2716,7 @@ function upsertChatsForProfile(profileId, chats) {
   }
 
   if (changed > 0) {
+    changed += enforceWaChatStorageLimitsForProfile(profileId);
     scheduleWaChatSync(profileId, "chats");
     schedulePersistWaChatCache();
   }
@@ -2207,16 +2787,44 @@ function upsertMessagesForProfile(profileId, messages) {
         ? {
             ...(prevMedia || {}),
             ...(normalized.media || {}),
-            localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || "")
+            localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
+            thumbnailDataUrl: compactThumbnailDataUrl(
+              cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+            )
           }
         : prevMedia || null;
-      list[existingIndex] = {
+      const nextRecord = {
         ...prev,
         ...normalized,
         media: nextMedia,
         rawMessage: normalized.rawMessage || prev.rawMessage
       };
-      changed++;
+      const sameMedia =
+        String(prevMedia?.kind || "") === String(nextMedia?.kind || "") &&
+        String(prevMedia?.mimeType || "") === String(nextMedia?.mimeType || "") &&
+        String(prevMedia?.fileName || "") === String(nextMedia?.fileName || "") &&
+        Number(prevMedia?.fileLength || 0) === Number(nextMedia?.fileLength || 0) &&
+        String(prevMedia?.thumbnailDataUrl || "") === String(nextMedia?.thumbnailDataUrl || "") &&
+        String(prevMedia?.localPath || "") === String(nextMedia?.localPath || "");
+      const same =
+        Number(prev?.timestampMs || 0) === Number(nextRecord.timestampMs || 0) &&
+        prev?.fromMe === nextRecord.fromMe &&
+        String(prev?.pushName || "") === String(nextRecord.pushName || "") &&
+        String(prev?.type || "") === String(nextRecord.type || "") &&
+        String(prev?.text || "") === String(nextRecord.text || "") &&
+        String(prev?.preview || "") === String(nextRecord.preview || "") &&
+        prev?.hasMedia === nextRecord.hasMedia &&
+        Number(prev?.status || 0) === Number(nextRecord.status || 0) &&
+        sameMedia;
+      const rawUpgraded =
+        !prev?.rawMessage &&
+        !!nextRecord.rawMessage &&
+        typeof nextRecord.rawMessage === "object" &&
+        Object.keys(nextRecord.rawMessage).length > 0;
+      if (!same || rawUpgraded) {
+        list[existingIndex] = nextRecord;
+        changed++;
+      }
     } else {
       list.push(normalized);
       changed++;
@@ -2228,9 +2836,9 @@ function upsertMessagesForProfile(profileId, messages) {
     }
 
     const isLatest = Number(normalized.timestampMs || 0) >= Number(chat.lastMessageTimestampMs || 0);
-    const nextName = firstNonEmptyString([chat.name, normalized.pushName]);
+    const nextName = choosePreferredIdentityLabel(chat.name, normalized.pushName);
     if (isLatest || !chat.lastMessagePreview || !chat.lastMessageTimestampMs) {
-      state.chatsByJid[normalized.chatJid] = {
+      const nextChat = {
         ...chat,
         name: nextName,
         lastMessageTimestampMs: Number(normalized.timestampMs || chat.lastMessageTimestampMs || Date.now()),
@@ -2239,25 +2847,37 @@ function upsertMessagesForProfile(profileId, messages) {
         lastMessageFromMe: normalized.fromMe === true,
         updatedAt: nowIsoShort()
       };
+      const sameChat =
+        String(chat.name || "") === String(nextChat.name || "") &&
+        Number(chat.lastMessageTimestampMs || 0) === Number(nextChat.lastMessageTimestampMs || 0) &&
+        String(chat.lastMessagePreview || "") === String(nextChat.lastMessagePreview || "") &&
+        String(chat.lastMessageType || "") === String(nextChat.lastMessageType || "") &&
+        chat.lastMessageFromMe === nextChat.lastMessageFromMe;
+      if (!sameChat) {
+        state.chatsByJid[normalized.chatJid] = nextChat;
+        changed++;
+      }
     } else if (chat.name !== nextName) {
       state.chatsByJid[normalized.chatJid] = {
         ...chat,
         name: nextName,
         updatedAt: nowIsoShort()
       };
+      changed++;
     }
 
     if (normalized.hasMedia && String(normalized?.media?.kind || "").toLowerCase() === "image") {
       const localPath = cleanString(normalized?.media?.localPath || "");
       if (localPath && fs.existsSync(localPath)) {
         setLocalImagePathForStoredMessage(profileId, normalized.chatJid, normalized.hash, localPath);
-      } else {
+      } else if (WA_ENABLE_AUTO_IMAGE_PRESAVE) {
         queueAutoSaveImageForHash(profileId, normalized.chatJid, normalized.hash);
       }
     }
   }
 
   if (changed > 0) {
+    changed += enforceWaChatStorageLimitsForProfile(profileId);
     scheduleWaChatSync(profileId, "messages");
     schedulePersistWaChatCache();
   }
@@ -2305,7 +2925,10 @@ function applyMessageUpdatesForProfile(profileId, updates) {
       ? {
           ...(prevMedia || {}),
           ...(normalized.media || {}),
-          localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || "")
+          localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
+          thumbnailDataUrl: compactThumbnailDataUrl(
+            cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+          )
         }
       : prevMedia || null;
 
@@ -2368,9 +2991,31 @@ function getRecentChatsForProfile(profileId, options) {
   const limitRaw = Number(opts.limit);
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(250, Math.round(limitRaw))) : 120;
 
-  const rows = Object.values(state.chatsByJid)
-    .map((c) => serializeChatSummary(profileId, c))
-    .filter((c) => !!c);
+  const rowsByJid = new Map();
+  for (const rawChat of Object.values(state.chatsByJid)) {
+    const row = serializeChatSummary(profileId, rawChat);
+    if (!row) continue;
+
+    const existing = rowsByJid.get(row.jid);
+    if (!existing) {
+      rowsByJid.set(row.jid, row);
+      continue;
+    }
+
+    const existingTs = Number(existing.lastMessageTimestampMs || 0);
+    const nextTs = Number(row.lastMessageTimestampMs || 0);
+    const preferred = nextTs >= existingTs ? row : existing;
+    rowsByJid.set(row.jid, {
+      ...preferred,
+      title: choosePreferredIdentityLabel(existing.title, row.title),
+      preview: String(firstNonEmptyString([preferred.preview, existing.preview, row.preview])),
+      avatarUrl: cleanString(preferred.avatarUrl || existing.avatarUrl || row.avatarUrl || ""),
+      unreadCount: Math.max(Number(existing.unreadCount || 0), Number(row.unreadCount || 0)),
+      archived: existing.archived === true || row.archived === true,
+      pinned: existing.pinned === true || row.pinned === true
+    });
+  }
+  const rows = Array.from(rowsByJid.values());
 
   rows.sort((a, b) => {
     const ap = a.pinned ? 1 : 0;
@@ -2419,7 +3064,7 @@ function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
           mimeType: cleanString(msg.media.mimeType || ""),
           fileName: cleanString(msg.media.fileName || ""),
           fileLength: Number(msg.media.fileLength || 0) || 0,
-          thumbnailDataUrl: cleanString(msg.media.thumbnailDataUrl || ""),
+          thumbnailDataUrl: compactThumbnailDataUrl(cleanString(msg.media.thumbnailDataUrl || "")),
           localPath: cleanString(msg.media.localPath || "")
         }
       : null,
@@ -2484,26 +3129,21 @@ function pruneChatStoreToLookback(profileId, days) {
 async function warmRecentHistoryForProfile(profileId, options) {
   const opts = options && typeof options === "object" ? options : {};
   if (!profileId || !isConnected || !sock) return { ok: false, skipped: true, reason: "not_connected" };
-  const force = opts.force === true;
 
   const existingTask = waHistoryWarmupInFlightByProfile.get(profileId);
-  if (existingTask && !force) return await existingTask;
+  if (existingTask) return await existingTask;
 
   const task = (async () => {
     const cutoff = lookbackCutoffMs(opts.days || WA_HISTORY_LOOKBACK_DAYS);
     let syncTriggered = false;
 
-    try {
-      if (typeof sock.resyncAppState === "function") {
-        await sock.resyncAppState(
-          ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
-          true
-        );
-        syncTriggered = true;
-      }
-    } catch (e) {
-      log.debug({ err: e, profileId }, "Initial app-state history sync failed");
-    }
+    const resync = await resyncAppStateForProfile(
+      profileId,
+      ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
+      true,
+      "history_warmup"
+    );
+    syncTriggered = resync.ok === true;
 
     const state = ensureWaChatStateForProfile(profileId);
     const chats = getRecentChatsForProfile(profileId, { limit: 80 });
@@ -2585,13 +3225,16 @@ async function resetChatHistoryForProfile(profileId, chatJid, options) {
   let resyncTriggered = false;
   let fetchRequests = 0;
 
-  if (isConnected && sock && typeof sock.resyncAppState === "function") {
-    try {
-      await sock.resyncAppState(["regular_high", "regular_low", "regular"], false);
+  if (isConnected && sock) {
+    const resync = await resyncAppStateForProfile(
+      profileId,
+      ["regular_high", "regular_low", "regular"],
+      false,
+      "chat_reset"
+    );
+    if (resync.ok) {
       resyncTriggered = true;
       await new Promise((r) => setTimeout(r, 180));
-    } catch (e) {
-      log.debug({ err: e, profileId, chatJid: jid }, "Chat reset app-state resync failed");
     }
   }
 
@@ -2869,7 +3512,7 @@ function buildImagePreviewDataUrlFromFile(filePath) {
     const size = img.getSize();
     if (!size || !size.width || !size.height) return "";
 
-    const maxSide = 420;
+    const maxSide = 220;
     let preview = img;
     const largest = Math.max(size.width, size.height);
     if (largest > maxSide) {
@@ -2880,7 +3523,11 @@ function buildImagePreviewDataUrlFromFile(filePath) {
       if (resized && !resized.isEmpty()) preview = resized;
     }
 
-    return preview.toDataURL();
+    const jpeg = preview.toJPEG(62);
+    if (jpeg && jpeg.length > 0) {
+      return compactThumbnailDataUrl(`data:image/jpeg;base64,${jpeg.toString("base64")}`);
+    }
+    return compactThumbnailDataUrl(preview.toDataURL());
   } catch (e) {
     log.debug({ err: e, filePath: srcPath }, "Failed to build local image preview");
     return "";
@@ -2948,7 +3595,7 @@ function setLocalImagePathForStoredMessage(profileId, chatJid, messageHash, loca
     ...prevMedia,
     kind: cleanString(prevMedia.kind || "image") || "image",
     localPath: normalizedPath,
-    thumbnailDataUrl: cleanString(prevMedia.thumbnailDataUrl || "") || thumbFromFile || ""
+    thumbnailDataUrl: compactThumbnailDataUrl(cleanString(prevMedia.thumbnailDataUrl || "") || thumbFromFile || "")
   };
 
   const changed =
@@ -3552,6 +4199,15 @@ async function stopSocket() {
     }
   } finally {
     isConnected = false;
+    for (const timer of waAliasReconcileTimers.values()) {
+      clearTimeout(timer);
+    }
+    waAliasReconcileTimers.clear();
+    appStateResyncInFlightByProfile.clear();
+    appStateResyncBackoffUntilByProfile.clear();
+    contactPhotoEnrichInFlightByProfile.clear();
+    contactPhotoBackoffUntilByProfile.clear();
+    contactLookupCacheByProfile.clear();
   }
 }
 
@@ -3799,7 +4455,7 @@ async function connectWA(method, attemptId) {
           isConnected = true;
           invalidSessionProfiles.delete(activeProfileId);
           updateConnectedProfileMeta(activeProfileId, sock?.user || {});
-          syncContactNamesForProfile(activeProfileId, { force: false, isInitialSync: false }).catch(() => {});
+          syncContactNamesForProfile(activeProfileId, { force: true, isInitialSync: true, cooldownMs: 0 }).catch(() => {});
           warmRecentHistoryForProfile(activeProfileId, { days: WA_HISTORY_LOOKBACK_DAYS, force: true }).catch(() => {});
           scheduleWaChatSync(activeProfileId, "connection_open");
           win?.webContents.send("wa:status", {
@@ -4135,6 +4791,7 @@ ipcMain.handle("wa:getContacts", async (_evt, options) => {
 ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
   const profileId = getActiveProfileId();
   const opts = options && typeof options === "object" ? options : {};
+  let seedChats = [];
 
   if (isConnected && sock) {
     if (opts.ensureHistory === true) {
@@ -4146,19 +4803,61 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
 
     if (opts.forceNameSync === true) {
       await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
+    } else {
+      seedChats = getRecentChatsForProfile(profileId, { limit: 60 });
+      const fallbackRows = seedChats.filter((row) => {
+        const title = cleanString(row?.title || "");
+        if (!title) return true;
+        if (title.endsWith("@lid")) return true;
+        return isLikelyFallbackIdentityLabel(title);
+      });
+      if (seedChats.length > 0 && fallbackRows.length >= Math.ceil(seedChats.length * 0.45)) {
+        syncContactNamesForProfile(profileId, { force: false, isInitialSync: false, cooldownMs: 45 * 1000 }).catch(() => {});
+      }
     }
 
     const includePhotos = opts.includePhotos !== false;
     if (includePhotos) {
+      const startupBackfillPending = !startupPhotoBackfillDoneByProfile.has(profileId);
+      const forceMissingPhotoRefresh = opts.forceMissingPhotoRefresh === true || startupBackfillPending;
+      if (forceMissingPhotoRefresh) {
+        startupPhotoBackfillDoneByProfile.add(profileId);
+      }
       ensureContactsFromChatsForProfile(profileId);
+      const preferredMsisdns = new Set();
+      if (seedChats.length === 0) seedChats = getRecentChatsForProfile(profileId, { limit: 80 });
+      for (const chat of seedChats) {
+        const chatJid = normalizeChatJid(chat?.jid || "");
+        if (!chatJid) continue;
+        const byContact = getContactByChatJid(profileId, chatJid);
+        const msisdn = cleanString(byContact?.msisdn || msisdnFromContactAddress(chatJid));
+        const normalized = normalizeMsisdnSafe(msisdn);
+        if (normalized) preferredMsisdns.add(normalized);
+      }
+      const requestedMaxPhotoFetch = Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 24;
+      const safeMaxPhotoFetch = forceMissingPhotoRefresh
+        ? Math.max(1, Math.min(18, requestedMaxPhotoFetch))
+        : Math.max(1, Math.min(200, requestedMaxPhotoFetch));
+      const requestedMinMinutes = Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
+        ? Number(opts.minMinutesBetweenPhotoChecks)
+        : 90;
+      const requestedConcurrency = Number.isFinite(Number(opts.photoFetchConcurrency))
+        ? Number(opts.photoFetchConcurrency)
+        : forceMissingPhotoRefresh
+          ? 1
+          : 2;
+      const requestedDelayMs = Number.isFinite(Number(opts.photoFetchDelayMs))
+        ? Number(opts.photoFetchDelayMs)
+        : forceMissingPhotoRefresh
+          ? 180
+          : 120;
       enrichContactPhotosForProfile(profileId, {
-        maxPhotoFetch: Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 40,
-        minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
-          ? Number(opts.minMinutesBetweenPhotoChecks)
-          : 120,
-        photoFetchConcurrency: Number.isFinite(Number(opts.photoFetchConcurrency))
-          ? Number(opts.photoFetchConcurrency)
-          : 3
+        maxPhotoFetch: safeMaxPhotoFetch,
+        minMinutesBetweenPhotoChecks: requestedMinMinutes,
+        photoFetchConcurrency: requestedConcurrency,
+        photoFetchDelayMs: requestedDelayMs,
+        forceMissing: forceMissingPhotoRefresh,
+        preferredMsisdns: Array.from(preferredMsisdns)
       })
         .then(() => {
           scheduleWaChatSync(profileId, "photos");
@@ -4167,6 +4866,7 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
     }
   }
 
+  promoteChatNamesFromContactsForProfile(profileId);
   const chats = getRecentChatsForProfile(profileId, opts);
   return {
     ok: true,
@@ -4345,6 +5045,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  const activeProfileIdForBatch = getActiveProfileId();
 
   for (let i = 0; i < recipients.length; i++) {
     const rawPhone = recipients[i];
@@ -4385,6 +5086,10 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
     try {
       const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
+      const hintedName = firstNonEmptyString([vars?.name, vars?.Name, vars?.patient_name, vars?.patientName]);
+      if (hintedName) {
+        rememberRecipientNameForProfile(activeProfileIdForBatch, msisdn, hintedName);
+      }
       const baseText = renderTemplate(templateBody, vars);
       let text = baseText;
 
@@ -4487,6 +5192,7 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  const activeProfileIdForPreparedBatch = getActiveProfileId();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i] && typeof items[i] === "object" ? items[i] : {};
@@ -4524,6 +5230,10 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
         error: "Message is empty"
       });
       continue;
+    }
+
+    if (rowName) {
+      rememberRecipientNameForProfile(activeProfileIdForPreparedBatch, msisdn, rowName);
     }
 
     try {
@@ -4632,6 +5342,7 @@ app.whenReady().then(() => {
   loadProfiles();
   loadPersistedContactsCache();
   loadPersistedWaChatCache();
+  schedulePersistWaChatCache();
   createWindow();
 });
 
