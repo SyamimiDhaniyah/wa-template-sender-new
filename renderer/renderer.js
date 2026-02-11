@@ -1573,6 +1573,57 @@ function refreshAppointmentSummary() {
   el("apptSummary").textContent = `${state.selectedAppointmentIds.size} selected / ${state.appointments.length} records`;
 }
 
+function waJidFromAppointmentPhone(input) {
+  const phone = normalizePhone(input);
+  if (!isValidPhone(phone)) return "";
+  return `${phone}@s.whatsapp.net`;
+}
+
+function upsertLocalWaChatStub(chatJid, patientName) {
+  const jid = String(chatJid || "").trim();
+  if (!jid) return;
+  const name = String(patientName || "").trim();
+  const existingIdx = state.waChats.findIndex((x) => String(x?.jid || "") === jid);
+  const fallbackTitle = name || String(jid.split("@")[0] || jid);
+
+  if (existingIdx < 0) {
+    state.waChats.unshift({
+      jid,
+      title: fallbackTitle,
+      preview: "",
+      lastMessageType: "",
+      lastMessageFromMe: false,
+      lastMessageTimestampMs: 0,
+      unreadCount: 0,
+      archived: false,
+      pinned: false,
+      avatarUrl: "",
+      isGroup: false
+    });
+    return;
+  }
+
+  const row = state.waChats[existingIdx] || {};
+  if (name && (!row.title || String(row.title || "").trim() === String(row.jid || "").trim())) {
+    state.waChats[existingIdx] = {
+      ...row,
+      title: name
+    };
+  }
+}
+
+async function openAppointmentPatientWaChat(appt) {
+  const src = appt && typeof appt === "object" ? appt : {};
+  const chatJid = waJidFromAppointmentPhone(src.Patient_Phone_No || src.phone || "");
+  if (!chatJid) throw new Error("Invalid or missing patient phone");
+
+  const patientName = String(src.Patient_Name || src.name || "").trim();
+  setActiveTab("whatsapp");
+  upsertLocalWaChatStub(chatJid, patientName);
+  await openWaChat(chatJid);
+  refreshWaChats({ refreshMessages: false, markRead: false, includePhotos: true }).catch(() => {});
+}
+
 function renderAppointmentTable() {
   const body = el("apptTableBody");
   body.innerHTML = "";
@@ -1604,15 +1655,33 @@ function renderAppointmentTable() {
     tdDentist.textContent = appt.Dentist_Name || "-";
     const tdTreatment = document.createElement("td");
     tdTreatment.textContent = appt.Treatment || "-";
+    const tdWa = document.createElement("td");
+    tdWa.className = "apptWaCell";
+    const waBtn = document.createElement("button");
+    waBtn.type = "button";
+    waBtn.className = "apptWaBtn";
+    waBtn.title = "Open WhatsApp chat";
+    waBtn.setAttribute("aria-label", `Open WhatsApp chat with ${String(appt.Patient_Name || "patient")}`);
+    waBtn.textContent = "💬";
+    const canOpenWa = !!waJidFromAppointmentPhone(appt.Patient_Phone_No || appt.phone || "");
+    waBtn.disabled = !canOpenWa;
+    waBtn.addEventListener("click", async () => {
+      try {
+        await openAppointmentPatientWaChat(appt);
+      } catch (e) {
+        toast("WhatsApp", String(e?.message || e));
+      }
+    });
+    tdWa.appendChild(waBtn);
     const tdStatus = document.createElement("td");
     tdStatus.innerHTML = appt.Status ? '<span class="badgeYes">Yes</span>' : '<span class="badgeNo">No</span>';
-    tr.append(tdCb, tdTime, tdPatient, tdDentist, tdTreatment, tdStatus);
+    tr.append(tdCb, tdTime, tdPatient, tdDentist, tdTreatment, tdWa, tdStatus);
     body.appendChild(tr);
   }
 
   if (sorted.length === 0) {
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="6" class="smallText">No appointments found for this branch/date.</td>';
+    tr.innerHTML = '<td colspan="7" class="smallText">No appointments found for this branch/date.</td>';
     body.appendChild(tr);
   }
 
