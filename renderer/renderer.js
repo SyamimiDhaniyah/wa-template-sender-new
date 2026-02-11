@@ -105,6 +105,10 @@ const state = {
   selectedAppointmentIds: new Set(),
   marketingRecipients: [],
   waConnected: false,
+  waConnecting: false,
+  waConnToggleBusy: false,
+  waQrDataUrl: "",
+  waPairingCode: "",
   activeTab: "whatsapp",
   waChats: [],
   waActiveChatJid: "",
@@ -271,8 +275,100 @@ function statusPill(status) {
   return `<span class="statusPill status-${escapeHtml(s)}">${escapeHtml(s)}</span>`;
 }
 
-function setConnectionBadge(connected, text) {
+function refreshConnectionControls() {
+  const toggleBtn = el("btnConnToggle");
+  if (toggleBtn) {
+    const actionTitle = state.waConnected ? "Disconnect WhatsApp" : "Connect WhatsApp";
+    toggleBtn.title = actionTitle;
+    toggleBtn.setAttribute("aria-label", actionTitle);
+    toggleBtn.disabled = state.waConnToggleBusy || state.waConnecting;
+  }
+
+  const connectBtn = el("btnHandshake");
+  if (connectBtn) connectBtn.disabled = state.waConnToggleBusy || state.waConnecting;
+
+  const disconnectBtn = el("btnSoftDisconnect");
+  if (disconnectBtn) disconnectBtn.disabled = state.waConnToggleBusy || !state.waConnected;
+}
+
+function setConnectionBusy(busy) {
+  state.waConnToggleBusy = !!busy;
+  refreshConnectionControls();
+}
+
+function updateConnectProfileSummary() {
+  const current = (Array.isArray(state.profiles) ? state.profiles : []).find((x) => x.id === state.activeProfileId) || null;
+  const label = current?.name || current?.id || "-";
+  const target = el("connectActiveProfileText");
+  if (target) target.textContent = `Active profile: ${label}`;
+}
+
+function setQrPreview(dataUrl) {
+  const next = String(dataUrl || "").trim();
+  state.waQrDataUrl = next;
+  const img = el("qrImg");
+  if (!img) return;
+  if (next) {
+    img.src = next;
+  } else {
+    img.removeAttribute("src");
+  }
+}
+
+function setPairingPreview(code) {
+  state.waPairingCode = String(code || "").trim();
+  const textNode = el("pairingCodeText");
+  if (textNode) textNode.textContent = state.waPairingCode || "-";
+}
+
+function updateConnectPreviewUi() {
+  const method = el("connectMethod")?.value === "pairing" ? "pairing" : "qr";
+  const qrImg = el("qrImg");
+  const qrEmpty = el("qrEmptyState");
+  const pairingBox = el("pairingCodeBox");
+  const previewHint = el("connectPreviewHint");
+
+  if (!qrImg || !qrEmpty || !pairingBox) return;
+
+  if (method === "pairing") {
+    pairingBox.classList.remove("hidden");
+    qrImg.classList.add("hidden");
+    qrEmpty.classList.add("hidden");
+    if (previewHint) {
+      previewHint.textContent = state.waPairingCode
+        ? "Enter this code in WhatsApp to finish linking."
+        : "Click Connect to request a pairing code.";
+    }
+    return;
+  }
+
+  pairingBox.classList.add("hidden");
+  if (state.waQrDataUrl) {
+    qrImg.classList.remove("hidden");
+    qrEmpty.classList.add("hidden");
+    if (previewHint) previewHint.textContent = "Scan this QR code in WhatsApp.";
+  } else {
+    qrImg.classList.add("hidden");
+    qrEmpty.classList.remove("hidden");
+    if (previewHint) previewHint.textContent = "Click Connect to generate a QR code.";
+  }
+}
+
+function clearConnectPreview({ clearPairing = true } = {}) {
+  setQrPreview("");
+  if (clearPairing) setPairingPreview("");
+  updateConnectPreviewUi();
+}
+
+function isConnectionStatusConnecting(statusText, connectingFlag) {
+  if (connectingFlag === true) return true;
+  const text = String(statusText || "").toLowerCase();
+  return text.includes("connecting");
+}
+
+function setConnectionBadge(connected, text, connecting = false) {
   state.waConnected = !!connected;
+  state.waConnecting = !connected && !!connecting;
   const dot = el("connDot");
   if (dot) {
     dot.classList.remove("online", "offline");
@@ -281,6 +377,7 @@ function setConnectionBadge(connected, text) {
   const msg = text || (connected ? "Connected" : "Not connected");
   el("connText").textContent = msg;
   el("waStatusText").textContent = msg;
+  refreshConnectionControls();
 }
 
 function setActiveTab(tabName) {
@@ -2423,7 +2520,7 @@ function renderProfiles() {
       <div class="profileName">${escapeHtml(p.name)}</div>
       <div class="profileMeta">${escapeHtml(p.id)}${p.id === state.activeProfileId ? " (active)" : ""}</div>
       <div class="profileBtns">
-        <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Use</button>
+        <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Connect</button>
         <button class="btnGhost" data-act="rename" data-id="${escapeHtml(p.id)}">Rename</button>
         <button class="btnGhost" data-act="terminate" data-id="${escapeHtml(p.id)}">Terminate</button>
         <button class="btnGhost" data-act="delete" data-id="${escapeHtml(p.id)}">Delete</button>
@@ -2470,6 +2567,8 @@ function renderProfiles() {
 
     list.appendChild(item);
   }
+
+  updateConnectProfileSummary();
 }
 
 async function refreshProfiles() {
@@ -2507,7 +2606,11 @@ async function activateProfileAndSync(profileId) {
   await window.api.setActiveProfile(id);
   await refreshProfiles();
   const status = await window.api.waGetConnectionState();
-  setConnectionBadge(!!status?.connected, status?.text || "Not connected");
+  setConnectionBadge(
+    !!status?.connected,
+    status?.text || "Not connected",
+    isConnectionStatusConnecting(status?.text, status?.connecting)
+  );
 
   if (status?.connected) {
     state.waForceHistoryRefreshOnConnected = false;
@@ -2522,18 +2625,53 @@ async function activateProfileAndSync(profileId) {
 function setConnectModeUi() {
   const pairing = el("connectMethod").value === "pairing";
   el("pairingPhoneWrap").classList.toggle("hidden", !pairing);
-  el("pairingCodeBox").classList.toggle("hidden", !pairing);
-  el("qrImg").classList.toggle("hidden", pairing);
+  if (!pairing) {
+    setPairingPreview("");
+  }
+  updateConnectPreviewUi();
 }
 
-async function doHandshake() {
-  const method = el("connectMethod").value;
+async function doHandshake(methodOverride) {
+  const method = methodOverride === "pairing" || methodOverride === "qr" ? methodOverride : el("connectMethod").value;
   const phoneNumber = el("pairingPhone").value.trim();
-  el("qrImg").src = "";
-  el("pairingCodeText").textContent = "-";
+  clearConnectPreview({ clearPairing: true });
 
   await window.api.waHandshake({ method, phoneNumber });
-  toast("Handshake", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR...");
+  toast("Connect", method === "pairing" ? "Requesting pairing code..." : "Waiting for QR...");
+}
+
+async function doSoftDisconnect() {
+  await window.api.waDisconnect();
+  clearConnectPreview({ clearPairing: true });
+  toast("Connect", "Disconnected");
+}
+
+async function connectFromHeaderToggle() {
+  const reconnectRes = await window.api.waAutoReconnect();
+  if (reconnectRes?.ok) {
+    toast("Connect", "Reconnecting...");
+    return;
+  }
+
+  // If no saved session exists, fall back to QR connect flow.
+  const methodSelect = el("connectMethod");
+  if (methodSelect) methodSelect.value = "qr";
+  setConnectModeUi();
+  await doHandshake("qr");
+}
+
+async function toggleConnectionFromHeader() {
+  if (state.waConnToggleBusy) return;
+  setConnectionBusy(true);
+  try {
+    if (state.waConnected) {
+      await doSoftDisconnect();
+    } else {
+      await connectFromHeaderToggle();
+    }
+  } finally {
+    setConnectionBusy(false);
+  }
 }
 
 async function reloadTemplateData() {
@@ -2585,7 +2723,11 @@ async function loadInitialDataAfterLogin() {
 
   renderProfiles();
   setConnectModeUi();
-  setConnectionBadge(!!connRes?.connected, connRes?.text || "Not connected");
+  setConnectionBadge(
+    !!connRes?.connected,
+    connRes?.text || "Not connected",
+    isConnectionStatusConnecting(connRes?.text, connRes?.connecting)
+  );
   state.waChatSearch = "";
   state.waActiveChatJid = "";
   state.waExplicitOpenChatJid = "";
@@ -2622,6 +2764,11 @@ async function loadInitialDataAfterLogin() {
 
 function showLoginScreen() {
   state.session = { authToken: "", user: {} };
+  state.waConnected = false;
+  state.waConnecting = false;
+  state.waConnToggleBusy = false;
+  state.waQrDataUrl = "";
+  state.waPairingCode = "";
   state.appointments = [];
   state.selectedAppointmentIds = new Set();
   state.marketingRecipients = [];
@@ -2651,6 +2798,8 @@ function showLoginScreen() {
   }
   closeWaImageLightbox();
   closeWaEmojiPicker({ restoreFocus: false });
+  setConnectionBadge(false, "Not connected", false);
+  clearConnectPreview({ clearPairing: true });
   renderWaChatList();
   renderWaConversationHead();
   renderWaMessages();
@@ -3149,10 +3298,32 @@ function bindEvents() {
 
   el("connectMethod").addEventListener("change", setConnectModeUi);
   el("btnHandshake").addEventListener("click", async () => {
+    if (state.waConnToggleBusy) return;
+    setConnectionBusy(true);
     try {
       await doHandshake();
     } catch (e) {
-      toast("Handshake", String(e?.message || e));
+      toast("Connect", String(e?.message || e));
+    } finally {
+      setConnectionBusy(false);
+    }
+  });
+  el("btnSoftDisconnect").addEventListener("click", async () => {
+    if (state.waConnToggleBusy) return;
+    setConnectionBusy(true);
+    try {
+      await doSoftDisconnect();
+    } catch (e) {
+      toast("Connect", String(e?.message || e));
+    } finally {
+      setConnectionBusy(false);
+    }
+  });
+  el("btnConnToggle").addEventListener("click", async () => {
+    try {
+      await toggleConnectionFromHeader();
+    } catch (e) {
+      toast("Connect", String(e?.message || e));
     }
   });
 
@@ -3209,18 +3380,35 @@ function bindEvents() {
   });
 
   window.api.onQR((dataUrl) => {
-    el("qrImg").src = dataUrl || "";
+    setQrPreview(dataUrl || "");
+    updateConnectPreviewUi();
   });
 
   window.api.onPairingCode((code) => {
-    el("pairingCodeText").textContent = String(code || "-");
+    setPairingPreview(code);
+    updateConnectPreviewUi();
   });
 
   window.api.onStatus((status) => {
     if (status?.profileId && state.activeProfileId && status.profileId !== state.activeProfileId) return;
     const prevConnected = state.waConnected;
     const connected = !!status?.connected;
-    setConnectionBadge(connected, status?.text || "Not connected");
+    const statusText = status?.text || "Not connected";
+    const connecting = isConnectionStatusConnecting(statusText, status?.connecting);
+    setConnectionBadge(connected, statusText, connecting);
+
+    const statusTextLower = String(statusText || "").toLowerCase();
+    const keepPreview =
+      statusTextLower.includes("scan qr") ||
+      statusTextLower.includes("pairing code") ||
+      statusTextLower.includes("enter pairing code");
+    if (connected) {
+      clearConnectPreview({ clearPairing: true });
+    } else if (!keepPreview && !connecting) {
+      clearConnectPreview({ clearPairing: !statusTextLower.includes("pairing") });
+    } else {
+      updateConnectPreviewUi();
+    }
 
     if (!connected) {
       stopWaOutgoingTyping({ sendPaused: false });

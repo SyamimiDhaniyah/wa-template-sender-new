@@ -67,10 +67,10 @@
           </div>
 
           <div class="topActions">
-            <div class="connPill">
+            <button class="connPill connPillBtn" id="btnConnToggle" type="button" title="Connect WhatsApp">
               <span class="dot offline" id="connDot"></span>
               <span id="connText">Not connected</span>
-            </div>
+            </button>
             <button class="btnGhost" id="btnLogout">Log Out</button>
           </div>
         </header>
@@ -425,16 +425,20 @@
             </div>
 
             <div class="connectLayout">
-              <div class="card">
+              <div class="card connectControlCard">
                 <div class="cardHead">
                   <div>
                     <h3>WhatsApp Connection</h3>
                     <div class="smallText" id="waStatusText">Not connected</div>
+                    <div class="smallText" id="connectActiveProfileText">Active profile: -</div>
                   </div>
-                  <button class="btnGhost" id="btnHandshake">Handshake</button>
+                  <div class="inlineRow">
+                    <button class="btnPrimary" id="btnHandshake">Connect</button>
+                    <button class="btnGhost" id="btnSoftDisconnect">Disconnect</button>
+                  </div>
                 </div>
 
-                <div class="inlineRow wrap">
+                <div class="inlineRow wrap connectMethodRow">
                   <label class="fieldLabel">Method</label>
                   <select class="fieldInput compact" id="connectMethod">
                     <option value="qr">QR Code</option>
@@ -446,9 +450,20 @@
                     <input class="fieldInput compact" id="pairingPhone" placeholder="60123456789" />
                   </div>
                 </div>
+                <div class="smallText">Use Connect to start a session. Disconnect will stop the current socket without deleting profile session files.</div>
+              </div>
+
+              <div class="card connectPreviewCard">
+                <div class="cardHead">
+                  <div>
+                    <h3>QR / Pairing Preview</h3>
+                    <div class="smallText" id="connectPreviewHint">Select a method and click Connect.</div>
+                  </div>
+                </div>
 
                 <div class="qrPanel">
-                  <img id="qrImg" alt="QR" />
+                  <div id="qrEmptyState" class="qrEmptyState">QR code will appear here once connection starts.</div>
+                  <img id="qrImg" alt="WhatsApp QR code" class="hidden" />
                   <div id="pairingCodeBox" class="hidden pairingCodeBox">
                     <div class="smallText">Pairing code</div>
                     <div id="pairingCodeText" class="pairingCodeText">-</div>
@@ -456,7 +471,7 @@
                 </div>
               </div>
 
-              <div class="card">
+              <div class="card connectProfilesCard">
                 <div class="cardHead">
                   <div>
                     <h3>Profiles</h3>

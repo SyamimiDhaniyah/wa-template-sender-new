@@ -1373,7 +1373,7 @@ async function terminateProfileSession(profileId) {
   if (isActive) {
     win?.webContents.send("wa:status", {
       connected: false,
-      text: "Session terminated. Handshake required.",
+      text: "Session terminated. Connect required.",
       profileId
     });
   }
@@ -5100,7 +5100,7 @@ async function connectWA(method, attemptId) {
             }
             win?.webContents.send("wa:status", {
               connected: false,
-              text: "Disconnected (restartRequired). Click Handshake once.",
+              text: "Disconnected (restartRequired). Click Connect once.",
               profileId: activeProfileId
             });
             return;
@@ -5117,7 +5117,7 @@ async function connectWA(method, attemptId) {
             invalidSessionProfiles.add(activeProfileId);
             win?.webContents.send("wa:status", {
               connected: false,
-              text: "Session invalid. Click Handshake to reset and generate new QR.",
+              text: "Session invalid. Click Connect to reset and generate new QR.",
               profileId: activeProfileId
             });
           }
@@ -5171,7 +5171,7 @@ async function autoReconnectActiveProfile() {
   if (!hasRegisteredSession(activeProfileId)) {
     win?.webContents.send("wa:status", {
       connected: false,
-      text: "No saved session. Click Handshake to connect.",
+      text: "No saved session. Click Connect to connect.",
       profileId: activeProfileId
     });
     return { ok: false, skipped: true, profileId: activeProfileId };
@@ -5181,6 +5181,20 @@ async function autoReconnectActiveProfile() {
   await stopSocket();
   await connectWA("qr", handshakeAttemptId);
   return { ok: true, started: true, profileId: activeProfileId };
+}
+
+async function disconnectActiveProfileSocket() {
+  const activeProfileId = getActiveProfileId();
+  handshakeAttemptId++;
+  handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
+  await stopSocket();
+  isConnecting = false;
+  win?.webContents.send("wa:status", {
+    connected: false,
+    text: "Disconnected",
+    profileId: activeProfileId
+  });
+  return { ok: true, profileId: activeProfileId, disconnected: true };
 }
 
 function getConnectionState() {
@@ -5392,6 +5406,10 @@ ipcMain.handle("wa:handshake", async (_evt, payload) => {
 
 ipcMain.handle("wa:autoReconnect", async () => {
   return await autoReconnectActiveProfile();
+});
+
+ipcMain.handle("wa:disconnect", async () => {
+  return await disconnectActiveProfileSocket();
 });
 
 ipcMain.handle("wa:getConnectionState", async () => {

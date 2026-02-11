@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld("api", {
   // Start a WhatsApp handshake (QR or pairing code)
   waHandshake: (payload) => ipcRenderer.invoke("wa:handshake", payload),
   waAutoReconnect: () => ipcRenderer.invoke("wa:autoReconnect"),
+  waDisconnect: () => ipcRenderer.invoke("wa:disconnect"),
   waGetConnectionState: () => ipcRenderer.invoke("wa:getConnectionState"),
   waGetContacts: (options) => ipcRenderer.invoke("wa:getContacts", options),
   waGetRecentChats: (options) => ipcRenderer.invoke("wa:getRecentChats", options),

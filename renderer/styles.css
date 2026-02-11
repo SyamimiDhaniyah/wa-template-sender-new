@@ -214,6 +214,28 @@ p {
   font-size: 13px;
 }
 
+.connPillBtn {
+  appearance: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+
+.connPillBtn:hover {
+  background: #f0f8f6;
+  border-color: #b7d3ce;
+}
+
+.connPillBtn:active {
+  transform: translateY(1px);
+}
+
+.connPillBtn:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
 .dot {
   width: 8px;
   height: 8px;
@@ -677,6 +699,18 @@ p {
   gap: 12px;
 }
 
+.connectMethodRow {
+  margin-bottom: 10px;
+}
+
+.connectPreviewCard .cardHead {
+  margin-bottom: 8px;
+}
+
+.connectProfilesCard {
+  grid-column: 1 / -1;
+}
+
 .qrPanel {
   border: 1px dashed #c2dbd7;
   border-radius: 14px;
@@ -685,6 +719,14 @@ p {
   place-items: center;
   padding: 10px;
   background: #f7fcfb;
+}
+
+.qrEmptyState {
+  text-align: center;
+  color: #57706c;
+  font-size: 12px;
+  max-width: 280px;
+  line-height: 1.45;
 }
 
 .qrPanel img {
