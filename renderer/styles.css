@@ -433,13 +433,12 @@ p {
 }
 
 .apptWaBtn {
-  width: 30px;
-  height: 30px;
+  width: 32px;
+  height: 32px;
   border-radius: 999px;
-  border: 1px solid #17a84f;
-  background: #25d366;
+  border: 0;
+  background: transparent;
   color: #ffffff;
-  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   display: inline-grid;
@@ -448,17 +447,26 @@ p {
 }
 
 .apptWaBtn:hover {
-  background: #1fb85a;
+  transform: translateY(-1px);
+  filter: brightness(1.03);
 }
 
 .apptWaBtn:focus {
   outline: 2px solid #9be5b7;
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
 .apptWaBtn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+  transform: none;
+  filter: none;
+}
+
+.apptWaIcon {
+  width: 26px;
+  height: 26px;
+  display: block;
 }
 
 .appointmentLayout {

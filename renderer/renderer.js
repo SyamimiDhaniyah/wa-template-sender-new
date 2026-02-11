@@ -1662,7 +1662,12 @@ function renderAppointmentTable() {
     waBtn.className = "apptWaBtn";
     waBtn.title = "Open WhatsApp chat";
     waBtn.setAttribute("aria-label", `Open WhatsApp chat with ${String(appt.Patient_Name || "patient")}`);
-    waBtn.textContent = "💬";
+    const waIcon = document.createElement("img");
+    waIcon.className = "apptWaIcon";
+    waIcon.src = "./assets/whatsapp-logo.svg";
+    waIcon.alt = "WhatsApp";
+    waIcon.loading = "lazy";
+    waBtn.appendChild(waIcon);
     const canOpenWa = !!waJidFromAppointmentPhone(appt.Patient_Phone_No || appt.phone || "");
     waBtn.disabled = !canOpenWa;
     waBtn.addEventListener("click", async () => {
