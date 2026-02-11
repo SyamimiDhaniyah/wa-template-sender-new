@@ -110,7 +110,12 @@
                     <div class="waAttachmentList" id="waAttachmentList"></div>
                   </div>
                   <div class="waComposerRow">
-                    <button class="btnGhost" id="btnWaAttach">Attach</button>
+                    <button class="btnGhost waIconBtn" id="btnWaAttach" type="button" aria-label="Attach file" title="Attach file">
+                      <span aria-hidden="true">📎</span>
+                    </button>
+                    <button class="btnGhost waIconBtn" id="btnWaEmoji" type="button" aria-label="Insert emoji" title="Emoji">
+                      <span aria-hidden="true">😊</span>
+                    </button>
                     <textarea
                       id="waComposerInput"
                       class="fieldInput"
@@ -118,6 +123,10 @@
                       placeholder="Type a message"
                     ></textarea>
                     <button class="btnPrimary" id="btnWaSend">Send</button>
+                  </div>
+                  <div class="waEmojiPicker hidden" id="waEmojiPicker" role="dialog" aria-label="Emoji picker">
+                    <div class="waEmojiTabs" id="waEmojiTabs"></div>
+                    <div class="waEmojiGrid" id="waEmojiGrid"></div>
                   </div>
                 </footer>
               </section>

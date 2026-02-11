@@ -996,6 +996,7 @@ p {
   border-top: 1px solid #cfe0dd;
   padding: 8px 10px;
   background: rgba(250, 255, 254, 0.95);
+  position: relative;
 }
 
 .waAttachmentRow {
@@ -1074,7 +1075,7 @@ p {
 
 .waComposerRow {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   gap: 8px;
   align-items: end;
 }
@@ -1083,6 +1084,97 @@ p {
   resize: none;
   min-height: 46px;
   max-height: 124px;
+}
+
+.waIconBtn {
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.waIconBtn > span {
+  transform: translateY(1px);
+}
+
+.waEmojiPicker {
+  position: absolute;
+  left: 8px;
+  bottom: 62px;
+  width: min(344px, calc(100% - 16px));
+  border: 1px solid #c6ddd9;
+  border-radius: 12px;
+  background: #f8fffd;
+  box-shadow: 0 14px 24px rgba(17, 42, 40, 0.22);
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+  z-index: 20;
+}
+
+.waEmojiTabs {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.waEmojiTab {
+  border: 1px solid #c1dad6;
+  background: #ffffff;
+  color: #205552;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+}
+
+.waEmojiTab:hover {
+  background: #eaf7f4;
+}
+
+.waEmojiTab.active {
+  border-color: #7ec8bf;
+  background: #dff3ef;
+}
+
+.waEmojiGrid {
+  max-height: 220px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(0, 1fr));
+  gap: 4px;
+  padding-right: 2px;
+}
+
+.waEmojiBtn {
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.waEmojiBtn:hover {
+  background: #e9f6f3;
+  border-color: #d0e7e2;
+}
+
+.waEmojiBtn:focus {
+  outline: 2px solid #9cd8d0;
+  border-color: #8ccfc6;
 }
 
 .pill {
@@ -1317,5 +1409,13 @@ p {
 
   .waChatColumn {
     max-height: 270px;
+  }
+
+  .waEmojiPicker {
+    width: min(312px, calc(100% - 16px));
+  }
+
+  .waEmojiGrid {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
   }
 }

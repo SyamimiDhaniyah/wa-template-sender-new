@@ -20,6 +20,81 @@ const MARKETING_PLACEHOLDERS = [
   { token: "{phone}", key: "phone", description: "Normalized phone number of recipient." }
 ];
 
+const WA_EMOJI_GROUPS = [
+  {
+    id: "smileys",
+    icon: "😀",
+    label: "Smileys",
+    emojis:
+      "😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 🙃 😉 😌 😍 🥰 😘 😗 😙 😚 😋 😛 😝 😜 🤪 🤨 🧐 🤓 😎 🥳 😏 😒 😞 😔 😟 😕 🙁 ☹️ 😣 😖 😫 😩 🥺 😢 😭 😤 😠 😡 🤬 😱 😨 😰 😥 😓 🤗 🤔 🫡 🤭 🤫 🤥 😶 🫠 😐 😑 😬 🙄 😯 😦 😧 😮 😲 🥱 😴 🤤 😪 😵 🤐 🥴 🤢 🤮 🤧 😷 🤒 🤕".split(
+        " "
+      )
+  },
+  {
+    id: "people",
+    icon: "👋",
+    label: "People",
+    emojis:
+      "👋 🤚 🖐️ ✋ 🖖 🫶 🙌 🤲 🤝 👍 👎 👊 ✊ 🤛 🤜 👏 🙏 ✍️ 💪 🦾 🦿 🦵 🦶 👂 🦻 👃 🧠 🫀 🫁 🦷 👀 👁️ 👅 👄 🫦 👶 🧒 👦 👧 🧑 👱 👨 👩 🧔 👴 👵 🙍 🙎 🙅 🙆 💁 🙋 🧏 🙇 🤦 🤷 👮 🕵️ 💂 🥷 👷 🤴 👸 👳 👲 🧕 🤵 👰 🤰 🤱 👼 🎅 🤶 🧑‍⚕️ 🧑‍💻 🧑‍🏫".split(
+        " "
+      )
+  },
+  {
+    id: "animals",
+    icon: "🐶",
+    label: "Animals",
+    emojis:
+      "🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐻‍❄️ 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🙈 🙉 🙊 🐔 🐧 🐦 🐤 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🪲 🐛 🦋 🐌 🐞 🐜 🕷️ 🦂 🐢 🐍 🦎 🐙 🦑 🦐 🦀 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🦧 🐘 🦛 🦏 🐪 🦒 🦬 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🦙 🐐 🦌 🐕 🐈 🐓 🦃 🦤 🦢 🕊️ 🐇 🦝 🦨 🦡 🦫".split(
+        " "
+      )
+  },
+  {
+    id: "food",
+    icon: "🍔",
+    label: "Food",
+    emojis:
+      "🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🫐 🍈 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🫒 🥑 🍆 🥔 🥕 🌽 🌶️ 🫑 🥒 🥬 🥦 🧄 🧅 🍄 🥜 🫘 🌰 🍞 🥐 🥖 🫓 🥨 🧀 🥚 🍳 🧈 🥞 🧇 🥓 🥩 🍗 🍖 🌭 🍔 🍟 🍕 🫔 🌮 🌯 🥙 🧆 🥪 🥫 🍝 🍜 🍲 🍛 🍣 🍱 🥟 🦪 🍤 🍙 🍚 🍘 🍥 🥠 🥮 🍢 🍡 🍧 🍨 🍦 🥧 🧁 🍰 🎂 🍮 🍭 🍬 🍫 🍿 🍩 🍪 🥤 🧋 ☕ 🍵 🧃 🥛 🍺 🍻 🍷 🥂 🥃 🍸 🍹 🍾 🧊".split(
+        " "
+      )
+  },
+  {
+    id: "travel",
+    icon: "🚗",
+    label: "Travel",
+    emojis:
+      "🚗 🚕 🚙 🚌 🚎 🏎️ 🚓 🚑 🚒 🚐 🛻 🚚 🚛 🚜 🛵 🚲 🛴 🛹 🛼 🚁 ✈️ 🛩️ 🛫 🛬 🚀 🛸 🚢 ⛵ 🚤 🛥️ 🚂 🚆 🚇 🚊 🚉 🚞 🚋 🗺️ 🧭 🗽 🗼 🏰 🏯 🏟️ 🎡 🎢 🏖️ 🏝️ 🏜️ 🌋 ⛰️ 🏔️ 🏕️ 🛖 🏠 🏡 🏢 🏣 🏥 🏦 🏨 🏩 💒 ⛪ 🕌 🕍 🛕 🕋 ⛲ 🌁 🌃 🌆 🌇 🌉 🌌 🎑 🏙️".split(
+        " "
+      )
+  },
+  {
+    id: "activity",
+    icon: "⚽",
+    label: "Activity",
+    emojis:
+      "⚽ 🏀 🏈 ⚾ 🥎 🎾 🏐 🏉 🎱 🏓 🏸 🏒 🏑 🥍 🏏 🥅 ⛳ 🏹 🎣 🤿 🥊 🥋 🎽 🛹 🛼 🛷 ⛸️ 🥌 🎿 ⛷️ 🏂 🪂 🏋️ 🤼 🤸 ⛹️ 🤺 🤾 🏌️ 🧘 🏄 🏊 🤽 🚣 🧗 🚵 🚴 🏆 🥇 🥈 🥉 🏅 🎖️ 🏵️ 🎗️ 🎫 🎟️ 🎪 🤹 🎭 🎨 🎬 🎤 🎧 🎼 🎹 🥁 🪘 🎷 🎺 🪗 🎸 🪕 🎻 🎲 ♟️ 🎯 🎳 🎮 🕹️ 🧩".split(
+        " "
+      )
+  },
+  {
+    id: "objects",
+    icon: "💡",
+    label: "Objects",
+    emojis:
+      "⌚ 📱 📲 💻 ⌨️ 🖥️ 🖨️ 🖱️ 💽 💾 💿 📀 📷 📸 📹 🎥 📽️ 🎞️ 📞 ☎️ 📟 📠 📺 📻 🎙️ ⏱️ ⏲️ ⏰ 🕰️ ⌛ ⏳ 📡 🔋 🪫 🔌 💡 🔦 🕯️ 🪔 🧯 🛢️ 💸 💵 💴 💶 💷 🪙 💰 💳 💎 ⚖️ 🪜 🧰 🔧 🔨 ⚒️ 🛠️ ⛏️ 🪓 🔩 ⚙️ 🧱 ⛓️ 🧲 🔫 💣 🧨 🔪 🗡️ ⚔️ 🛡️ 🚬 ⚰️ 🪦 ⚱️ 🧿 🔮 📿 🧸 🪆 🪄".split(
+        " "
+      )
+  },
+  {
+    id: "symbols",
+    icon: "❤️",
+    label: "Symbols",
+    emojis:
+      "❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ☮️ ✝️ ☪️ 🕉️ ☸️ ✡️ 🔯 🕎 ☯️ ☦️ 🛐 ⛎ ♈ ♉ ♊ ♋ ♌ ♍ ♎ ♏ ♐ ♑ ♒ ♓ 🆔 ⚛️ 🉑 ☢️ ☣️ 📴 📳 🈶 🈚 🈸 🈺 🈷️ ✴️ 🆚 🉐 ㊙️ ㊗️ 🈴 🈵 🈹 🈲 🅰️ 🅱️ 🆎 🆑 🅾️ 🆘 ❌ ⭕ 🛑 ⛔ 📛 🚫 💯 💢 ♨️ 🚷 🚯 🚳 🚱 🔞 📵 🚭 ❗ ❕ ❓ ❔ ‼️ ⁉️ 🔅 🔆 ⚠️ 🚸 🔱 ⚜️ ♻️ ✅ 🈯 💹 ❇️ ✳️ ❎ 🌐 💠 🌀 💤 🏧 🚾 ♿ 🅿️ 🛗 🈳 🈂️ 🛂 🛃 🛄 🛅 🚹 🚺 🚻 🚼 🚰 🚮 🎦 🛜 📶 🈁 🔣 ℹ️ 🔤 🔡 🔠 🆖 🆗 🆙 🆒 🆕 🆓 0️⃣ 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣ 6️⃣ 7️⃣ 8️⃣ 9️⃣ 🔟".split(
+        " "
+      )
+  }
+];
+
 const state = {
   session: { authToken: "", user: {} },
   settings: { ...DEFAULT_CLINIC_SETTINGS },
@@ -38,6 +113,8 @@ const state = {
   waChatSearch: "",
   waPendingAttachments: [],
   waComposerSending: false,
+  waEmojiPickerOpen: false,
+  waEmojiCategoryId: WA_EMOJI_GROUPS[0]?.id || "smileys",
   waDropDepth: 0,
   waSyncTimer: null,
   waLoadingChats: false,
@@ -211,6 +288,7 @@ function setActiveTab(tabName) {
   const tab = String(tabName || "whatsapp");
   if (tab !== "whatsapp") {
     stopWaOutgoingTyping({ sendPaused: true });
+    closeWaEmojiPicker({ restoreFocus: false });
   }
   state.activeTab = tab;
   document.querySelectorAll(".tabBtn").forEach((btn) => btn.classList.toggle("active", btn.dataset.tab === tab));
@@ -800,10 +878,13 @@ function setWaComposerSending(sending) {
   const busy = state.waComposerSending;
   const sendBtn = el("btnWaSend");
   const attachBtn = el("btnWaAttach");
+  const emojiBtn = el("btnWaEmoji");
   const input = el("waComposerInput");
   if (sendBtn) sendBtn.disabled = busy;
   if (attachBtn) attachBtn.disabled = busy;
+  if (emojiBtn) emojiBtn.disabled = busy;
   if (input) input.disabled = busy;
+  if (busy) closeWaEmojiPicker({ restoreFocus: false });
   renderWaAttachmentRow();
 }
 
@@ -821,6 +902,103 @@ function focusWaComposerInput() {
   } catch {
     // Ignore browsers/input types that do not support selection ranges.
   }
+}
+
+function getWaEmojiCategory() {
+  const activeId = String(state.waEmojiCategoryId || "");
+  return WA_EMOJI_GROUPS.find((group) => group.id === activeId) || WA_EMOJI_GROUPS[0] || null;
+}
+
+function renderWaEmojiPicker() {
+  const tabsWrap = el("waEmojiTabs");
+  const gridWrap = el("waEmojiGrid");
+  if (!tabsWrap || !gridWrap) return;
+
+  const active = getWaEmojiCategory();
+  if (!active) {
+    tabsWrap.innerHTML = "";
+    gridWrap.innerHTML = "";
+    return;
+  }
+
+  tabsWrap.innerHTML = "";
+  for (const group of WA_EMOJI_GROUPS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `waEmojiTab${group.id === active.id ? " active" : ""}`;
+    btn.textContent = group.icon || "•";
+    btn.title = group.label || group.id;
+    btn.setAttribute("aria-label", group.label || group.id);
+    btn.dataset.emojiGroup = group.id;
+    tabsWrap.appendChild(btn);
+  }
+
+  gridWrap.innerHTML = "";
+  const frag = document.createDocumentFragment();
+  for (const emoji of active.emojis || []) {
+    const value = String(emoji || "").trim();
+    if (!value) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "waEmojiBtn";
+    btn.textContent = value;
+    btn.title = value;
+    btn.setAttribute("aria-label", `Insert ${value}`);
+    btn.dataset.emojiValue = value;
+    frag.appendChild(btn);
+  }
+  gridWrap.appendChild(frag);
+}
+
+function openWaEmojiPicker() {
+  const picker = el("waEmojiPicker");
+  if (!picker) return;
+  renderWaEmojiPicker();
+  picker.classList.remove("hidden");
+  state.waEmojiPickerOpen = true;
+}
+
+function closeWaEmojiPicker(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const picker = el("waEmojiPicker");
+  if (picker) picker.classList.add("hidden");
+  const wasOpen = state.waEmojiPickerOpen;
+  state.waEmojiPickerOpen = false;
+  if (wasOpen && opts.restoreFocus !== false) focusWaComposerInput();
+}
+
+function toggleWaEmojiPicker() {
+  if (state.waComposerSending) return;
+  if (state.waEmojiPickerOpen) {
+    closeWaEmojiPicker({ restoreFocus: true });
+    return;
+  }
+  openWaEmojiPicker();
+  focusWaComposerInput();
+}
+
+function insertEmojiIntoWaComposer(rawEmoji) {
+  const emoji = String(rawEmoji || "").trim();
+  if (!emoji) return;
+  const input = el("waComposerInput");
+  if (!input || input.disabled) return;
+
+  const value = String(input.value || "");
+  const start = Number.isFinite(input.selectionStart) ? Number(input.selectionStart) : value.length;
+  const end = Number.isFinite(input.selectionEnd) ? Number(input.selectionEnd) : start;
+  const safeStart = Math.max(0, Math.min(value.length, start));
+  const safeEnd = Math.max(safeStart, Math.min(value.length, end));
+  const nextValue = `${value.slice(0, safeStart)}${emoji}${value.slice(safeEnd)}`;
+
+  input.value = nextValue;
+  const caret = safeStart + emoji.length;
+  try {
+    input.setSelectionRange(caret, caret);
+  } catch {
+    // Ignore selection failures for unsupported platforms.
+  }
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  focusWaComposerInput();
 }
 
 function renderWaChatList() {
@@ -2219,6 +2397,8 @@ async function activateProfileAndSync(profileId) {
   state.waExplicitOpenChatJid = "";
   state.waMessages = [];
   state.waChats = [];
+  state.waEmojiPickerOpen = false;
+  closeWaEmojiPicker({ restoreFocus: false });
   state.waForceHistoryRefreshOnConnected = true;
 
   await window.api.setActiveProfile(id);
@@ -2315,12 +2495,14 @@ async function loadInitialDataAfterLogin() {
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
+  state.waEmojiPickerOpen = false;
   setWaDropActive(false);
   setWaResettingChatHistory(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
   setWaComposerSending(false);
   setWaPendingAttachments([]);
+  closeWaEmojiPicker({ restoreFocus: false });
   el("waChatSearchInput").value = "";
 
   await reloadTemplateData();
@@ -2353,6 +2535,7 @@ function showLoginScreen() {
   state.waChatsReqSeq = 0;
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
+  state.waEmojiPickerOpen = false;
   setWaDropActive(false);
   setWaResettingChatHistory(false);
   stopWaOutgoingTyping({ sendPaused: false });
@@ -2366,6 +2549,7 @@ function showLoginScreen() {
     state.waSyncTimer = null;
   }
   closeWaImageLightbox();
+  closeWaEmojiPicker({ restoreFocus: false });
   renderWaChatList();
   renderWaConversationHead();
   renderWaMessages();
@@ -2408,6 +2592,8 @@ async function tryRestoreSession() {
   }
 }
 function bindEvents() {
+  renderWaEmojiPicker();
+
   document.querySelectorAll(".tabBtn").forEach((btn) => {
     btn.addEventListener("click", async () => {
       setActiveTab(btn.dataset.tab);
@@ -2452,6 +2638,26 @@ function bindEvents() {
     } catch (e) {
       toast("WhatsApp", String(e?.message || e));
     }
+  });
+
+  el("btnWaEmoji").addEventListener("click", (evt) => {
+    evt.preventDefault();
+    toggleWaEmojiPicker();
+  });
+
+  el("waEmojiTabs").addEventListener("click", (evt) => {
+    const target = evt.target?.closest?.("button[data-emoji-group]");
+    const nextId = String(target?.dataset?.emojiGroup || "");
+    if (!nextId || nextId === state.waEmojiCategoryId) return;
+    state.waEmojiCategoryId = nextId;
+    renderWaEmojiPicker();
+  });
+
+  el("waEmojiGrid").addEventListener("click", (evt) => {
+    const target = evt.target?.closest?.("button[data-emoji-value]");
+    const value = String(target?.dataset?.emojiValue || "");
+    if (!value) return;
+    insertEmojiIntoWaComposer(value);
   });
 
   el("btnWaClearAttachment").addEventListener("click", () => {
@@ -2894,7 +3100,19 @@ function bindEvents() {
     if (evt.target === el("waImageLightbox")) closeWaImageLightbox();
   });
   document.addEventListener("keydown", (evt) => {
-    if (evt.key === "Escape") closeWaImageLightbox();
+    if (evt.key !== "Escape") return;
+    closeWaImageLightbox();
+    closeWaEmojiPicker({ restoreFocus: false });
+  });
+
+  document.addEventListener("mousedown", (evt) => {
+    if (!state.waEmojiPickerOpen) return;
+    const picker = el("waEmojiPicker");
+    const emojiBtn = el("btnWaEmoji");
+    const target = evt.target;
+    if (!picker || !emojiBtn || !target) return;
+    if (picker.contains(target) || emojiBtn.contains(target)) return;
+    closeWaEmojiPicker({ restoreFocus: false });
   });
 
   window.api.onQR((dataUrl) => {
