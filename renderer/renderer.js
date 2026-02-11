@@ -1525,6 +1525,12 @@ async function sendWaComposerMessage() {
   const optimisticIds = optimisticMessages.map((msg) => String(msg?.key?.id || "")).filter(Boolean);
   state.waMessages = [...(Array.isArray(state.waMessages) ? state.waMessages : []), ...optimisticMessages];
   renderWaMessages({ forceBottom: true });
+  const composerInput = el("waComposerInput");
+  if (composerInput) {
+    composerInput.value = "";
+    composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  setWaPendingAttachments([]);
 
   setWaComposerSending(true);
   try {
@@ -1537,11 +1543,15 @@ async function sendWaComposerMessage() {
         attachment
       });
     }
-
-    el("waComposerInput").value = "";
-    setWaPendingAttachments([]);
   } catch (e) {
     removeOptimisticWaMessagesByKeys(optimisticIds);
+    if (composerInput && !String(composerInput.value || "").trim()) {
+      composerInput.value = textRaw;
+      composerInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+    if ((state.waPendingAttachments || []).length === 0 && queued.length > 0) {
+      setWaPendingAttachments(queued);
+    }
     renderWaMessages({ forceBottom: true });
     await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => {});
     await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => {});
