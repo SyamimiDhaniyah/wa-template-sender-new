@@ -1255,7 +1255,7 @@ function renderWaMessages(options = {}) {
 
     const ts = document.createElement("div");
     ts.className = "waMsgTime";
-    ts.textContent = formatWaTimeShort(msg.timestampMs);
+    ts.textContent = msg.optimistic === true ? "sending..." : formatWaTimeShort(msg.timestampMs);
     bubble.appendChild(ts);
 
     row.appendChild(bubble);
@@ -1428,6 +1428,82 @@ async function pickWaAttachment() {
   appendWaPendingAttachments(next);
 }
 
+function buildWaComposerSendQueue(trimmedText, queuedAttachments) {
+  const text = String(trimmedText || "");
+  const queued = normalizeWaAttachmentList(queuedAttachments);
+  if (queued.length === 0) {
+    return [{ text, attachment: null }];
+  }
+
+  const out = [];
+  let textSent = !text;
+
+  if (!textSent && !waAttachmentSupportsCaption(queued[0])) {
+    out.push({ text, attachment: null });
+    textSent = true;
+  }
+
+  for (const attachment of queued) {
+    const withText = !textSent && waAttachmentSupportsCaption(attachment) ? text : "";
+    out.push({ text: withText, attachment });
+    if (withText) textSent = true;
+  }
+
+  if (!textSent && text) {
+    out.push({ text, attachment: null });
+  }
+
+  return out;
+}
+
+function optimisticPreviewTextForSendItem(item) {
+  const src = item && typeof item === "object" ? item : {};
+  const text = String(src.text || "").trim();
+  if (text) return text;
+  const attachment = src.attachment && typeof src.attachment === "object" ? src.attachment : null;
+  if (!attachment) return "";
+  const kind = String(attachment.kind || "attachment")
+    .trim()
+    .toLowerCase();
+  const readableKind =
+    kind === "image" ? "image" : kind === "video" ? "video" : kind === "audio" ? "audio" : "document";
+  const name = String(attachment.fileName || "").trim();
+  return name ? `[Sending ${readableKind}] ${name}` : `[Sending ${readableKind}]`;
+}
+
+function buildOptimisticWaMessage(chatJid, item, idx) {
+  const nowMs = Date.now();
+  const previewText = optimisticPreviewTextForSendItem(item);
+  return {
+    key: {
+      remoteJid: String(chatJid || ""),
+      id: `local_${nowMs}_${idx}_${Math.random().toString(16).slice(2, 8)}`,
+      fromMe: true,
+      participant: ""
+    },
+    chatJid: String(chatJid || ""),
+    timestampMs: nowMs + idx,
+    fromMe: true,
+    senderName: "You",
+    type: "text",
+    text: previewText,
+    preview: previewText,
+    hasMedia: false,
+    media: null,
+    status: 0,
+    optimistic: true
+  };
+}
+
+function removeOptimisticWaMessagesByKeys(keys) {
+  const keySet = new Set((Array.isArray(keys) ? keys : []).map((x) => String(x || "")).filter(Boolean));
+  if (keySet.size === 0) return;
+  state.waMessages = (Array.isArray(state.waMessages) ? state.waMessages : []).filter((msg) => {
+    const id = String(msg?.key?.id || "");
+    return !keySet.has(id);
+  });
+}
+
 async function sendWaComposerMessage() {
   if (!state.waActiveChatJid) throw new Error("Please select a chat");
   if (state.waComposerSending) return;
@@ -1439,54 +1515,40 @@ async function sendWaComposerMessage() {
   const hasAttachment = queued.length > 0;
   if (!hasText && !hasAttachment) return;
 
+  const sendQueue = buildWaComposerSendQueue(trimmedText, queued);
+  if (sendQueue.length === 0) return;
+
   stopWaOutgoingTyping({ sendPaused: true });
 
   const activeChatJid = state.waActiveChatJid;
+  const optimisticMessages = sendQueue.map((item, idx) => buildOptimisticWaMessage(activeChatJid, item, idx));
+  const optimisticIds = optimisticMessages.map((msg) => String(msg?.key?.id || "")).filter(Boolean);
+  state.waMessages = [...(Array.isArray(state.waMessages) ? state.waMessages : []), ...optimisticMessages];
+  renderWaMessages({ forceBottom: true });
+
   setWaComposerSending(true);
   try {
-    if (queued.length === 0) {
+    for (const item of sendQueue) {
+      const attachment = item && typeof item === "object" ? item.attachment || null : null;
+      const text = String(item?.text || "");
       await window.api.waSendChatMessage({
         chatJid: activeChatJid,
-        text: trimmedText,
-        attachment: null
+        text,
+        attachment
       });
-    } else {
-      let textSent = !trimmedText;
-
-      if (!textSent && !waAttachmentSupportsCaption(queued[0])) {
-        await window.api.waSendChatMessage({
-          chatJid: activeChatJid,
-          text: trimmedText,
-          attachment: null
-        });
-        textSent = true;
-      }
-
-      for (let i = 0; i < queued.length; i++) {
-        const attachment = queued[i];
-        const withText = !textSent && waAttachmentSupportsCaption(attachment) ? trimmedText : "";
-        await window.api.waSendChatMessage({
-          chatJid: activeChatJid,
-          text: withText,
-          attachment
-        });
-        if (withText) textSent = true;
-      }
-
-      if (!textSent && trimmedText) {
-        await window.api.waSendChatMessage({
-          chatJid: activeChatJid,
-          text: trimmedText,
-          attachment: null
-        });
-      }
     }
 
     el("waComposerInput").value = "";
     setWaPendingAttachments([]);
-    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false });
-    await refreshWaChats({ refreshMessages: false, markRead: false });
+  } catch (e) {
+    removeOptimisticWaMessagesByKeys(optimisticIds);
+    renderWaMessages({ forceBottom: true });
+    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => {});
+    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => {});
+    throw e;
   } finally {
+    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => {});
+    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => {});
     setWaComposerSending(false);
     focusWaComposerInput();
   }
