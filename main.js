@@ -612,13 +612,16 @@ function normalizePersistedChatSummary(raw, fallbackJid) {
   const src = raw && typeof raw === "object" ? raw : {};
   const jid = normalizeChatJid(src.jid || fallbackJid || "");
   if (!jid) return null;
+  const rawType = cleanString(src.lastMessageType || "");
+  const rawPreview = String(src.lastMessagePreview || "");
+  const isMetaOnlySummary = rawType === "messageContextInfo" || rawPreview === "[messageContextInfo]";
   return {
     jid,
     name: cleanString(src.name || ""),
     lastMessageTimestampMs: Math.max(0, Number(src.lastMessageTimestampMs || 0) || 0),
-    lastMessagePreview: String(src.lastMessagePreview || ""),
-    lastMessageType: cleanString(src.lastMessageType || ""),
-    lastMessageFromMe: src.lastMessageFromMe === true,
+    lastMessagePreview: isMetaOnlySummary ? "" : rawPreview,
+    lastMessageType: isMetaOnlySummary ? "" : rawType,
+    lastMessageFromMe: !isMetaOnlySummary && src.lastMessageFromMe === true,
     unreadCount: Math.max(0, Number(src.unreadCount || 0) || 0),
     archived: src.archived === true,
     pinned: src.pinned === true,
@@ -655,6 +658,7 @@ function normalizePersistedChatMessage(raw, fallbackChatJid) {
   const type = cleanString(src.type || "unknown");
   const text = String(src.text || "");
   const preview = String(src.preview || text || "");
+  if (type === "messageContextInfo" || preview === "[messageContextInfo]") return null;
   const fromMe = src.fromMe === true || key.fromMe === true;
   const pushName = cleanString(src.pushName || "");
   const media = normalizePersistedChatMedia(src.media);
@@ -822,9 +826,21 @@ function loadPersistedWaChatCache() {
     const raw = store.get(WA_CHAT_STORE_KEY);
     const normalized = normalizeWaChatCacheRoot(raw);
     for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
+    const loadedProfileIds = [];
     for (const [profileId, profileState] of Object.entries(normalized)) {
       waChatByProfileMem[profileId] = profileState;
       enforceWaChatStorageLimitsForProfile(profileId);
+      loadedProfileIds.push(profileId);
+    }
+
+    // Seed minimal contacts from cached chats first so alias reconciliation can
+    // collapse legacy @lid and @s.whatsapp.net split threads on startup.
+    for (const profileId of loadedProfileIds) {
+      ensureContactsFromChatsForProfile(profileId);
+    }
+
+    if (loadedProfileIds.length > 0) {
+      reconcileCanonicalChatAliasesForAllProfiles();
     }
   } catch (e) {
     for (const key of Object.keys(waChatByProfileMem)) delete waChatByProfileMem[key];
@@ -2072,6 +2088,10 @@ function canonicalizeChatJidForProfile(profileId, chatJid) {
   const contact = findContactByJidForProfile(profileId, normalized);
   const preferred = normalizeJidForContact(contact?.jid || "");
   if (preferred && preferred.endsWith("@s.whatsapp.net")) return preferred;
+
+  const mappedMsisdn = normalizeMsisdnSafe(contact?.msisdn || msisdnFromContactAddress(normalized));
+  if (mappedMsisdn) return `${mappedMsisdn}@s.whatsapp.net`;
+
   return normalized;
 }
 
@@ -2364,6 +2384,7 @@ function summarizeMessagePayload(rawMessage) {
   const messageNode = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
   const content = unwrapMessageContent(messageNode.message || {});
   const textOrEmpty = (v) => cleanString(v || "");
+  const nonDisplayOnlyKeys = new Set(["messageContextInfo"]);
 
   if (!content || Object.keys(content).length === 0) {
     return {
@@ -2373,6 +2394,18 @@ function summarizeMessagePayload(rawMessage) {
       hasMedia: false,
       media: null,
       skip: false
+    };
+  }
+
+  const displayKeys = Object.keys(content).filter((k) => !nonDisplayOnlyKeys.has(k));
+  if (displayKeys.length === 0) {
+    return {
+      type: "context",
+      text: "",
+      preview: "",
+      hasMedia: false,
+      media: null,
+      skip: true
     };
   }
 
@@ -2551,7 +2584,7 @@ function summarizeMessagePayload(rawMessage) {
     };
   }
 
-  const fallback = Object.keys(content)[0] || "message";
+  const fallback = displayKeys[0] || "message";
   return {
     type: fallback,
     text: "",
