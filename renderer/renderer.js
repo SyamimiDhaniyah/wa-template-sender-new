@@ -135,6 +135,7 @@ const state = {
   waMessagesReqSeq: 0,
   profiles: [],
   activeProfileId: null,
+  settingsProfileId: "",
   activityRows: [],
   currentTemplateId: null,
   confirmResolver: null,
@@ -289,6 +290,8 @@ function refreshConnectionControls() {
 
   const disconnectBtn = el("btnSoftDisconnect");
   if (disconnectBtn) disconnectBtn.disabled = state.waConnToggleBusy || !state.waConnected;
+
+  updateSettingsProfileControls();
 }
 
 function setConnectionBusy(busy) {
@@ -301,6 +304,49 @@ function updateConnectProfileSummary() {
   const label = current?.name || current?.id || "-";
   const target = el("connectActiveProfileText");
   if (target) target.textContent = `Active profile: ${label}`;
+}
+
+function getProfileById(profileId) {
+  const id = String(profileId || "").trim();
+  if (!id) return null;
+  return (Array.isArray(state.profiles) ? state.profiles : []).find((p) => p.id === id) || null;
+}
+
+function getProfileLabelById(profileId) {
+  const profile = getProfileById(profileId);
+  return profile?.name || profile?.id || "-";
+}
+
+function getSelectedSettingsProfileId() {
+  return String(el("settingProfileSelect")?.value || state.settingsProfileId || "").trim();
+}
+
+function updateSettingsProfileControls() {
+  const selectedId = getSelectedSettingsProfileId();
+  const selected = getProfileById(selectedId);
+  const disableManage = !selected || state.waConnToggleBusy || state.waConnecting;
+
+  const terminateBtn = el("btnSettingTerminateProfile");
+  if (terminateBtn) terminateBtn.disabled = disableManage;
+
+  const deleteBtn = el("btnSettingDeleteProfile");
+  if (deleteBtn) deleteBtn.disabled = disableManage;
+
+  const hint = el("settingProfileHint");
+  if (hint) {
+    hint.textContent = selected
+      ? `Selected: ${selected.name || selected.id}. Terminate removes WhatsApp session auth for this profile only.`
+      : "Choose a profile to terminate or delete.";
+  }
+}
+
+async function syncConnectionStateFromBackend() {
+  const status = await window.api.waGetConnectionState();
+  setConnectionBadge(
+    !!status?.connected,
+    status?.text || "Not connected",
+    isConnectionStatusConnecting(status?.text, status?.connecting)
+  );
 }
 
 function setQrPreview(dataUrl) {
@@ -2499,76 +2545,29 @@ async function saveSettings() {
   toast("Settings", "Saved");
 }
 function renderProfiles() {
-  const select = el("profileSelect");
-  select.innerHTML = "";
+  const profiles = Array.isArray(state.profiles) ? state.profiles : [];
+  const fillSelect = (selectEl, selectedId) => {
+    if (!selectEl) return;
+    const prev = String(selectedId || "").trim();
+    selectEl.innerHTML = "";
+    for (const p of profiles) {
+      const opt = document.createElement("option");
+      opt.value = p.id;
+      opt.textContent = p.name;
+      selectEl.appendChild(opt);
+    }
+    const fallbackId = profiles[0]?.id || "";
+    const nextValue = profiles.some((p) => p.id === prev) ? prev : fallbackId;
+    if (nextValue) selectEl.value = nextValue;
+  };
 
-  for (const p of state.profiles) {
-    const opt = document.createElement("option");
-    opt.value = p.id;
-    opt.textContent = p.name;
-    select.appendChild(opt);
-  }
-  if (state.activeProfileId) select.value = state.activeProfileId;
-
-  const list = el("profileList");
-  list.innerHTML = "";
-
-  for (const p of state.profiles) {
-    const item = document.createElement("div");
-    item.className = "profileItem";
-    item.innerHTML = `
-      <div class="profileName">${escapeHtml(p.name)}</div>
-      <div class="profileMeta">${escapeHtml(p.id)}${p.id === state.activeProfileId ? " (active)" : ""}</div>
-      <div class="profileBtns">
-        <button class="btnGhost" data-act="use" data-id="${escapeHtml(p.id)}">Connect</button>
-        <button class="btnGhost" data-act="rename" data-id="${escapeHtml(p.id)}">Rename</button>
-        <button class="btnGhost" data-act="terminate" data-id="${escapeHtml(p.id)}">Terminate</button>
-        <button class="btnGhost" data-act="delete" data-id="${escapeHtml(p.id)}">Delete</button>
-      </div>
-    `;
-
-    item.querySelectorAll("button").forEach((btn) => {
-      btn.addEventListener("click", async () => {
-        const id = btn.dataset.id;
-        const act = btn.dataset.act;
-        try {
-          if (act === "use") {
-            await activateProfileAndSync(id);
-            toast("Profile", "Switched active profile");
-          }
-
-          if (act === "rename") {
-            const current = state.profiles.find((x) => x.id === id);
-            const next = window.prompt("New profile name", current?.name || "");
-            if (!next) return;
-            await window.api.renameProfile(id, next);
-            await refreshProfiles();
-            toast("Profile", "Renamed");
-          }
-
-          if (act === "terminate") {
-            if (!window.confirm("Terminate this WhatsApp session?")) return;
-            await window.api.terminateProfileSession(id);
-            await refreshProfiles();
-            toast("Profile", "Session terminated");
-          }
-
-          if (act === "delete") {
-            if (!window.confirm("Delete this profile? This removes saved session.")) return;
-            await window.api.deleteProfile(id);
-            await refreshProfiles();
-            toast("Profile", "Deleted");
-          }
-        } catch (e) {
-          toast("Profile error", String(e?.message || e));
-        }
-      });
-    });
-
-    list.appendChild(item);
-  }
+  fillSelect(el("profileSelect"), state.activeProfileId);
+  const preferredSettingsProfileId = state.settingsProfileId || state.activeProfileId;
+  fillSelect(el("settingProfileSelect"), preferredSettingsProfileId);
+  state.settingsProfileId = String(el("settingProfileSelect")?.value || state.settingsProfileId || "").trim();
 
   updateConnectProfileSummary();
+  updateSettingsProfileControls();
 }
 
 async function refreshProfiles() {
@@ -2712,6 +2711,7 @@ async function loadInitialDataAfterLogin() {
   state.branches = Array.isArray(branchRes?.branches) ? branchRes.branches : [];
   state.profiles = Array.isArray(profileRes?.profiles) ? profileRes.profiles : [];
   state.activeProfileId = profileRes?.activeProfileId || null;
+  state.settingsProfileId = state.settingsProfileId || state.activeProfileId || "";
 
   applySettingsToUi();
   renderBranchesToSelect("apptBranchSelect", userBranch);
@@ -2769,6 +2769,7 @@ function showLoginScreen() {
   state.waConnToggleBusy = false;
   state.waQrDataUrl = "";
   state.waPairingCode = "";
+  state.settingsProfileId = "";
   state.appointments = [];
   state.selectedAppointmentIds = new Set();
   state.marketingRecipients = [];
@@ -3332,20 +3333,65 @@ function bindEvents() {
       const id = el("profileSelect").value;
       if (!id) return;
       await activateProfileAndSync(id);
+      toast("Profile", `Active profile set to ${getProfileLabelById(id)}. Click Connect to start.`);
     } catch (e) {
       toast("Profile", String(e?.message || e));
     }
   });
 
-  el("btnCreateProfile").addEventListener("click", async () => {
-    const name = el("newProfileName").value.trim();
+  el("settingProfileSelect").addEventListener("change", () => {
+    state.settingsProfileId = getSelectedSettingsProfileId();
+    updateSettingsProfileControls();
+  });
+
+  el("btnCreateProfileSetting").addEventListener("click", async () => {
+    const name = el("settingNewProfileName").value.trim();
     if (!name) return toast("Profile", "Please enter profile name");
 
     try {
-      await window.api.createProfile(name);
-      el("newProfileName").value = "";
+      const res = await window.api.createProfile(name);
+      el("settingNewProfileName").value = "";
       await refreshProfiles();
+      const createdId = String(res?.profile?.id || "").trim();
+      if (createdId && getProfileById(createdId)) {
+        state.settingsProfileId = createdId;
+        const settingsSelect = el("settingProfileSelect");
+        if (settingsSelect) settingsSelect.value = createdId;
+        updateSettingsProfileControls();
+      }
       toast("Profile", "Created");
+    } catch (e) {
+      toast("Profile", String(e?.message || e));
+    }
+  });
+
+  el("btnSettingTerminateProfile").addEventListener("click", async () => {
+    const id = getSelectedSettingsProfileId();
+    if (!id) return;
+    const name = getProfileLabelById(id);
+    if (!window.confirm(`Terminate WhatsApp session for \"${name}\"?`)) return;
+
+    try {
+      await window.api.terminateProfileSession(id);
+      await refreshProfiles();
+      await syncConnectionStateFromBackend().catch(() => {});
+      toast("Profile", `Session terminated for ${name}`);
+    } catch (e) {
+      toast("Profile", String(e?.message || e));
+    }
+  });
+
+  el("btnSettingDeleteProfile").addEventListener("click", async () => {
+    const id = getSelectedSettingsProfileId();
+    if (!id) return;
+    const name = getProfileLabelById(id);
+    if (!window.confirm(`Delete profile \"${name}\"? This removes saved session.`)) return;
+
+    try {
+      await window.api.deleteProfile(id);
+      await refreshProfiles();
+      await syncConnectionStateFromBackend().catch(() => {});
+      toast("Profile", `Deleted ${name}`);
     } catch (e) {
       toast("Profile", String(e?.message || e));
     }

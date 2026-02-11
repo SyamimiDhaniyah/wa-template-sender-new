@@ -390,6 +390,20 @@ p {
   background: #ebf4f3;
 }
 
+.iconBtnDanger {
+  min-width: 36px;
+  width: 36px;
+  padding: 7px 0;
+  font-size: 14px;
+  border-color: #e3c1c1;
+  background: #fff7f7;
+  color: #7e2d2d;
+}
+
+.iconBtnDanger:hover {
+  background: #ffecec;
+}
+
 .tableWrap {
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -709,6 +723,10 @@ p {
 
 .connectProfilesCard {
   grid-column: 1 / -1;
+}
+
+.profileSettingsCard {
+  margin-bottom: 12px;
 }
 
 .qrPanel {

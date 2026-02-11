@@ -5183,7 +5183,7 @@ async function autoReconnectActiveProfile() {
   return { ok: true, started: true, profileId: activeProfileId };
 }
 
-async function disconnectActiveProfileSocket() {
+async function disconnectActiveProfileSocket(statusText = "Disconnected") {
   const activeProfileId = getActiveProfileId();
   handshakeAttemptId++;
   handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
@@ -5191,7 +5191,7 @@ async function disconnectActiveProfileSocket() {
   isConnecting = false;
   win?.webContents.send("wa:status", {
     connected: false,
-    text: "Disconnected",
+    text: String(statusText || "Disconnected"),
     profileId: activeProfileId
   });
   return { ok: true, profileId: activeProfileId, disconnected: true };
@@ -5396,7 +5396,7 @@ ipcMain.handle("app:deleteProfile", async (_evt, profileId) => {
 
 ipcMain.handle("app:setActiveProfile", async (_evt, profileId) => {
   setActiveProfileId(profileId);
-  await autoReconnectActiveProfile();
+  await disconnectActiveProfileSocket("Profile selected. Click Connect to start session.");
   return { ok: true, activeProfileId: getActiveProfileId() };
 });
 

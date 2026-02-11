@@ -474,22 +474,16 @@
               <div class="card connectProfilesCard">
                 <div class="cardHead">
                   <div>
-                    <h3>Profiles</h3>
-                    <div class="smallText">Separate WhatsApp sessions for each account.</div>
+                    <h3>Active Profile</h3>
+                    <div class="smallText">Choose which profile the Connect actions will use.</div>
                   </div>
                 </div>
 
                 <div class="inlineRow wrap">
-                  <label class="fieldLabel">Active</label>
+                  <label class="fieldLabel">Profile</label>
                   <select id="profileSelect" class="fieldInput compact"></select>
                 </div>
-
-                <div class="inlineRow wrap">
-                  <input id="newProfileName" class="fieldInput compact" placeholder="New profile name" />
-                  <button class="btnGhost" id="btnCreateProfile">Create</button>
-                </div>
-
-                <div id="profileList" class="profileList"></div>
+                <div class="smallText">Changing profile sets it as active and disconnects current socket. Click Connect to start that profile.</div>
               </div>
             </div>
           </div>
@@ -530,6 +524,31 @@
                 <h3>Timezone</h3>
                 <p class="smallText">All date/time logic is fixed to:</p>
                 <div class="pill">Asia/Kuala_Lumpur</div>
+              </div>
+            </div>
+
+            <div class="card profileSettingsCard">
+              <div class="cardHead">
+                <div>
+                  <h3>WhatsApp Profiles</h3>
+                  <div class="smallText">Create and manage profile sessions from settings.</div>
+                </div>
+              </div>
+
+              <div class="inlineRow wrap">
+                <label class="fieldLabel">Manage profile</label>
+                <select id="settingProfileSelect" class="fieldInput compact"></select>
+                <button class="btnGhost iconBtnDanger" id="btnSettingDeleteProfile" title="Delete selected profile" aria-label="Delete selected profile">🗑</button>
+              </div>
+
+              <div class="inlineRow wrap">
+                <button class="btnGhost" id="btnSettingTerminateProfile">Terminate Session</button>
+                <div class="smallText" id="settingProfileHint">Terminates current WhatsApp auth for selected profile only.</div>
+              </div>
+
+              <div class="inlineRow wrap">
+                <input id="settingNewProfileName" class="fieldInput compact" placeholder="New profile name" />
+                <button class="btnGhost" id="btnCreateProfileSetting">Create Profile</button>
               </div>
             </div>
 
