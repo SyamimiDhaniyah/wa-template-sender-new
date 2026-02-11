@@ -1591,11 +1591,21 @@ function upsertContactsForProfile(profileId, contacts) {
         ? existing?.imgUrl ?? null
         : String(c.imgUrl || "").trim() || null;
     const status = sanitizeContactName(c?.status) || sanitizeContactName(existing?.status);
-    const preferredPnJid = normalizePhoneNumberJid(jid || existing?.jid || `${msisdn}@s.whatsapp.net`) || `${msisdn}@s.whatsapp.net`;
+    const normalizedIncomingJid = normalizeJidForContact(jid || "");
+    const preferredPnJid = normalizePhoneNumberJid(contactPhoneJid || normalizedIncomingJid || existing?.jid || "");
+    const preferredLidJid = normalizeLidJid(contactLidJid || lid || normalizedIncomingJid || existing?.lid || "");
+    const fallbackPhoneJid = /^\d{8,15}$/.test(msisdn) ? `${msisdn}@s.whatsapp.net` : "";
+    const stableJid =
+      preferredPnJid ||
+      normalizedIncomingJid ||
+      normalizeJidForContact(existing?.jid || "") ||
+      preferredLidJid ||
+      fallbackPhoneJid;
+    if (!stableJid) continue;
 
     const next = {
       msisdn,
-      jid: preferredPnJid,
+      jid: stableJid,
       lid,
       name: nameCandidate,
       notify,
@@ -1892,20 +1902,33 @@ async function syncContactNamesForProfile(profileId, options) {
   return await syncTask;
 }
 
-function resolveContactPhotoFetchJid(contact) {
+function resolveContactPhotoFetchJid(profileId, contact) {
   if (!contact || typeof contact !== "object") return "";
-  const jid = normalizeJidForContact(contact.jid || "");
-  if (jid && !jid.endsWith("@g.us") && !jid.endsWith("@broadcast")) {
-    return jid;
+
+  let pnCandidate = "";
+  let lidCandidate = "";
+  const sourceCandidates = [contact.jid, contact.phoneNumber, contact.pnJid, contact.lid, contact.lidJid];
+  for (const candidate of sourceCandidates) {
+    const jid = normalizeJidForContact(candidate || "");
+    if (!jid) continue;
+    if (jid.endsWith("@g.us") || jid.endsWith("@broadcast")) continue;
+    if (!pnCandidate && isPnJid(jid)) pnCandidate = jid;
+    if (!lidCandidate && isLidJid(jid)) lidCandidate = jid;
   }
+  if (lidCandidate) {
+    const mappedPn = getMappedPnJidForProfile(profileId, lidCandidate);
+    if (mappedPn) return mappedPn;
+    return lidCandidate;
+  }
+  if (pnCandidate) return pnCandidate;
+
   const msisdn = normalizeMsisdnSafe(contact.msisdn || "");
-  return msisdn ? `${msisdn}@s.whatsapp.net` : "";
+  return /^\d{8,15}$/.test(msisdn) ? `${msisdn}@s.whatsapp.net` : "";
 }
 
-function shouldRefreshContactPhoto(contact, minMinutesBetweenChecks, forceMissing) {
+function shouldRefreshContactPhoto(profileId, contact, minMinutesBetweenChecks, forceMissing) {
   if (!contact || typeof contact !== "object") return false;
-  if (contact.imgUrl) return false;
-  const fetchJid = resolveContactPhotoFetchJid(contact);
+  const fetchJid = resolveContactPhotoFetchJid(profileId, contact);
   if (!fetchJid) return false;
   if (forceMissing === true) return true;
   const mins = Math.max(1, Number(minMinutesBetweenChecks || 180));
@@ -1984,13 +2007,13 @@ async function enrichContactPhotosForProfile(profileId, options) {
       .map((contact) => {
         const msisdn = cleanString(contact?.msisdn || "");
         if (!msisdn) return null;
-        const fetchJid = resolveContactPhotoFetchJid(contact);
+        const fetchJid = resolveContactPhotoFetchJid(profileId, contact);
         if (!fetchJid) return null;
         return { contact, fetchJid, msisdn };
       })
       .filter((entry) => {
         if (!entry || !entry.contact) return false;
-        return shouldRefreshContactPhoto(entry.contact, minMinutesBetweenPhotoChecks, forceMissing);
+        return shouldRefreshContactPhoto(profileId, entry.contact, minMinutesBetweenPhotoChecks, forceMissing);
       })
       .sort((a, b) => {
         const aPref = preferredSet.has(cleanString(a?.msisdn || "")) ? 1 : 0;

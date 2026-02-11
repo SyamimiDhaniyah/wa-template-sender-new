@@ -1020,12 +1020,23 @@ function renderWaChatList() {
     const item = document.createElement("div");
     item.className = `waChatItem${chat.jid === state.waActiveChatJid ? " active" : ""}`;
 
-    const avatar = document.createElement(chat.avatarUrl ? "img" : "div");
+    let avatar = document.createElement(chat.avatarUrl ? "img" : "div");
     avatar.className = "waChatAvatar";
     if (chat.avatarUrl) {
       avatar.src = chat.avatarUrl;
       avatar.alt = chat.title || "Avatar";
       avatar.loading = "lazy";
+      avatar.addEventListener("error", () => {
+        const fallback = document.createElement("div");
+        fallback.className = "waChatAvatar";
+        fallback.textContent = waChatInitial(chat);
+        try {
+          item.replaceChild(fallback, avatar);
+          avatar = fallback;
+        } catch {
+          // ignore replacement race
+        }
+      });
     } else {
       avatar.textContent = waChatInitial(chat);
     }
