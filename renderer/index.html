@@ -425,6 +425,25 @@
             </div>
 
             <div class="connectLayout">
+              <div class="card connectProfilesCard">
+                <div class="cardHead">
+                  <div>
+                    <h3>Active Profile</h3>
+                    <div class="smallText">Choose which profile the Connect actions will use.</div>
+                  </div>
+                  <div class="inlineRow">
+                    <button class="btnPrimary" id="btnHandshake">Connect</button>
+                    <button class="btnGhost" id="btnSoftDisconnect">Disconnect</button>
+                  </div>
+                </div>
+
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Profile</label>
+                  <select id="profileSelect" class="fieldInput compact"></select>
+                </div>
+                <div class="smallText">Changing profile sets it as active and disconnects current socket. Click Connect to start that profile.</div>
+              </div>
+
               <div class="card connectControlCard">
                 <div class="cardHead">
                   <div>
@@ -432,9 +451,15 @@
                     <div class="smallText" id="waStatusText">Not connected</div>
                     <div class="smallText" id="connectActiveProfileText">Active profile: -</div>
                   </div>
-                  <div class="inlineRow">
-                    <button class="btnPrimary" id="btnHandshake">Connect</button>
-                    <button class="btnGhost" id="btnSoftDisconnect">Disconnect</button>
+                </div>
+                <div class="smallText">Use Connect to start a session. Disconnect will stop the current socket without deleting profile session files.</div>
+              </div>
+
+              <div class="card connectPreviewCard">
+                <div class="cardHead">
+                  <div>
+                    <h3>QR / Pairing Preview</h3>
+                    <div class="smallText" id="connectPreviewHint">Choose method below, then click Connect.</div>
                   </div>
                 </div>
 
@@ -450,16 +475,6 @@
                     <input class="fieldInput compact" id="pairingPhone" placeholder="60123456789" />
                   </div>
                 </div>
-                <div class="smallText">Use Connect to start a session. Disconnect will stop the current socket without deleting profile session files.</div>
-              </div>
-
-              <div class="card connectPreviewCard">
-                <div class="cardHead">
-                  <div>
-                    <h3>QR / Pairing Preview</h3>
-                    <div class="smallText" id="connectPreviewHint">Select a method and click Connect.</div>
-                  </div>
-                </div>
 
                 <div class="qrPanel">
                   <div id="qrEmptyState" class="qrEmptyState">QR code will appear here once connection starts.</div>
@@ -469,21 +484,6 @@
                     <div id="pairingCodeText" class="pairingCodeText">-</div>
                   </div>
                 </div>
-              </div>
-
-              <div class="card connectProfilesCard">
-                <div class="cardHead">
-                  <div>
-                    <h3>Active Profile</h3>
-                    <div class="smallText">Choose which profile the Connect actions will use.</div>
-                  </div>
-                </div>
-
-                <div class="inlineRow wrap">
-                  <label class="fieldLabel">Profile</label>
-                  <select id="profileSelect" class="fieldInput compact"></select>
-                </div>
-                <div class="smallText">Changing profile sets it as active and disconnects current socket. Click Connect to start that profile.</div>
               </div>
             </div>
           </div>
