@@ -1,4 +1,4 @@
-# WA Template Sender
+# WhatsConect
 
 Desktop WhatsApp template sender for patient follow-ups.
 

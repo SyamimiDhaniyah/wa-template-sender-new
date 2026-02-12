@@ -1,11 +1,14 @@
 {
-  "name": "wa-template-sender",
+  "name": "whatsconect",
   "version": "1.2.0",
+  "description": "WhatsConect messaging console for templates, appointments, and marketing.",
+  "author": "Dentabay",
   "private": true,
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win nsis --prepackaged dist/win-unpacked --config.win.signAndEditExecutable=false --config.win.verifyUpdateCodeSignature=false --publish never"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
@@ -18,8 +21,8 @@
     "electron-builder": "^26.7.0"
   },
   "build": {
-    "appId": "com.izz.waTemplateSender",
-    "productName": "WA Template Sender",
+    "appId": "com.dentabay.whatsconect",
+    "productName": "WhatsConect",
     "files": [
       "main.js",
       "preload.js",
@@ -31,10 +34,19 @@
       "output": "dist"
     },
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/icon.ico",
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false,
+      "requestedExecutionLevel": "asInvoker"
     },
     "mac": {
       "target": "dmg"
+    },
+    "nsis": {
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
     }
   }
 }
