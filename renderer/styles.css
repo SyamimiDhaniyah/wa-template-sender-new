@@ -734,6 +734,14 @@ p {
   margin-bottom: 12px;
 }
 
+.profileManageRow {
+  gap: 10px;
+}
+
+.profileManageRow #settingProfileSelect {
+  min-width: 200px;
+}
+
 .qrPanel {
   border: 1px dashed #c2dbd7;
   border-radius: 14px;
@@ -1410,6 +1418,16 @@ p {
   white-space: pre-wrap;
   font-family: "Consolas", monospace;
   font-size: 12px;
+}
+
+.createProfileModalCard {
+  width: 460px;
+}
+
+.createProfileModalBody {
+  margin: 8px 0 14px;
+  display: grid;
+  gap: 7px;
 }
 
 .toastWrap {

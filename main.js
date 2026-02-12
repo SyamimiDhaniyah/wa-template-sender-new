@@ -80,6 +80,7 @@ const CLINIC_SETTINGS_KEY = "clinicSettings";
 const CLINIC_APPOINTMENT_TEMPLATES_KEY = "clinicAppointmentTemplates";
 const CLINIC_API_KEY_AUTH = "api:s4bMNy03";
 const CLINIC_API_KEY_DATA = "api:lY50ALPv";
+const DEFAULT_WA_PROFILE_NAME = "Dentabay";
 
 const DEFAULT_CLINIC_SETTINGS = {
   timezone: CLINIC_TZ,
@@ -1218,9 +1219,24 @@ function loadProfiles() {
   ensureDir(profilesRootDir);
   const profiles = store.get("profiles");
   if (Array.isArray(profiles) && profiles.length > 0) {
-    return saveProfiles(profiles);
+    const normalized = saveProfiles(profiles);
+    let migrated = false;
+    const renamed = normalized.map((p) => {
+      if (p?.id !== "p_default") return p;
+      if (p?.customName === true) return p;
+      const currentName = String(p?.name || "").trim();
+      if (currentName && currentName !== "Default WhatsApp" && currentName !== "WhatsApp Profile") return p;
+      migrated = true;
+      return {
+        ...p,
+        name: DEFAULT_WA_PROFILE_NAME,
+        customName: false
+      };
+    });
+    if (migrated) return saveProfiles(renamed);
+    return normalized;
   }
-  const defaultProfile = normalizeProfileRecord({ id: "p_default", name: "Default WhatsApp", customName: false });
+  const defaultProfile = normalizeProfileRecord({ id: "p_default", name: DEFAULT_WA_PROFILE_NAME, customName: false });
   store.set("profiles", [defaultProfile]);
   store.set("activeProfileId", defaultProfile.id);
   return [defaultProfile];
@@ -1309,7 +1325,7 @@ async function deleteProfile(profileId) {
   if (nextProfiles.length === 0) {
     const fallback = normalizeProfileRecord({
       id: "p_default",
-      name: "Default WhatsApp",
+      name: DEFAULT_WA_PROFILE_NAME,
       customName: false
     });
     saveProfiles([fallback]);

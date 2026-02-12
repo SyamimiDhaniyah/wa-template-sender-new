@@ -325,12 +325,16 @@ function updateSettingsProfileControls() {
   const selectedId = getSelectedSettingsProfileId();
   const selected = getProfileById(selectedId);
   const disableManage = !selected || state.waConnToggleBusy || state.waConnecting;
+  const disableCreate = state.waConnToggleBusy || state.waConnecting;
 
   const terminateBtn = el("btnSettingTerminateProfile");
   if (terminateBtn) terminateBtn.disabled = disableManage;
 
   const deleteBtn = el("btnSettingDeleteProfile");
   if (deleteBtn) deleteBtn.disabled = disableManage;
+
+  const createBtn = el("btnCreateProfileSetting");
+  if (createBtn) createBtn.disabled = disableCreate;
 
   const hint = el("settingProfileHint");
   if (hint) {
@@ -2381,6 +2385,38 @@ function closeConfirmModal(confirmed) {
   }
 }
 
+function openCreateProfileModal(defaultName = "") {
+  el("createProfileModal").classList.remove("hidden");
+  const input = el("createProfileNameInput");
+  if (input) {
+    input.value = String(defaultName || "");
+    input.focus();
+    input.select();
+  }
+}
+
+function closeCreateProfileModal() {
+  el("createProfileModal").classList.add("hidden");
+}
+
+async function createProfileFromModal() {
+  const rawName = String(el("createProfileNameInput")?.value || "").trim();
+  const fallbackName = `Profile ${Math.max(1, (Array.isArray(state.profiles) ? state.profiles.length : 0) + 1)}`;
+  const name = rawName || fallbackName;
+
+  const res = await window.api.createProfile(name);
+  await refreshProfiles();
+  const createdId = String(res?.profile?.id || "").trim();
+  if (createdId && getProfileById(createdId)) {
+    state.settingsProfileId = createdId;
+    const settingsSelect = el("settingProfileSelect");
+    if (settingsSelect) settingsSelect.value = createdId;
+    updateSettingsProfileControls();
+  }
+  closeCreateProfileModal();
+  toast("Profile", `Created ${name}`);
+}
+
 async function sendPreparedItems(items, batchLabel, aiEnabled) {
   const sendItems = (Array.isArray(items) ? items : []).map((x) => ({
     phone: x.phone,
@@ -3345,25 +3381,9 @@ function bindEvents() {
     updateSettingsProfileControls();
   });
 
-  el("btnCreateProfileSetting").addEventListener("click", async () => {
-    const name = el("settingNewProfileName").value.trim();
-    if (!name) return toast("Profile", "Please enter profile name");
-
-    try {
-      const res = await window.api.createProfile(name);
-      el("settingNewProfileName").value = "";
-      await refreshProfiles();
-      const createdId = String(res?.profile?.id || "").trim();
-      if (createdId && getProfileById(createdId)) {
-        state.settingsProfileId = createdId;
-        const settingsSelect = el("settingProfileSelect");
-        if (settingsSelect) settingsSelect.value = createdId;
-        updateSettingsProfileControls();
-      }
-      toast("Profile", "Created");
-    } catch (e) {
-      toast("Profile", String(e?.message || e));
-    }
+  el("btnCreateProfileSetting").addEventListener("click", () => {
+    const suggestedName = `Profile ${Math.max(1, (Array.isArray(state.profiles) ? state.profiles.length : 0) + 1)}`;
+    openCreateProfileModal(suggestedName);
   });
 
   el("btnSettingTerminateProfile").addEventListener("click", async () => {
@@ -3406,12 +3426,31 @@ function bindEvents() {
   el("btnConfirmSend").addEventListener("click", () => closeConfirmModal(true));
   el("btnCancelConfirm").addEventListener("click", () => closeConfirmModal(false));
   el("confirmModalBackdrop").addEventListener("click", () => closeConfirmModal(false));
+  el("btnCreateProfileModalSave").addEventListener("click", async () => {
+    try {
+      await createProfileFromModal();
+    } catch (e) {
+      toast("Profile", String(e?.message || e));
+    }
+  });
+  el("btnCreateProfileModalCancel").addEventListener("click", () => closeCreateProfileModal());
+  el("createProfileModalBackdrop").addEventListener("click", () => closeCreateProfileModal());
+  el("createProfileNameInput").addEventListener("keydown", async (evt) => {
+    if (evt.key !== "Enter") return;
+    evt.preventDefault();
+    try {
+      await createProfileFromModal();
+    } catch (e) {
+      toast("Profile", String(e?.message || e));
+    }
+  });
   el("waImageLightboxClose").addEventListener("click", () => closeWaImageLightbox());
   el("waImageLightbox").addEventListener("click", (evt) => {
     if (evt.target === el("waImageLightbox")) closeWaImageLightbox();
   });
   document.addEventListener("keydown", (evt) => {
     if (evt.key !== "Escape") return;
+    closeCreateProfileModal();
     closeWaImageLightbox();
     closeWaEmojiPicker({ restoreFocus: false });
   });

@@ -525,21 +525,14 @@
                 </div>
               </div>
 
-              <div class="inlineRow wrap">
+              <div class="inlineRow wrap profileManageRow">
                 <label class="fieldLabel">Manage profile</label>
                 <select id="settingProfileSelect" class="fieldInput compact"></select>
+                <button class="btnGhost" id="btnSettingTerminateProfile">Terminate</button>
                 <button class="btnGhost iconBtnDanger" id="btnSettingDeleteProfile" title="Delete selected profile" aria-label="Delete selected profile">🗑</button>
+                <button class="btnGhost" id="btnCreateProfileSetting">Create New Profile</button>
               </div>
-
-              <div class="inlineRow wrap">
-                <button class="btnGhost" id="btnSettingTerminateProfile">Terminate Session</button>
-                <div class="smallText" id="settingProfileHint">Terminates current WhatsApp auth for selected profile only.</div>
-              </div>
-
-              <div class="inlineRow wrap">
-                <input id="settingNewProfileName" class="fieldInput compact" placeholder="New profile name" />
-                <button class="btnGhost" id="btnCreateProfileSetting">Create Profile</button>
-              </div>
+              <div class="smallText" id="settingProfileHint">Terminates current WhatsApp auth for selected profile only.</div>
             </div>
 
             <button class="btnPrimary" id="btnSaveSettings">Save Settings</button>
@@ -592,6 +585,28 @@
         <div class="inlineRow right">
           <button class="btnGhost" id="btnCancelConfirm">Cancel</button>
           <button class="btnPrimary" id="btnConfirmSend">Confirm & Send</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="createProfileModal">
+      <div class="modalBackdrop" id="createProfileModalBackdrop"></div>
+      <div class="modalCard createProfileModalCard">
+        <div class="cardHead">
+          <div>
+            <h3>Create New Profile</h3>
+            <div class="smallText">New profile will store a separate WhatsApp session.</div>
+          </div>
+        </div>
+
+        <div class="createProfileModalBody">
+          <label class="fieldLabel" for="createProfileNameInput">Profile name</label>
+          <input id="createProfileNameInput" class="fieldInput" placeholder="e.g. Front Desk" />
+        </div>
+
+        <div class="inlineRow right">
+          <button class="btnGhost" id="btnCreateProfileModalCancel">Cancel</button>
+          <button class="btnPrimary" id="btnCreateProfileModalSave">Create</button>
         </div>
       </div>
     </div>
