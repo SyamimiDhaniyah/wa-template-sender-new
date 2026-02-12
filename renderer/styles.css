@@ -638,6 +638,58 @@ p {
   gap: 8px;
 }
 
+.apptTplDrawer {
+  padding: 0;
+  overflow: hidden;
+}
+
+.apptTplDrawerSummary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  padding: 10px 12px;
+  background: #f8fcfb;
+}
+
+.apptTplDrawerSummary::-webkit-details-marker {
+  display: none;
+}
+
+.apptTplDrawerSummary .subHead {
+  margin: 0;
+}
+
+.apptTplDrawerHint {
+  color: #4d6f6b;
+}
+
+.apptTplDrawerBody {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.apptTplDrawer[open] .apptTplDrawerSummary {
+  border-bottom: 1px solid #dbe9e6;
+  background: #f4fbfa;
+}
+
+.apptTplDrawer[open] .apptTplDrawerHint {
+  color: transparent;
+  position: relative;
+}
+
+.apptTplDrawer[open] .apptTplDrawerHint::before {
+  content: "Click to collapse";
+  color: #4d6f6b;
+  position: absolute;
+  right: 0;
+  top: 0;
+}
+
 .placeholderPanel {
   border: 1px solid #d9e8e6;
   border-radius: 12px;

@@ -386,29 +386,44 @@
                 </div>
 
                 <div class="apptTemplateEditor">
-                  <section class="subCard">
-                    <div class="subHead">Remind Appointment</div>
-                    <label class="fieldLabel">Bahasa</label>
-                    <textarea id="tplRemindBahasa" class="fieldInput" rows="6"></textarea>
-                    <label class="fieldLabel">English</label>
-                    <textarea id="tplRemindEnglish" class="fieldInput" rows="6"></textarea>
-                  </section>
+                  <details class="subCard apptTplDrawer">
+                    <summary class="apptTplDrawerSummary">
+                      <span class="subHead">Remind Appointment</span>
+                      <span class="smallText apptTplDrawerHint">Click to expand</span>
+                    </summary>
+                    <div class="apptTplDrawerBody">
+                      <label class="fieldLabel">Bahasa</label>
+                      <textarea id="tplRemindBahasa" class="fieldInput" rows="6"></textarea>
+                      <label class="fieldLabel">English</label>
+                      <textarea id="tplRemindEnglish" class="fieldInput" rows="6"></textarea>
+                    </div>
+                  </details>
 
-                  <section class="subCard">
-                    <div class="subHead">Follow Up</div>
-                    <label class="fieldLabel">Bahasa</label>
-                    <textarea id="tplFollowBahasa" class="fieldInput" rows="5"></textarea>
-                    <label class="fieldLabel">English</label>
-                    <textarea id="tplFollowEnglish" class="fieldInput" rows="5"></textarea>
-                  </section>
+                  <details class="subCard apptTplDrawer">
+                    <summary class="apptTplDrawerSummary">
+                      <span class="subHead">Follow Up</span>
+                      <span class="smallText apptTplDrawerHint">Click to expand</span>
+                    </summary>
+                    <div class="apptTplDrawerBody">
+                      <label class="fieldLabel">Bahasa</label>
+                      <textarea id="tplFollowBahasa" class="fieldInput" rows="5"></textarea>
+                      <label class="fieldLabel">English</label>
+                      <textarea id="tplFollowEnglish" class="fieldInput" rows="5"></textarea>
+                    </div>
+                  </details>
 
-                  <section class="subCard">
-                    <div class="subHead">Request Review</div>
-                    <label class="fieldLabel">Bahasa</label>
-                    <textarea id="tplReviewBahasa" class="fieldInput" rows="5"></textarea>
-                    <label class="fieldLabel">English</label>
-                    <textarea id="tplReviewEnglish" class="fieldInput" rows="5"></textarea>
-                  </section>
+                  <details class="subCard apptTplDrawer">
+                    <summary class="apptTplDrawerSummary">
+                      <span class="subHead">Request Review</span>
+                      <span class="smallText apptTplDrawerHint">Click to expand</span>
+                    </summary>
+                    <div class="apptTplDrawerBody">
+                      <label class="fieldLabel">Bahasa</label>
+                      <textarea id="tplReviewBahasa" class="fieldInput" rows="5"></textarea>
+                      <label class="fieldLabel">English</label>
+                      <textarea id="tplReviewEnglish" class="fieldInput" rows="5"></textarea>
+                    </div>
+                  </details>
                 </div>
 
                 <div class="smallText">Common placeholders: {name}, {branch}, {dentist}, {date}, {weekday}, {time}, {address}, {branch_phone}, {google_direction}, {waze_direction}, {google_review_link}, {title_bm}, {title_en}</div>
@@ -562,7 +577,7 @@
                 <label class="fieldLabel">Manage profile</label>
                 <select id="settingProfileSelect" class="fieldInput compact"></select>
                 <button class="btnGhost" id="btnSettingTerminateProfile">Terminate</button>
-                <button class="btnGhost iconBtnDanger" id="btnSettingDeleteProfile" title="Delete selected profile" aria-label="Delete selected profile">🗑</button>
+                <button class="btnGhost" id="btnSettingDeleteProfile" title="Delete selected profile" aria-label="Delete selected profile">Delete</button>
                 <button class="btnGhost" id="btnCreateProfileSetting">Create New Profile</button>
               </div>
               <div class="smallText" id="settingProfileHint">Terminates current WhatsApp auth for selected profile only.</div>
