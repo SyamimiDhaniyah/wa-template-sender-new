@@ -50,6 +50,7 @@
           <button class="tabBtn" data-tab="marketing">Marketing</button>
           <button class="tabBtn" data-tab="templates">Template</button>
           <button class="tabBtn" data-tab="connect">Connect</button>
+          <button class="tabBtn" data-tab="queue">Queue</button>
           <button class="tabBtn" data-tab="settings">Setting</button>
         </nav>
 
@@ -478,6 +479,38 @@
             </div>
           </div>
 
+          <div class="tabPanel hidden" id="tab-queue">
+            <div class="panelTitleRow">
+              <div>
+                <h2>Queue</h2>
+                <p>Track batch sending progress and stop active marketing sends when needed.</p>
+              </div>
+            </div>
+
+            <section class="activityBar queueActivityBar">
+              <div class="activityHead">
+                <h3>Send Activity</h3>
+                <div class="activityActions">
+                  <button class="btnGhost" id="btnStopSending" disabled>Stop</button>
+                  <button class="btnGhost" id="btnClearActivity">Clear</button>
+                </div>
+              </div>
+              <div class="tableWrap short">
+                <table class="dataTable">
+                  <thead>
+                    <tr>
+                      <th style="width: 170px;">Time</th>
+                      <th style="width: 160px;">Phone</th>
+                      <th style="width: 110px;">Status</th>
+                      <th>Error</th>
+                    </tr>
+                  </thead>
+                  <tbody id="activityBody"></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
           <div class="tabPanel hidden" id="tab-settings">
             <div class="panelTitleRow">
               <div>
@@ -536,26 +569,6 @@
             </div>
 
             <button class="btnPrimary" id="btnSaveSettings">Save Settings</button>
-          </div>
-        </section>
-
-        <section class="activityBar">
-          <div class="activityHead">
-            <h3>Send Activity</h3>
-            <button class="btnGhost" id="btnClearActivity">Clear</button>
-          </div>
-          <div class="tableWrap short">
-            <table class="dataTable">
-              <thead>
-                <tr>
-                  <th style="width: 170px;">Time</th>
-                  <th style="width: 160px;">Phone</th>
-                  <th style="width: 110px;">Status</th>
-                  <th>Error</th>
-                </tr>
-              </thead>
-              <tbody id="activityBody"></tbody>
-            </table>
           </div>
         </section>
       </main>

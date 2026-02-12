@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld("api", {
   waResolveImagePreview: (payload) => ipcRenderer.invoke("wa:resolveImagePreview", payload),
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
   waSendPreparedBatch: (payload) => ipcRenderer.invoke("wa:sendPreparedBatch", payload),
+  waStopBatch: () => ipcRenderer.invoke("wa:stopBatch"),
 
   clearSentForTemplate: (templateId) => ipcRenderer.invoke("wa:clearSentForTemplate", templateId),
   importCsv: (mapping) => ipcRenderer.invoke("app:openCsvDialogAndParse", mapping),

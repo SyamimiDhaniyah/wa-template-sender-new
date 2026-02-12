@@ -136,6 +136,8 @@ const state = {
   profiles: [],
   activeProfileId: null,
   settingsProfileId: "",
+  batchSending: false,
+  batchStopPending: false,
   activityRows: [],
   currentTemplateId: null,
   confirmResolver: null,
@@ -297,6 +299,23 @@ function refreshConnectionControls() {
 function setConnectionBusy(busy) {
   state.waConnToggleBusy = !!busy;
   refreshConnectionControls();
+}
+
+function setBatchSending(isSending) {
+  state.batchSending = !!isSending;
+  if (!state.batchSending) state.batchStopPending = false;
+  const stopBtn = el("btnStopSending");
+  if (!stopBtn) return;
+  stopBtn.textContent = state.batchStopPending && state.batchSending ? "Stopping..." : "Stop";
+  stopBtn.disabled = !state.batchSending || state.batchStopPending;
+}
+
+function setBatchStopPending(pending) {
+  state.batchStopPending = !!pending && !!state.batchSending;
+  const stopBtn = el("btnStopSending");
+  if (!stopBtn) return;
+  stopBtn.textContent = state.batchStopPending ? "Stopping..." : "Stop";
+  stopBtn.disabled = !state.batchSending || state.batchStopPending;
 }
 
 function updateConnectProfileSummary() {
@@ -2447,15 +2466,29 @@ async function sendPreparedItems(items, batchLabel, aiEnabled) {
     return null;
   }
 
-  return await window.api.waSendPreparedBatch({
-    batchLabel,
-    items: sendItems,
-    pacing: { pattern: "random", minSec: state.settings.gapMinSec, maxSec: state.settings.gapMaxSec },
-    aiRewrite: aiEnabled
-      ? { enabled: true, prompt: AI_VARIATION_PROMPT, fallbackToOriginal: true }
-      : { enabled: false },
-    safety: { maxRecipients: 500 }
-  });
+  setBatchSending(true);
+  try {
+    return await window.api.waSendPreparedBatch({
+      batchLabel,
+      items: sendItems,
+      pacing: { pattern: "random", minSec: state.settings.gapMinSec, maxSec: state.settings.gapMaxSec },
+      aiRewrite: aiEnabled
+        ? { enabled: true, prompt: AI_VARIATION_PROMPT, fallbackToOriginal: true }
+        : { enabled: false },
+      safety: { maxRecipients: 500 }
+    });
+  } finally {
+    setBatchSending(false);
+  }
+}
+
+function showBatchCompletedAlert(title, result) {
+  if (!result || result.stopped) return;
+  const sent = Math.max(0, Number(result.sent || 0));
+  const failed = Math.max(0, Number(result.failed || 0));
+  const skipped = Math.max(0, Number(result.skipped || 0));
+  const total = Math.max(sent + failed + skipped, Number(result.total || 0));
+  window.alert(`${title} completed.\nTotal: ${total}\nSent: ${sent}\nFailed: ${failed}\nSkipped: ${skipped}`);
 }
 
 async function doAppointmentSend(purposeKey, langId, aiId) {
@@ -2473,6 +2506,11 @@ async function doAppointmentSend(purposeKey, langId, aiId) {
 
   const res = await sendPreparedItems(items, `appointment_${purposeKey}`, !!el(aiId).checked);
   if (!res) return;
+  if (res.stopped) {
+    toast("Appointment send stopped", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
+    return;
+  }
+  showBatchCompletedAlert("Appointment send", res);
   toast("Appointment send done", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
 }
 
@@ -2565,6 +2603,11 @@ async function sendMarketing() {
 
   const res = await sendPreparedItems(items, `marketing_${template.id}`, !!el("aiMarketing").checked);
   if (!res) return;
+  if (res.stopped) {
+    toast("Marketing send stopped", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
+    return;
+  }
+  showBatchCompletedAlert("Marketing send", res);
   toast("Marketing send done", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
 }
 
@@ -2778,6 +2821,8 @@ async function loadInitialDataAfterLogin() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   state.waEmojiPickerOpen = false;
+  state.batchSending = false;
+  state.batchStopPending = false;
   setWaDropActive(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
@@ -2797,6 +2842,7 @@ async function loadInitialDataAfterLogin() {
   await loadAppointments();
   renderMarketingRecipients();
   renderActivity();
+  setBatchSending(false);
 }
 
 function showLoginScreen() {
@@ -2823,6 +2869,8 @@ function showLoginScreen() {
   state.waMessagesReqSeq = 0;
   state.waDropDepth = 0;
   state.waEmojiPickerOpen = false;
+  state.batchSending = false;
+  state.batchStopPending = false;
   setWaDropActive(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
@@ -2837,6 +2885,7 @@ function showLoginScreen() {
   closeWaImageLightbox();
   closeWaEmojiPicker({ restoreFocus: false });
   setConnectionBadge(false, "Not connected", false);
+  setBatchSending(false);
   clearConnectPreview({ clearPairing: true });
   renderWaChatList();
   renderWaConversationHead();
@@ -2881,6 +2930,7 @@ async function tryRestoreSession() {
 }
 function bindEvents() {
   renderWaEmojiPicker();
+  setBatchSending(false);
 
   document.querySelectorAll(".tabBtn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -3422,6 +3472,27 @@ function bindEvents() {
     state.activityRows = [];
     renderActivity();
   });
+  el("btnStopSending").addEventListener("click", async () => {
+    if (!state.batchSending) {
+      setBatchSending(false);
+      toast("Send", "No active sending process");
+      return;
+    }
+
+    setBatchStopPending(true);
+    try {
+      const res = await window.api.waStopBatch();
+      if (res?.ok) {
+        toast("Send", "Stopping send process...");
+        return;
+      }
+      setBatchSending(false);
+      toast("Send", String(res?.message || "No active sending process"));
+    } catch (e) {
+      setBatchStopPending(false);
+      toast("Send", String(e?.message || e));
+    }
+  });
 
   el("btnConfirmSend").addEventListener("click", () => closeConfirmModal(true));
   el("btnCancelConfirm").addEventListener("click", () => closeConfirmModal(false));
@@ -3533,6 +3604,9 @@ function bindEvents() {
 
   window.api.onBatchProgress((row) => {
     if (!row) return;
+    if (row.status === "stopped") {
+      setBatchSending(false);
+    }
     pushActivity({
       ts: row.ts || "",
       phone: row.phone || "",

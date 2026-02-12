@@ -1295,11 +1295,26 @@ p {
   padding: 12px 18px 14px;
 }
 
+.queueActivityBar {
+  border-top: 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+  box-shadow: 0 8px 22px rgba(21, 35, 35, 0.05);
+  padding: 14px;
+}
+
 .activityHead {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+}
+
+.activityActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .activityHead h3 {
@@ -1331,6 +1346,11 @@ p {
 .status-skipped {
   background: #f9efcf;
   color: #8f6200;
+}
+
+.status-stopped {
+  background: #ece4ff;
+  color: #5f3fa6;
 }
 
 .modal {
@@ -1495,7 +1515,7 @@ p {
   }
 
   .tabNav {
-    grid-template-columns: repeat(6, minmax(120px, 1fr));
+    grid-template-columns: repeat(7, minmax(120px, 1fr));
     overflow: auto;
   }
 

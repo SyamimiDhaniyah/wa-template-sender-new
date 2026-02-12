@@ -65,6 +65,7 @@ const WA_CHAT_PERSIST_DEBOUNCE_MS = 2200;
 const WA_PERSISTED_THUMB_MAX_CHARS = 18 * 1024;
 const WA_ENABLE_AUTO_IMAGE_PRESAVE = false;
 let waChatPersistTimer = null;
+let activeBatchJob = null;
 
 const store = new Store();
 
@@ -1190,6 +1191,53 @@ function delayMsFromPattern(patternName, minSec, maxSec, idx) {
   // fixed average
   const avg = Math.round((min + max) / 2);
   return avg * 1000;
+}
+
+function beginBatchJob(kind, totalCount) {
+  if (activeBatchJob && activeBatchJob.active === true) {
+    throw new Error("Another sending process is already running");
+  }
+  activeBatchJob = {
+    id: `batch_${Date.now()}_${Math.random().toString(16).slice(2, 8)}`,
+    kind: cleanString(kind) || "batch",
+    totalCount: Math.max(0, Number(totalCount || 0) || 0),
+    active: true,
+    cancelRequested: false,
+    startedAtIso: nowIsoShort()
+  };
+  return activeBatchJob;
+}
+
+function finishBatchJob(job) {
+  if (!job || !activeBatchJob) return;
+  if (activeBatchJob.id !== job.id) return;
+  activeBatchJob = null;
+}
+
+function isBatchJobCancelRequested(job) {
+  if (!job || !job.id) return false;
+  if (!activeBatchJob || activeBatchJob.id !== job.id) return true;
+  return activeBatchJob.cancelRequested === true;
+}
+
+async function waitDelayOrBatchCancel(job, ms) {
+  let remaining = Math.max(0, Number(ms || 0) || 0);
+  while (remaining > 0) {
+    if (isBatchJobCancelRequested(job)) return false;
+    const slice = Math.min(250, remaining);
+    await new Promise((r) => setTimeout(r, slice));
+    remaining -= slice;
+  }
+  return !isBatchJobCancelRequested(job);
+}
+
+function requestStopActiveBatchJob() {
+  const job = activeBatchJob;
+  if (!job || job.active !== true) {
+    return { ok: false, active: false, message: "No active sending process" };
+  }
+  job.cancelRequested = true;
+  return { ok: true, active: true, batchId: job.id, kind: job.kind };
 }
 
 /* --------------------------- Profiles (saved WhatsApp numbers) ---------------------------- */
@@ -5720,123 +5768,169 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  const batchJob = beginBatchJob("sendBatch", recipients.length);
+  let stopped = false;
+  let stoppedAtIndex = 0;
+  let stopEventSent = false;
+  const emitStopped = (indexHint) => {
+    if (stopEventSent) return;
+    stopEventSent = true;
+    win?.webContents.send("batch:progress", {
+      ts: nowIsoShort(),
+      index: Math.max(1, Math.min(recipients.length || 1, Number(indexHint || 1))),
+      total: recipients.length,
+      phone: "",
+      status: "stopped",
+      error: "Stopped by user"
+    });
+  };
 
-  for (let i = 0; i < recipients.length; i++) {
-    const rawPhone = recipients[i];
-    let msisdn = "";
+  try {
+    for (let i = 0; i < recipients.length; i++) {
+      if (isBatchJobCancelRequested(batchJob)) {
+        stopped = true;
+        stoppedAtIndex = i + 1;
+        emitStopped(stoppedAtIndex);
+        break;
+      }
 
-    try {
-      msisdn = normalizeMsisdn(rawPhone);
-    } catch (e) {
-      failed++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: recipients.length,
-        phone: String(rawPhone),
-        status: "failed",
-        error: "Invalid phone number"
-      });
-      continue;
-    }
+      const rawPhone = recipients[i];
+      let msisdn = "";
 
-    if (skipAlreadySent && wasSent(templateId, msisdn)) {
-      skipped++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: recipients.length,
-        phone: msisdn,
-        status: "skipped",
-        error: "Already sent (this template)"
-      });
+      try {
+        msisdn = normalizeMsisdn(rawPhone);
+      } catch (e) {
+        failed++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: String(rawPhone),
+          status: "failed",
+          error: "Invalid phone number"
+        });
+        continue;
+      }
+
+      if (skipAlreadySent && wasSent(templateId, msisdn)) {
+        skipped++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: msisdn,
+          status: "skipped",
+          error: "Already sent (this template)"
+        });
+
+        if (i < recipients.length - 1) {
+          const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
+          const completedDelay = await waitDelayOrBatchCancel(batchJob, ms);
+          if (!completedDelay) {
+            stopped = true;
+            stoppedAtIndex = i + 2;
+            emitStopped(stoppedAtIndex);
+            break;
+          }
+        }
+        continue;
+      }
+
+      try {
+        const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
+        const hintedName = firstNonEmptyString([vars?.name, vars?.Name, vars?.patient_name, vars?.patientName]);
+        if (hintedName) {
+          rememberRecipientNameForProfile(activeProfileIdForBatch, msisdn, hintedName);
+        }
+        const baseText = renderTemplate(templateBody, vars);
+        let text = baseText;
+
+        if (aiCfg.enabled) {
+          const promptVars = { ...(vars || {}), msisdn, phone: msisdn, templateId };
+          const promptText = renderTemplate(aiCfg.prompt, promptVars);
+
+          try {
+            text = await rewriteMessageViaBackend({
+              endpoint: aiCfg.endpoint,
+              authToken: aiAuthToken,
+              prompt: promptText,
+              message: baseText,
+              variables: vars,
+              msisdn,
+              templateId,
+              timeoutMs: aiCfg.timeoutMs
+            });
+          } catch (aiErr) {
+            if (!aiCfg.fallbackToOriginal) {
+              throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
+            }
+
+            text = baseText;
+            win?.webContents.send("batch:progress", {
+              ts: nowIsoShort(),
+              index: i + 1,
+              total: recipients.length,
+              phone: msisdn,
+              status: "sending",
+              error: `AI fallback: ${String(aiErr?.message || aiErr)}`
+            });
+          }
+        }
+
+        if (isBatchJobCancelRequested(batchJob)) {
+          stopped = true;
+          stoppedAtIndex = i + 1;
+          emitStopped(stoppedAtIndex);
+          break;
+        }
+
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: msisdn,
+          status: "sending"
+        });
+
+        await sendText(msisdn, text);
+        markSent(templateId, msisdn);
+        sent++;
+
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: msisdn,
+          status: "sent"
+        });
+      } catch (e) {
+        failed++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: msisdn,
+          status: "failed",
+          error: String(e?.message || e)
+        });
+      }
 
       if (i < recipients.length - 1) {
         const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
-        await new Promise((r) => setTimeout(r, ms));
-      }
-      continue;
-    }
-
-    try {
-      const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
-      const hintedName = firstNonEmptyString([vars?.name, vars?.Name, vars?.patient_name, vars?.patientName]);
-      if (hintedName) {
-        rememberRecipientNameForProfile(activeProfileIdForBatch, msisdn, hintedName);
-      }
-      const baseText = renderTemplate(templateBody, vars);
-      let text = baseText;
-
-      if (aiCfg.enabled) {
-        const promptVars = { ...(vars || {}), msisdn, phone: msisdn, templateId };
-        const promptText = renderTemplate(aiCfg.prompt, promptVars);
-
-        try {
-          text = await rewriteMessageViaBackend({
-            endpoint: aiCfg.endpoint,
-            authToken: aiAuthToken,
-            prompt: promptText,
-            message: baseText,
-            variables: vars,
-            msisdn,
-            templateId,
-            timeoutMs: aiCfg.timeoutMs
-          });
-        } catch (aiErr) {
-          if (!aiCfg.fallbackToOriginal) {
-            throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
-          }
-
-          text = baseText;
-          win?.webContents.send("batch:progress", {
-            ts: nowIsoShort(),
-            index: i + 1,
-            total: recipients.length,
-            phone: msisdn,
-            status: "sending",
-            error: `AI fallback: ${String(aiErr?.message || aiErr)}`
-          });
+        const completedDelay = await waitDelayOrBatchCancel(batchJob, ms);
+        if (!completedDelay) {
+          stopped = true;
+          stoppedAtIndex = i + 2;
+          emitStopped(stoppedAtIndex);
+          break;
         }
       }
-
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: recipients.length,
-        phone: msisdn,
-        status: "sending"
-      });
-
-      await sendText(msisdn, text);
-      markSent(templateId, msisdn);
-      sent++;
-
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: recipients.length,
-        phone: msisdn,
-        status: "sent"
-      });
-    } catch (e) {
-      failed++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: recipients.length,
-        phone: msisdn,
-        status: "failed",
-        error: String(e?.message || e)
-      });
     }
-
-    if (i < recipients.length - 1) {
-      const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
-      await new Promise((r) => setTimeout(r, ms));
-    }
+  } finally {
+    finishBatchJob(batchJob);
   }
 
-  return { ok: true, sent, failed, skipped };
+  return { ok: true, sent, failed, skipped, stopped, stoppedAtIndex, total: recipients.length };
 });
 
 ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
@@ -5870,121 +5964,166 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   let failed = 0;
   let skipped = 0;
 
-  for (let i = 0; i < items.length; i++) {
-    const item = items[i] && typeof items[i] === "object" ? items[i] : {};
-    const rawPhone = cleanString(item.phone);
-    const rowName = cleanString(item.name);
-    const templateId = cleanString(item.templateId) || cleanString(src.batchLabel) || "prepared";
-    let msisdn = "";
+  const batchJob = beginBatchJob("sendPreparedBatch", items.length);
+  let stopped = false;
+  let stoppedAtIndex = 0;
+  let stopEventSent = false;
+  const emitStopped = (indexHint) => {
+    if (stopEventSent) return;
+    stopEventSent = true;
+    win?.webContents.send("batch:progress", {
+      ts: nowIsoShort(),
+      index: Math.max(1, Math.min(items.length || 1, Number(indexHint || 1))),
+      total: items.length,
+      phone: "",
+      status: "stopped",
+      error: "Stopped by user"
+    });
+  };
 
-    try {
-      msisdn = normalizeMsisdn(rawPhone);
-    } catch (e) {
-      failed++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: items.length,
-        phone: rawPhone,
-        name: rowName,
-        status: "failed",
-        error: "Invalid phone number"
-      });
-      continue;
-    }
-
-    const baseText = String(item.text || "").trim();
-    if (!baseText) {
-      skipped++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: items.length,
-        phone: msisdn,
-        name: rowName,
-        status: "skipped",
-        error: "Message is empty"
-      });
-      continue;
-    }
-
-    if (rowName) {
-      rememberRecipientNameForProfile(activeProfileIdForPreparedBatch, msisdn, rowName);
-    }
-
-    try {
-      let text = baseText;
-      if (aiCfg.enabled) {
-        const aiVars = item.aiVariables && typeof item.aiVariables === "object" ? item.aiVariables : {};
-        const aiPromptTemplate = cleanString(item.aiPrompt) || aiCfg.prompt;
-        try {
-          text = await rewriteMessageViaBackend({
-            endpoint: aiCfg.endpoint,
-            authToken: aiAuthToken,
-            prompt: aiPromptTemplate,
-            message: baseText,
-            variables: aiVars,
-            msisdn,
-            templateId,
-            timeoutMs: aiCfg.timeoutMs
-          });
-        } catch (aiErr) {
-          if (!aiCfg.fallbackToOriginal) {
-            throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
-          }
-          text = baseText;
-          win?.webContents.send("batch:progress", {
-            ts: nowIsoShort(),
-            index: i + 1,
-            total: items.length,
-            phone: msisdn,
-            name: rowName,
-            status: "sending",
-            error: `AI fallback: ${String(aiErr?.message || aiErr)}`
-          });
-        }
+  try {
+    for (let i = 0; i < items.length; i++) {
+      if (isBatchJobCancelRequested(batchJob)) {
+        stopped = true;
+        stoppedAtIndex = i + 1;
+        emitStopped(stoppedAtIndex);
+        break;
       }
 
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: items.length,
-        phone: msisdn,
-        name: rowName,
-        status: "sending"
-      });
+      const item = items[i] && typeof items[i] === "object" ? items[i] : {};
+      const rawPhone = cleanString(item.phone);
+      const rowName = cleanString(item.name);
+      const templateId = cleanString(item.templateId) || cleanString(src.batchLabel) || "prepared";
+      let msisdn = "";
 
-      await sendText(msisdn, text);
-      sent++;
+      try {
+        msisdn = normalizeMsisdn(rawPhone);
+      } catch (e) {
+        failed++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: items.length,
+          phone: rawPhone,
+          name: rowName,
+          status: "failed",
+          error: "Invalid phone number"
+        });
+        continue;
+      }
 
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: items.length,
-        phone: msisdn,
-        name: rowName,
-        status: "sent"
-      });
-    } catch (e) {
-      failed++;
-      win?.webContents.send("batch:progress", {
-        ts: nowIsoShort(),
-        index: i + 1,
-        total: items.length,
-        phone: msisdn,
-        name: rowName,
-        status: "failed",
-        error: String(e?.message || e)
-      });
+      const baseText = String(item.text || "").trim();
+      if (!baseText) {
+        skipped++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: items.length,
+          phone: msisdn,
+          name: rowName,
+          status: "skipped",
+          error: "Message is empty"
+        });
+        continue;
+      }
+
+      if (rowName) {
+        rememberRecipientNameForProfile(activeProfileIdForPreparedBatch, msisdn, rowName);
+      }
+
+      try {
+        let text = baseText;
+        if (aiCfg.enabled) {
+          const aiVars = item.aiVariables && typeof item.aiVariables === "object" ? item.aiVariables : {};
+          const aiPromptTemplate = cleanString(item.aiPrompt) || aiCfg.prompt;
+          try {
+            text = await rewriteMessageViaBackend({
+              endpoint: aiCfg.endpoint,
+              authToken: aiAuthToken,
+              prompt: aiPromptTemplate,
+              message: baseText,
+              variables: aiVars,
+              msisdn,
+              templateId,
+              timeoutMs: aiCfg.timeoutMs
+            });
+          } catch (aiErr) {
+            if (!aiCfg.fallbackToOriginal) {
+              throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
+            }
+            text = baseText;
+            win?.webContents.send("batch:progress", {
+              ts: nowIsoShort(),
+              index: i + 1,
+              total: items.length,
+              phone: msisdn,
+              name: rowName,
+              status: "sending",
+              error: `AI fallback: ${String(aiErr?.message || aiErr)}`
+            });
+          }
+        }
+
+        if (isBatchJobCancelRequested(batchJob)) {
+          stopped = true;
+          stoppedAtIndex = i + 1;
+          emitStopped(stoppedAtIndex);
+          break;
+        }
+
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: items.length,
+          phone: msisdn,
+          name: rowName,
+          status: "sending"
+        });
+
+        await sendText(msisdn, text);
+        sent++;
+
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: items.length,
+          phone: msisdn,
+          name: rowName,
+          status: "sent"
+        });
+      } catch (e) {
+        failed++;
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: items.length,
+          phone: msisdn,
+          name: rowName,
+          status: "failed",
+          error: String(e?.message || e)
+        });
+      }
+
+      if (i < items.length - 1) {
+        const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
+        const completedDelay = await waitDelayOrBatchCancel(batchJob, ms);
+        if (!completedDelay) {
+          stopped = true;
+          stoppedAtIndex = i + 2;
+          emitStopped(stoppedAtIndex);
+          break;
+        }
+      }
     }
-
-    if (i < items.length - 1) {
-      const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
-      await new Promise((r) => setTimeout(r, ms));
-    }
+  } finally {
+    finishBatchJob(batchJob);
   }
 
-  return { ok: true, sent, failed, skipped, total: items.length };
+  return { ok: true, sent, failed, skipped, stopped, stoppedAtIndex, total: items.length };
+});
+
+ipcMain.handle("wa:stopBatch", async () => {
+  return requestStopActiveBatchJob();
 });
 
 /* --------------------------- Window ---------------------------- */
