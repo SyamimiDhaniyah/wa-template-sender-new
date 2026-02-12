@@ -29,3 +29,8 @@ Thumbs.db
 
 # auth sessions (Baileys)
 # NOTE: sessions are stored under Electron userData at runtime, not in this repo
+
+# local icon working files
+assets/icon-source.png
+assets/icon-preview-512.png
+/dentabay.png
