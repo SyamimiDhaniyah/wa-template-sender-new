@@ -138,6 +138,8 @@ const state = {
   settingsProfileId: "",
   batchSending: false,
   batchStopPending: false,
+  lastMarketingSkippedPhones: [],
+  lastMarketingSkippedTemplateId: "",
   activityRows: [],
   currentTemplateId: null,
   confirmResolver: null,
@@ -157,12 +159,26 @@ function escapeHtml(text) {
     .replaceAll("'", "&#039;");
 }
 
+function sanitizeUserFacingError(input) {
+  let s = String(input ?? "");
+  // Strip parser location hints like "(line 3, column 11)" from user-facing errors.
+  s = s.replace(/\s*\(line\s+\d+\s*,\s*column\s+\d+\)\s*/gi, " ");
+  s = s.replace(/\s*\(line\s+\d+\s*column\s+\d+\)\s*/gi, " ");
+  s = s.replace(/\s*line\s+\d+\s*,\s*column\s+\d+\s*/gi, " ");
+  s = s.replace(/\s*line\s+\d+\s*column\s+\d+\s*/gi, " ");
+  s = s.replace(/^SyntaxError:\s*/i, "");
+  s = s.replace(/\s{2,}/g, " ").trim();
+  return s || "Something went wrong";
+}
+
 function toast(title, body) {
   const wrap = el("toastWrap");
   if (!wrap) return;
   const node = document.createElement("div");
   node.className = "toast";
-  node.innerHTML = `<div class="toastTitle">${escapeHtml(title)}</div><div class="toastBody">${escapeHtml(body || "")}</div>`;
+  const safeTitle = sanitizeUserFacingError(title);
+  const safeBody = sanitizeUserFacingError(body || "");
+  node.innerHTML = `<div class="toastTitle">${escapeHtml(safeTitle)}</div><div class="toastBody">${escapeHtml(safeBody)}</div>`;
   wrap.appendChild(node);
   setTimeout(() => {
     node.style.opacity = "0";
@@ -1795,7 +1811,10 @@ function renderActivity() {
 }
 
 function pushActivity(row) {
-  state.activityRows.unshift(row);
+  state.activityRows.unshift({
+    ...row,
+    error: sanitizeUserFacingError(row?.error || "")
+  });
   if (state.activityRows.length > 500) state.activityRows = state.activityRows.slice(0, 500);
   renderActivity();
 }
@@ -2026,6 +2045,29 @@ function getSelectedMarketingRecipients() {
 
 function refreshMarketingSummary() {
   el("marketingSummary").textContent = `${getSelectedMarketingRecipients().length} selected / ${state.marketingRecipients.length} total`;
+  updateMarketingSkippedControls();
+}
+
+function updateMarketingSkippedControls() {
+  const btn = el("btnSelectMarketingSkipped");
+  if (!btn) return;
+  const phones = Array.isArray(state.lastMarketingSkippedPhones) ? state.lastMarketingSkippedPhones : [];
+  const count = phones.length;
+  btn.disabled = count === 0;
+  btn.textContent = count > 0 ? `Select Skipped (${count})` : "Select Skipped";
+}
+
+function selectMarketingRecipientsByPhones(phoneList) {
+  const phones = Array.isArray(phoneList) ? phoneList : [];
+  const set = new Set(phones.map((p) => normalizePhone(p)));
+  let selectedCount = 0;
+  for (const row of state.marketingRecipients) {
+    row.selected = set.has(row.phone);
+    if (row.selected) selectedCount++;
+  }
+  renderMarketingRecipients();
+  refreshMarketingPreview();
+  toast("Recipients", `Selected ${selectedCount} skipped recipient${selectedCount === 1 ? "" : "s"}`);
 }
 
 function syncMarketingSelectAll() {
@@ -2569,7 +2611,10 @@ async function loadPastPatients() {
 
   renderMarketingRecipients();
   refreshMarketingPreview();
-  el("pastPatientRangeText").textContent = `Loaded ${rows.length} rows from ${range.label} (added ${added})`;
+  el("pastPatientRangeText").textContent = `Loaded ${rows.length} rows from ${range.label} (${formatDateForMessage(
+    range.startTs,
+    "english"
+  )} - ${formatDateForMessage(range.endTs, "english")}) (added ${added})`;
 }
 
 async function sendMarketing() {
@@ -2585,24 +2630,74 @@ async function sendMarketing() {
   const selected = getSelectedMarketingRecipients();
   if (selected.length === 0) throw new Error("Please select recipients");
 
-  const items = selected
-    .map((row) => {
-      const vars = buildMarketingTemplateVars(row);
+  const templateId = `marketing_${template.id}`;
+  const skipAlreadySent = template.sendPolicy !== "multiple";
+  const aiEnabled = !!el("aiMarketing").checked;
 
-      return {
-        phone: row.phone,
-        name: row.name || "Patient",
-        text: renderTemplate(template.body, vars),
-        aiVariables: vars,
-        templateId: `marketing_${template.id}`
-      };
-    })
-    .filter((x) => isValidPhone(x.phone) && String(x.text || "").trim());
+  const varsByPhone = {};
+  const sendRows = [];
+  for (const row of selected) {
+    if (!isValidPhone(row.phone)) continue;
+    const vars = buildMarketingTemplateVars(row);
+    const rendered = renderTemplate(template.body, vars);
+    if (!String(rendered || "").trim()) continue;
+    varsByPhone[row.phone] = vars;
+    sendRows.push({ phone: row.phone, name: row.name || "Patient" });
+  }
 
-  if (items.length === 0) throw new Error("No valid messages to send");
+  if (sendRows.length === 0) throw new Error("No valid messages to send");
 
-  const res = await sendPreparedItems(items, `marketing_${template.id}`, !!el("aiMarketing").checked);
+  const confirmRecipients = sendRows
+    .slice(0, 40)
+    .map((x, i) => `${i + 1}. ${x.name || "-"} (${x.phone})`)
+    .join("\n");
+  const suffix = sendRows.length > 40 ? `\n... and ${sendRows.length - 40} more` : "";
+  const sampleText = renderTemplate(template.body, varsByPhone[sendRows[0].phone] || {});
+
+  const confirmed = await openConfirmModal({
+    title: "Confirm Send",
+    subtitle: `${sendRows.length} messages will be sent one-by-one${
+      skipAlreadySent ? "\nNote: numbers that already received this template will be skipped." : ""
+    }`,
+    recipientsText: `${confirmRecipients}${suffix}`,
+    sampleText
+  });
+
+  if (!confirmed) {
+    toast("Canceled", "Send canceled by user");
+    return null;
+  }
+
+  state.lastMarketingSkippedPhones = [];
+  state.lastMarketingSkippedTemplateId = templateId;
+  updateMarketingSkippedControls();
+
+  setBatchSending(true);
+  let res = null;
+  try {
+    res = await window.api.waSendBatch({
+      templateId,
+      templateBody: template.body,
+      recipients: sendRows.map((x) => x.phone),
+      varsByPhone,
+      pacing: { pattern: "random", minSec: state.settings.gapMinSec, maxSec: state.settings.gapMaxSec },
+      aiRewrite: aiEnabled ? { enabled: true, prompt: AI_VARIATION_PROMPT, fallbackToOriginal: true } : { enabled: false },
+      safety: { maxRecipients: 500 },
+      skipAlreadySent
+    });
+  } finally {
+    setBatchSending(false);
+  }
   if (!res) return;
+  state.lastMarketingSkippedPhones = Array.isArray(res.skippedAlreadySentPhones) ? res.skippedAlreadySentPhones : [];
+  state.lastMarketingSkippedTemplateId = templateId;
+  updateMarketingSkippedControls();
+  if (state.lastMarketingSkippedPhones.length > 0) {
+    toast(
+      "Skipped",
+      `Skipped ${state.lastMarketingSkippedPhones.length} (already sent). Click Select Skipped to target them with another template.`
+    );
+  }
   if (res.stopped) {
     toast("Marketing send stopped", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
     return;
@@ -2799,7 +2894,10 @@ async function loadInitialDataAfterLogin() {
 
   el("apptDateInput").value = getTodayYmdKl();
   const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
-  el("pastPatientRangeText").textContent = `Range: ${range.label}`;
+  el("pastPatientRangeText").textContent = `Range: ${range.label} (${formatDateForMessage(
+    range.startTs,
+    "english"
+  )} - ${formatDateForMessage(range.endTs, "english")})`;
 
   renderProfiles();
   setConnectModeUi();
@@ -2823,6 +2921,8 @@ async function loadInitialDataAfterLogin() {
   state.waEmojiPickerOpen = false;
   state.batchSending = false;
   state.batchStopPending = false;
+  state.lastMarketingSkippedPhones = [];
+  state.lastMarketingSkippedTemplateId = "";
   setWaDropActive(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
@@ -2856,6 +2956,8 @@ function showLoginScreen() {
   state.appointments = [];
   state.selectedAppointmentIds = new Set();
   state.marketingRecipients = [];
+  state.lastMarketingSkippedPhones = [];
+  state.lastMarketingSkippedTemplateId = "";
   state.waChats = [];
   state.waActiveChatJid = "";
   state.waExplicitOpenChatJid = "";
@@ -3192,8 +3294,19 @@ function bindEvents() {
 
   el("btnClearMarketingRecipients").addEventListener("click", () => {
     state.marketingRecipients = [];
+    state.lastMarketingSkippedPhones = [];
+    state.lastMarketingSkippedTemplateId = "";
     renderMarketingRecipients();
     refreshMarketingPreview();
+  });
+
+  el("btnSelectMarketingSkipped").addEventListener("click", () => {
+    const phones = Array.isArray(state.lastMarketingSkippedPhones) ? state.lastMarketingSkippedPhones : [];
+    if (phones.length === 0) {
+      toast("Recipients", "No skipped recipients from last send");
+      return;
+    }
+    selectMarketingRecipientsByPhones(phones);
   });
 
   el("marketingSelectAll").addEventListener("change", () => {
@@ -3223,7 +3336,10 @@ function bindEvents() {
 
   el("marketingMonthsAgo").addEventListener("input", () => {
     const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
-    el("pastPatientRangeText").textContent = `Range: ${range.label}`;
+    el("pastPatientRangeText").textContent = `Range: ${range.label} (${formatDateForMessage(
+      range.startTs,
+      "english"
+    )} - ${formatDateForMessage(range.endTs, "english")})`;
   });
 
   el("btnImportMarketingCsv").addEventListener("click", async () => {

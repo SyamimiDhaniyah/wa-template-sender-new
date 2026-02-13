@@ -1490,6 +1490,12 @@ function wasSent(templateId, msisdn) {
   return !!logObj[sentKey(templateId, msisdn)];
 }
 
+function getSentAt(templateId, msisdn) {
+  const logObj = getSentLog();
+  const v = logObj[sentKey(templateId, msisdn)];
+  return typeof v === "string" ? v : "";
+}
+
 function markSent(templateId, msisdn) {
   const logObj = getSentLog();
   logObj[sentKey(templateId, msisdn)] = nowIsoShort();
@@ -5768,6 +5774,8 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  const skippedAlreadySentPhones = [];
+  const skippedAlreadySentAtByPhone = {};
   const batchJob = beginBatchJob("sendBatch", recipients.length);
   let stopped = false;
   let stoppedAtIndex = 0;
@@ -5814,13 +5822,17 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
       if (skipAlreadySent && wasSent(templateId, msisdn)) {
         skipped++;
+        const lastSentAt = getSentAt(templateId, msisdn);
+        skippedAlreadySentPhones.push(msisdn);
+        if (lastSentAt) skippedAlreadySentAtByPhone[msisdn] = lastSentAt;
         win?.webContents.send("batch:progress", {
           ts: nowIsoShort(),
           index: i + 1,
           total: recipients.length,
           phone: msisdn,
           status: "skipped",
-          error: "Already sent (this template)"
+          error: lastSentAt ? `Already sent on ${lastSentAt}` : "Already sent (this template)",
+          sentAt: lastSentAt || ""
         });
 
         if (i < recipients.length - 1) {
@@ -5930,7 +5942,17 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     finishBatchJob(batchJob);
   }
 
-  return { ok: true, sent, failed, skipped, stopped, stoppedAtIndex, total: recipients.length };
+  return {
+    ok: true,
+    sent,
+    failed,
+    skipped,
+    skippedAlreadySentPhones,
+    skippedAlreadySentAtByPhone,
+    stopped,
+    stoppedAtIndex,
+    total: recipients.length
+  };
 });
 
 ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
