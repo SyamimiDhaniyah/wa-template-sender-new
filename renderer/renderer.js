@@ -2,7 +2,13 @@
 const TIMEZONE = "Asia/Kuala_Lumpur";
 const AI_VARIATION_PROMPT =
   "Rewrite this WhatsApp clinic message naturally for Malaysian audience, keep meaning and all facts unchanged, keep it polite and concise: {message}";
-const DEFAULT_CLINIC_SETTINGS = { timezone: TIMEZONE, gapMinSec: 7, gapMaxSec: 45, marketingMonthsAgoDefault: 6 };
+const DEFAULT_CLINIC_SETTINGS = {
+  timezone: TIMEZONE,
+  gapMinSec: 7,
+  gapMaxSec: 45,
+  marketingMonthsAgoDefault: 6,
+  marketingPageSizeDefault: 50
+};
 const DEFAULT_APPOINTMENT_TEMPLATES = {
   remindAppointment: { bahasa: "", english: "" },
   followUp: { bahasa: "", english: "" },
@@ -103,7 +109,11 @@ const state = {
   branches: [],
   appointments: [],
   selectedAppointmentIds: new Set(),
+  apptReqSeq: 0,
   marketingRecipients: [],
+  marketingLoadedPatients: [],
+  marketingLoadedPage: 1,
+  marketingLoadedPageSize: 50,
   waConnected: false,
   waConnecting: false,
   waConnToggleBusy: false,
@@ -255,6 +265,22 @@ function getTodayYmdKl() {
     month: "2-digit",
     day: "2-digit"
   }).format(new Date());
+}
+
+function tsToYmdKl(ts) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date(Number(ts || Date.now())));
+}
+
+function shiftYmdKl(ymd, deltaDays) {
+  const base = ymdToKlMidnightTs(ymd);
+  const days = Number(deltaDays || 0);
+  if (!base || !Number.isFinite(days)) return getTodayYmdKl();
+  return tsToYmdKl(base + days * 24 * 60 * 60 * 1000);
 }
 
 function formatDateForMessage(ts, lang) {
@@ -2024,7 +2050,14 @@ function upsertMarketingRecipient(input) {
   if (existing) {
     if (!existing.name && src.name) existing.name = String(src.name);
     if (!existing.dentist && src.dentist) existing.dentist = String(src.dentist);
-    if (!existing.apptDate && src.apptDate) existing.apptDate = Number(src.apptDate);
+    const nextApptDate = toInt(src.apptDate, 0);
+    if (nextApptDate && (!existing.apptDate || nextApptDate > toInt(existing.apptDate, 0))) existing.apptDate = nextApptDate;
+
+    const nextApptStart = toInt(src.apptStartTime, 0);
+    if (nextApptStart && (!existing.apptStartTime || nextApptStart > toInt(existing.apptStartTime, 0)))
+      existing.apptStartTime = nextApptStart;
+
+    if (src.selected === true) existing.selected = true;
     return false;
   }
 
@@ -2034,6 +2067,7 @@ function upsertMarketingRecipient(input) {
     name: String(src.name || "").trim(),
     dentist: String(src.dentist || "").trim(),
     apptDate: toInt(src.apptDate, 0),
+    apptStartTime: toInt(src.apptStartTime, 0),
     selected: src.selected !== false
   });
   return true;
@@ -2043,9 +2077,24 @@ function getSelectedMarketingRecipients() {
   return state.marketingRecipients.filter((x) => x.selected);
 }
 
+function getSelectedMarketingLoadedPatients() {
+  return state.marketingLoadedPatients.filter((x) => x.selected);
+}
+
 function refreshMarketingSummary() {
   el("marketingSummary").textContent = `${getSelectedMarketingRecipients().length} selected / ${state.marketingRecipients.length} total`;
   updateMarketingSkippedControls();
+}
+
+function refreshMarketingLoadedSummary() {
+  const elSummary = el("marketingLoadedSummary");
+  if (!elSummary) return;
+  const selected = getSelectedMarketingLoadedPatients().length;
+  const total = state.marketingLoadedPatients.length;
+  elSummary.textContent = `${selected} selected / ${total} loaded`;
+
+  const btnAdd = el("btnMarketingAddLoadedToList");
+  if (btnAdd) btnAdd.disabled = selected === 0;
 }
 
 function updateMarketingSkippedControls() {
@@ -2078,12 +2127,98 @@ function syncMarketingSelectAll() {
   all.indeterminate = selected > 0 && selected < total;
 }
 
+function getMarketingLoadedTotalPages() {
+  const size = Math.max(1, toInt(state.marketingLoadedPageSize, 50));
+  const total = state.marketingLoadedPatients.length;
+  return Math.max(1, Math.ceil(total / size));
+}
+
+function clampMarketingLoadedPage() {
+  const totalPages = getMarketingLoadedTotalPages();
+  state.marketingLoadedPage = clamp(state.marketingLoadedPage, 1, totalPages, 1);
+}
+
+function getMarketingLoadedPageRows() {
+  clampMarketingLoadedPage();
+  const size = Math.max(1, toInt(state.marketingLoadedPageSize, 50));
+  const start = (state.marketingLoadedPage - 1) * size;
+  return state.marketingLoadedPatients.slice(start, start + size);
+}
+
+function syncMarketingLoadedSelectAll() {
+  const all = el("marketingLoadedSelectAll");
+  if (!all) return;
+  const pageRows = getMarketingLoadedPageRows();
+  const total = pageRows.length;
+  const selected = pageRows.filter((x) => x.selected).length;
+  all.checked = total > 0 && selected === total;
+  all.indeterminate = selected > 0 && selected < total;
+}
+
+function renderMarketingLoadedPatients() {
+  const tbody = el("marketingLoadedBody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  const pageRows = getMarketingLoadedPageRows();
+  for (const row of pageRows) {
+    const tr = document.createElement("tr");
+
+    const tdPick = document.createElement("td");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!row.selected;
+    cb.addEventListener("change", () => {
+      row.selected = !!cb.checked;
+      refreshMarketingLoadedSummary();
+      syncMarketingLoadedSelectAll();
+    });
+    tdPick.appendChild(cb);
+
+    const tdPhone = document.createElement("td");
+    tdPhone.textContent = row.phone;
+    const tdName = document.createElement("td");
+    tdName.textContent = row.name || "-";
+    const tdDentist = document.createElement("td");
+    tdDentist.textContent = row.dentist || "-";
+    const tdAppt = document.createElement("td");
+    const dateBaseTs = toInt(row.apptDate, 0) || toInt(row.apptStartTime, 0);
+    if (dateBaseTs) {
+      const dateText = formatDateForMessage(dateBaseTs, "english");
+      const timeText = toInt(row.apptStartTime, 0) ? formatTimeForMessage(row.apptStartTime) : "";
+      tdAppt.textContent = timeText ? `${dateText} ${timeText}` : dateText;
+    } else tdAppt.textContent = "-";
+
+    tr.append(tdPick, tdPhone, tdName, tdDentist, tdAppt);
+    tbody.appendChild(tr);
+  }
+
+  if (state.marketingLoadedPatients.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="5" class="smallText">No loaded patients. Choose range and click Load.</td>';
+    tbody.appendChild(tr);
+  }
+
+  const totalPages = getMarketingLoadedTotalPages();
+  const pageText = el("marketingLoadedPageText");
+  if (pageText) pageText.textContent = `Page ${state.marketingLoadedPage} / ${totalPages}`;
+
+  const btnPrev = el("btnMarketingLoadedPrev");
+  const btnNext = el("btnMarketingLoadedNext");
+  if (btnPrev) btnPrev.disabled = state.marketingLoadedPatients.length === 0 || state.marketingLoadedPage <= 1;
+  if (btnNext) btnNext.disabled = state.marketingLoadedPatients.length === 0 || state.marketingLoadedPage >= totalPages;
+
+  refreshMarketingLoadedSummary();
+  syncMarketingLoadedSelectAll();
+}
+
 function renderMarketingRecipients() {
   const tbody = el("marketingRecipientsBody");
   tbody.innerHTML = "";
 
   for (const row of state.marketingRecipients) {
     const tr = document.createElement("tr");
+    const vars = buildMarketingTemplateVars(row);
 
     const tdPick = document.createElement("td");
     const cb = document.createElement("input");
@@ -2100,9 +2235,17 @@ function renderMarketingRecipients() {
     const tdPhone = document.createElement("td");
     tdPhone.textContent = row.phone;
     const tdName = document.createElement("td");
-    tdName.textContent = row.name || "-";
+    tdName.textContent = vars.name || "-";
+    const tdBranch = document.createElement("td");
+    tdBranch.textContent = vars.branch || "-";
+    const tdDate = document.createElement("td");
+    tdDate.textContent = vars.date || "-";
+    const tdDay = document.createElement("td");
+    tdDay.textContent = vars.day || vars.weekday || "-";
+    const tdTime = document.createElement("td");
+    tdTime.textContent = vars.time || "-";
     const tdDentist = document.createElement("td");
-    tdDentist.textContent = row.dentist || "-";
+    tdDentist.textContent = vars.dentist || "-";
 
     const tdAction = document.createElement("td");
     const btnDel = document.createElement("button");
@@ -2116,13 +2259,13 @@ function renderMarketingRecipients() {
     });
     tdAction.appendChild(btnDel);
 
-    tr.append(tdPick, tdPhone, tdName, tdDentist, tdAction);
+    tr.append(tdPick, tdPhone, tdName, tdBranch, tdDate, tdDay, tdTime, tdDentist, tdAction);
     tbody.appendChild(tr);
   }
 
   if (state.marketingRecipients.length === 0) {
     const tr = document.createElement("tr");
-    tr.innerHTML = '<td colspan="5" class="smallText">No recipients yet.</td>';
+    tr.innerHTML = '<td colspan="9" class="smallText">No recipients yet.</td>';
     tbody.appendChild(tr);
   }
 
@@ -2292,7 +2435,7 @@ function buildMarketingTemplateVars(recipient) {
   const row = recipient && typeof recipient === "object" ? recipient : {};
   const selectedBranch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
   const myBranch = state.session.user?.Branch || selectedBranch || "";
-  const dateTs = row.apptDate ? Number(row.apptDate) : Date.now();
+  const dateTs = toInt(row.apptDate, 0) || toInt(row.apptStartTime, 0) || Date.now();
   const weekday = formatWeekdayForMessage(dateTs, "english");
 
   return {
@@ -2303,7 +2446,7 @@ function buildMarketingTemplateVars(recipient) {
     date: formatDateForMessage(dateTs, "english"),
     day: weekday,
     weekday,
-    time: row.apptDate ? formatTimeForMessage(row.apptDate) : "",
+    time: toInt(row.apptStartTime, 0) ? formatTimeForMessage(row.apptStartTime) : "",
     phone: normalizePhone(row.phone || "")
   };
 }
@@ -2321,7 +2464,10 @@ function applySettingsToUi() {
   el("settingGapMin").value = String(s.gapMinSec || 7);
   el("settingGapMax").value = String(s.gapMaxSec || 45);
   el("settingMarketingMonths").value = String(s.marketingMonthsAgoDefault || 6);
+  el("settingMarketingPageSize").value = String(s.marketingPageSizeDefault || 50);
   el("marketingMonthsAgo").value = String(s.marketingMonthsAgoDefault || 6);
+  state.marketingLoadedPageSize = clamp(s.marketingPageSizeDefault, 10, 500, state.marketingLoadedPageSize || 50);
+  if (el("marketingPageSize")) el("marketingPageSize").value = String(state.marketingLoadedPageSize || 50);
 }
 
 function applyAppointmentTemplatesToUi() {
@@ -2571,7 +2717,9 @@ async function loadAppointments() {
   if (!branch) throw new Error("Please select a branch");
   if (!dateTs) throw new Error("Please select a valid date");
 
+  const seq = (state.apptReqSeq = toInt(state.apptReqSeq, 0) + 1);
   const res = await window.api.clinicGetAppointmentList({ branch, date: dateTs });
+  if (seq !== state.apptReqSeq) return;
   state.appointments = Array.isArray(res?.appointments) ? res.appointments : [];
   state.selectedAppointmentIds = new Set();
   renderAppointmentTable();
@@ -2595,26 +2743,51 @@ async function loadPastPatients() {
   });
   const rows = Array.isArray(res?.patients) ? res.patients : [];
 
-  let added = 0;
+  const byPhone = new Map();
   for (const row of rows) {
-    if (
-      upsertMarketingRecipient({
-        phone: row.Patient_Phone_No,
-        name: row.Patient_Name,
-        dentist: row.Dentist_Name,
-        apptDate: row.Appt_Date
-      })
-    ) {
-      added++;
+    const phone = normalizePhone(row?.Patient_Phone_No);
+    if (!isValidPhone(phone)) continue;
+
+    const existing =
+      byPhone.get(phone) || {
+        id: `lp_${phone}`,
+        phone,
+        name: "",
+        dentist: "",
+        apptDate: 0,
+        apptStartTime: 0,
+        selected: false
+      };
+
+    const apptDate = toInt(row?.Appt_Date, 0);
+    const apptStartTime = toInt(row?.Appt_Start_Time, 0);
+    const candidateKey = apptStartTime || apptDate;
+    const existingKey = toInt(existing.apptStartTime, 0) || toInt(existing.apptDate, 0);
+
+    if (!existing.name && row?.Patient_Name) existing.name = String(row.Patient_Name || "").trim();
+    if (candidateKey && (!existingKey || candidateKey > existingKey)) {
+      if (row?.Dentist_Name) existing.dentist = String(row.Dentist_Name || "").trim();
+      if (apptDate) existing.apptDate = apptDate;
+      if (apptStartTime) existing.apptStartTime = apptStartTime;
+    } else {
+      if (!existing.dentist && row?.Dentist_Name) existing.dentist = String(row.Dentist_Name || "").trim();
+      if (!existing.apptDate && apptDate) existing.apptDate = apptDate;
+      if (!existing.apptStartTime && apptStartTime) existing.apptStartTime = apptStartTime;
     }
+    byPhone.set(phone, existing);
   }
 
-  renderMarketingRecipients();
-  refreshMarketingPreview();
-  el("pastPatientRangeText").textContent = `Loaded ${rows.length} rows from ${range.label} (${formatDateForMessage(
-    range.startTs,
-    "english"
-  )} - ${formatDateForMessage(range.endTs, "english")}) (added ${added})`;
+  state.marketingLoadedPatients = Array.from(byPhone.values()).sort((a, b) => {
+    const bKey = toInt(b.apptStartTime, 0) || toInt(b.apptDate, 0);
+    const aKey = toInt(a.apptStartTime, 0) || toInt(a.apptDate, 0);
+    return bKey - aKey;
+  });
+  state.marketingLoadedPage = 1;
+  renderMarketingLoadedPatients();
+
+  el("pastPatientRangeText").textContent = `Loaded ${state.marketingLoadedPatients.length} unique patients from ${
+    range.label
+  } (${formatDateForMessage(range.startTs, "english")} - ${formatDateForMessage(range.endTs, "english")})`;
 }
 
 async function sendMarketing() {
@@ -2710,7 +2883,8 @@ async function saveSettings() {
   const next = {
     gapMinSec: clamp(el("settingGapMin").value, 7, 45, 7),
     gapMaxSec: clamp(el("settingGapMax").value, 7, 45, 45),
-    marketingMonthsAgoDefault: clamp(el("settingMarketingMonths").value, 1, 24, 6)
+    marketingMonthsAgoDefault: clamp(el("settingMarketingMonths").value, 1, 24, 6),
+    marketingPageSizeDefault: clamp(el("settingMarketingPageSize").value, 10, 500, 50)
   };
   if (next.gapMaxSec < next.gapMinSec) next.gapMaxSec = next.gapMinSec;
 
@@ -2898,6 +3072,9 @@ async function loadInitialDataAfterLogin() {
     range.startTs,
     "english"
   )} - ${formatDateForMessage(range.endTs, "english")})`;
+  state.marketingLoadedPatients = [];
+  state.marketingLoadedPage = 1;
+  renderMarketingLoadedPatients();
 
   renderProfiles();
   setConnectModeUi();
@@ -2941,6 +3118,7 @@ async function loadInitialDataAfterLogin() {
   });
   await loadAppointments();
   renderMarketingRecipients();
+  renderMarketingLoadedPatients();
   renderActivity();
   setBatchSending(false);
 }
@@ -2955,7 +3133,10 @@ function showLoginScreen() {
   state.settingsProfileId = "";
   state.appointments = [];
   state.selectedAppointmentIds = new Set();
+  state.apptReqSeq = 0;
   state.marketingRecipients = [];
+  state.marketingLoadedPatients = [];
+  state.marketingLoadedPage = 1;
   state.lastMarketingSkippedPhones = [];
   state.lastMarketingSkippedTemplateId = "";
   state.waChats = [];
@@ -3229,12 +3410,27 @@ function bindEvents() {
     toast("Session", "Logged out");
   });
 
-  el("btnLoadAppointments").addEventListener("click", async () => {
+  const autoLoadAppointments = async () => {
     try {
       await loadAppointments();
     } catch (e) {
       toast("Appointments", String(e?.message || e));
     }
+  };
+
+  el("apptBranchSelect").addEventListener("change", autoLoadAppointments);
+  el("apptDateInput").addEventListener("change", autoLoadAppointments);
+
+  el("btnApptPrevDay").addEventListener("click", async () => {
+    const cur = String(el("apptDateInput").value || "").trim() || getTodayYmdKl();
+    el("apptDateInput").value = shiftYmdKl(cur, -1);
+    await autoLoadAppointments();
+  });
+
+  el("btnApptNextDay").addEventListener("click", async () => {
+    const cur = String(el("apptDateInput").value || "").trim() || getTodayYmdKl();
+    el("apptDateInput").value = shiftYmdKl(cur, 1);
+    await autoLoadAppointments();
   });
 
   el("btnApptSelectAll").addEventListener("click", () => {
@@ -3330,7 +3526,7 @@ function bindEvents() {
       await loadPastPatients();
       refreshMarketingPreview();
     } catch (e) {
-      toast("Existing patients", String(e?.message || e));
+      toast("Loaded patients", String(e?.message || e));
     }
   });
 
@@ -3340,6 +3536,77 @@ function bindEvents() {
       range.startTs,
       "english"
     )} - ${formatDateForMessage(range.endTs, "english")})`;
+    state.marketingLoadedPatients = [];
+    state.marketingLoadedPage = 1;
+    renderMarketingLoadedPatients();
+  });
+
+  el("marketingBranchSelect").addEventListener("change", () => {
+    const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
+    el("pastPatientRangeText").textContent = `Range: ${range.label} (${formatDateForMessage(
+      range.startTs,
+      "english"
+    )} - ${formatDateForMessage(range.endTs, "english")})`;
+    state.marketingLoadedPatients = [];
+    state.marketingLoadedPage = 1;
+    renderMarketingLoadedPatients();
+    renderMarketingRecipients();
+    refreshMarketingPreview();
+  });
+
+  el("marketingPageSize").addEventListener("input", () => {
+    const nextSize = clamp(el("marketingPageSize").value, 10, 500, 50);
+    state.marketingLoadedPageSize = nextSize;
+    el("marketingPageSize").value = String(nextSize);
+    state.marketingLoadedPage = 1;
+    renderMarketingLoadedPatients();
+  });
+
+  el("marketingLoadedSelectAll").addEventListener("change", () => {
+    const checked = !!el("marketingLoadedSelectAll").checked;
+    for (const row of getMarketingLoadedPageRows()) {
+      row.selected = checked;
+    }
+    renderMarketingLoadedPatients();
+  });
+
+  el("btnMarketingLoadedPrev").addEventListener("click", () => {
+    state.marketingLoadedPage = Math.max(1, toInt(state.marketingLoadedPage, 1) - 1);
+    renderMarketingLoadedPatients();
+  });
+
+  el("btnMarketingLoadedNext").addEventListener("click", () => {
+    state.marketingLoadedPage = Math.min(getMarketingLoadedTotalPages(), toInt(state.marketingLoadedPage, 1) + 1);
+    renderMarketingLoadedPatients();
+  });
+
+  el("btnMarketingAddLoadedToList").addEventListener("click", () => {
+    const selected = getSelectedMarketingLoadedPatients();
+    if (selected.length === 0) {
+      toast("Loaded patients", "No selected patients to add");
+      return;
+    }
+
+    let added = 0;
+    let existed = 0;
+    for (const row of selected) {
+      const wasAdded = upsertMarketingRecipient({
+        phone: row.phone,
+        name: row.name,
+        dentist: row.dentist,
+        apptDate: row.apptDate,
+        apptStartTime: row.apptStartTime,
+        selected: true
+      });
+      if (wasAdded) added++;
+      else existed++;
+      row.selected = false;
+    }
+
+    renderMarketingRecipients();
+    refreshMarketingPreview();
+    renderMarketingLoadedPatients();
+    toast("Send list", `Added ${added}${existed ? ` (already existed: ${existed})` : ""}`);
   });
 
   el("btnImportMarketingCsv").addEventListener("click", async () => {

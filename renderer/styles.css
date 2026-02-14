@@ -548,6 +548,12 @@ p {
   gap: 12px;
 }
 
+.marketingLeft {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
 .subCard {
   border: 1px solid #d9e8e6;
   border-radius: 12px;

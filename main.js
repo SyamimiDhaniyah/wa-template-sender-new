@@ -87,7 +87,8 @@ const DEFAULT_CLINIC_SETTINGS = {
   timezone: CLINIC_TZ,
   gapMinSec: 7,
   gapMaxSec: 45,
-  marketingMonthsAgoDefault: 6
+  marketingMonthsAgoDefault: 6,
+  marketingPageSizeDefault: 50
 };
 
 const DEFAULT_APPOINTMENT_TEMPLATES = {
@@ -188,12 +189,14 @@ function normalizeClinicSettings(input) {
   const gapMaxCandidate = clampInt(src.gapMaxSec, 7, 45, DEFAULT_CLINIC_SETTINGS.gapMaxSec);
   const gapMaxSec = Math.max(gapMinSec, gapMaxCandidate);
   const marketingMonthsAgoDefault = clampInt(src.marketingMonthsAgoDefault, 1, 24, 6);
+  const marketingPageSizeDefault = clampInt(src.marketingPageSizeDefault, 10, 500, DEFAULT_CLINIC_SETTINGS.marketingPageSizeDefault);
 
   return {
     timezone: CLINIC_TZ,
     gapMinSec,
     gapMaxSec,
-    marketingMonthsAgoDefault
+    marketingMonthsAgoDefault,
+    marketingPageSizeDefault
   };
 }
 
@@ -470,6 +473,7 @@ function normalizePastPatientRecord(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   return {
     Appt_Date: Number(src.Appt_Date || 0) || 0,
+    Appt_Start_Time: Number(src.Appt_Start_Time || 0) || 0,
     Dentist_Name: cleanString(src.Dentist_Name),
     Patient_Name: cleanString(src.Patient_Name),
     Patient_Phone_No: cleanString(src.Patient_Phone_No)

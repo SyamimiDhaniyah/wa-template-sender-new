@@ -142,7 +142,8 @@
                 <select id="apptBranchSelect" class="fieldInput compact"></select>
                 <label class="fieldLabel">Date</label>
                 <input id="apptDateInput" class="fieldInput compact" type="date" />
-                <button class="btnGhost" id="btnLoadAppointments">Load</button>
+                <button class="btnGhost" id="btnApptPrevDay" title="Previous day" aria-label="Previous day">&lt;</button>
+                <button class="btnGhost" id="btnApptNextDay" title="Next day" aria-label="Next day">&gt;</button>
               </div>
             </div>
 
@@ -247,52 +248,90 @@
             </div>
 
             <div class="marketingLayout">
-              <div class="card">
-                <div class="cardHead">
-                  <div>
-                    <h3>Recipients</h3>
-                    <div class="smallText" id="marketingSummary">0 selected</div>
+              <div class="marketingLeft">
+                <div class="card">
+                  <div class="cardHead">
+                    <div>
+                      <h3>Send List</h3>
+                      <div class="smallText" id="marketingSummary">0 selected</div>
+                    </div>
+                    <div class="inlineRow">
+                      <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
+                      <button class="btnGhost" id="btnSelectMarketingSkipped" disabled>Select Skipped</button>
+                      <button class="btnGhost" id="btnClearMarketingRecipients">Clear</button>
+                    </div>
                   </div>
-                  <div class="inlineRow">
-                    <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
-                    <button class="btnGhost" id="btnSelectMarketingSkipped" disabled>Select Skipped</button>
-                    <button class="btnGhost" id="btnClearMarketingRecipients">Clear</button>
+
+                  <div class="subCard">
+                    <div class="subHead">Manual Add</div>
+                    <div class="smallText">One line each: <code>phone,name</code> or just <code>phone</code></div>
+                    <textarea id="marketingPasteInput" class="fieldInput" rows="4" placeholder="0131231231,Ali&#10;01188888888,Nina"></textarea>
+                    <button class="btnGhost" id="btnAddMarketingFromText">Add to send list</button>
+                  </div>
+
+                  <div class="tableWrap tall">
+                    <table class="dataTable">
+                      <thead>
+                        <tr>
+                          <th style="width: 44px;"><input type="checkbox" id="marketingSelectAll" /></th>
+                          <th style="width: 170px;">Phone</th>
+                          <th style="width: 210px;">Name</th>
+                          <th style="width: 170px;">Branch</th>
+                          <th style="width: 150px;">Date</th>
+                          <th style="width: 120px;">Day</th>
+                          <th style="width: 110px;">Time</th>
+                          <th style="width: 220px;">Dentist</th>
+                          <th style="width: 70px;">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody id="marketingRecipientsBody"></tbody>
+                    </table>
                   </div>
                 </div>
 
-                <div class="subCard">
-                  <div class="subHead">Manual Add</div>
-                  <div class="smallText">One line each: <code>phone,name</code> or just <code>phone</code></div>
-                  <textarea id="marketingPasteInput" class="fieldInput" rows="4" placeholder="0131231231,Ali&#10;01188888888,Nina"></textarea>
-                  <button class="btnGhost" id="btnAddMarketingFromText">Add to list</button>
-                </div>
+                <div class="card">
+                  <div class="cardHead">
+                    <div>
+                      <h3>Loaded Patients</h3>
+                      <div class="smallText" id="marketingLoadedSummary">0 selected / 0 loaded</div>
+                    </div>
+                  </div>
 
-                <div class="subCard">
-                  <div class="subHead">Existing Patients</div>
-                  <div class="smallText">Load patients from the full month of N months ago.</div>
+                  <div class="smallText">Load patients from the full month of N months ago, then add selected to Send List.</div>
                   <div class="inlineRow wrap">
                     <label class="fieldLabel">Months ago</label>
                     <input id="marketingMonthsAgo" class="fieldInput compact small" type="number" min="1" max="24" value="6" />
                     <label class="fieldLabel">Branch</label>
                     <select id="marketingBranchSelect" class="fieldInput compact"></select>
-                    <button class="btnGhost" id="btnLoadPastPatients">Load Existing Patients</button>
+                    <label class="fieldLabel">Per page</label>
+                    <input id="marketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" value="50" />
+                    <button class="btnGhost" id="btnLoadPastPatients">Load</button>
                   </div>
                   <div class="smallText" id="pastPatientRangeText">-</div>
-                </div>
 
-                <div class="tableWrap tall">
-                  <table class="dataTable">
-                    <thead>
-                      <tr>
-                        <th style="width: 44px;"><input type="checkbox" id="marketingSelectAll" /></th>
-                        <th style="width: 180px;">Phone</th>
-                        <th style="width: 220px;">Name</th>
-                        <th>Dentist</th>
-                        <th style="width: 70px;">Action</th>
-                      </tr>
-                    </thead>
-                    <tbody id="marketingRecipientsBody"></tbody>
-                  </table>
+                  <div class="inlineRow" style="justify-content: space-between;">
+                    <div class="inlineRow">
+                      <button class="btnGhost" id="btnMarketingLoadedPrev" disabled>Prev</button>
+                      <div class="smallText" id="marketingLoadedPageText">Page 1 / 1</div>
+                      <button class="btnGhost" id="btnMarketingLoadedNext" disabled>Next</button>
+                    </div>
+                    <button class="btnGhost" id="btnMarketingAddLoadedToList" disabled>Add to send list</button>
+                  </div>
+
+                  <div class="tableWrap short">
+                    <table class="dataTable">
+                      <thead>
+                        <tr>
+                          <th style="width: 44px;"><input type="checkbox" id="marketingLoadedSelectAll" /></th>
+                          <th style="width: 170px;">Phone</th>
+                          <th style="width: 220px;">Name</th>
+                          <th style="width: 220px;">Dentist</th>
+                          <th>Last Appt</th>
+                        </tr>
+                      </thead>
+                      <tbody id="marketingLoadedBody"></tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
 
@@ -556,6 +595,8 @@
                 <div class="inlineRow wrap">
                   <label class="fieldLabel">Months ago</label>
                   <input id="settingMarketingMonths" class="fieldInput compact small" type="number" min="1" max="24" />
+                  <label class="fieldLabel">Per page</label>
+                  <input id="settingMarketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" />
                 </div>
               </div>
 
