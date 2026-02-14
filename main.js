@@ -329,6 +329,34 @@ async function clinicFetchJson(url, options) {
   return data;
 }
 
+async function clinicRecordSentMessage(authToken, payload) {
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/sent_message`;
+  const src = payload && typeof payload === "object" ? payload : {};
+  const body = {
+    branch: cleanString(src.branch),
+    name: cleanString(src.name),
+    phone: cleanString(src.phone),
+    sent_by: cleanString(src.sent_by),
+    message: String(src.message || "")
+  };
+
+  if (!body.phone) throw new Error("phone is required");
+
+  const controller = new AbortController();
+  const timeoutMs = 4000;
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await clinicFetchJson(endpoint, {
+      method: "POST",
+      headers: clinicAuthHeaders(authToken, true),
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 function clinicIsRouteNotFoundError(err) {
   const msg = String(err?.message || "");
   const apiCode = String(err?.apiCode || "");
@@ -5911,6 +5939,27 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         await sendText(msisdn, text);
         markSent(templateId, msisdn);
         sent++;
+
+        if (String(templateId || "").startsWith("marketing_")) {
+          const recipientBranch =
+            cleanString(vars?.branch) || cleanString(vars?.Branch) || cleanString(clinicSession?.user?.Branch);
+          const recipientName = cleanString(vars?.name) || cleanString(vars?.Name) || cleanString(hintedName) || "Patient";
+          const sentBy = firstNonEmptyString([
+            clinicSession?.user?.name,
+            clinicSession?.user?.nickname,
+            clinicSession?.user?.email
+          ]);
+
+          clinicRecordSentMessage(sessionAuthToken, {
+            branch: recipientBranch,
+            name: recipientName,
+            phone: msisdn,
+            sent_by: sentBy,
+            message: text
+          }).catch((err) => {
+            log.warn({ err, msisdn }, "Failed to record sent marketing message");
+          });
+        }
 
         win?.webContents.send("batch:progress", {
           ts: nowIsoShort(),
