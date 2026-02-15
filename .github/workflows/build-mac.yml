@@ -1,0 +1,56 @@
+name: Build macOS (DMG/ZIP)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate icns from logo
+        shell: bash
+        run: |
+          set -euo pipefail
+          SRC="assets/dentabay.png"
+          ICONSET="assets/icon.iconset"
+          OUT="assets/icon.icns"
+
+          rm -rf "$ICONSET"
+          mkdir -p "$ICONSET"
+
+          # Create required iconset sizes (and their @2x variants).
+          sips -z 16 16     "$SRC" --out "$ICONSET/icon_16x16.png" >/dev/null
+          sips -z 32 32     "$SRC" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
+          sips -z 32 32     "$SRC" --out "$ICONSET/icon_32x32.png" >/dev/null
+          sips -z 64 64     "$SRC" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
+          sips -z 128 128   "$SRC" --out "$ICONSET/icon_128x128.png" >/dev/null
+          sips -z 256 256   "$SRC" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
+          sips -z 256 256   "$SRC" --out "$ICONSET/icon_256x256.png" >/dev/null
+          sips -z 512 512   "$SRC" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
+          sips -z 512 512   "$SRC" --out "$ICONSET/icon_512x512.png" >/dev/null
+          sips -z 1024 1024 "$SRC" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+
+          iconutil -c icns "$ICONSET" -o "$OUT"
+
+      - name: Build macOS (dmg + zip)
+        run: npx electron-builder --mac dmg zip --config.mac.icon=assets/icon.icns --publish never
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhatsConect-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
