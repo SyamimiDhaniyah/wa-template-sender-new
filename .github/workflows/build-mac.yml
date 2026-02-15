@@ -45,7 +45,7 @@ jobs:
           iconutil -c icns "$ICONSET" -o "$OUT"
 
       - name: Build macOS (dmg + zip)
-        run: npx electron-builder --mac dmg zip --config.mac.icon=assets/icon.icns --publish never
+        run: npx electron-builder --mac dmg zip --universal --config.mac.icon=assets/icon.icns --publish never
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
