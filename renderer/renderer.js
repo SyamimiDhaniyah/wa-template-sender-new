@@ -23,7 +23,7 @@ const MARKETING_PLACEHOLDERS = [
   { token: "{day}", key: "day", description: "Day name from appointment date, or today." },
   { token: "{time}", key: "time", description: "Recipient appointment time if available." },
   { token: "{dentist}", key: "dentist", description: "Dentist name from recipient row if available." },
-  { token: "{salutation}", key: "salutation", description: "Gender-based salutation (English by default)." },
+  { token: "{salutation}", key: "salutation", description: "Gender-based salutation (Malay by default)." },
   { token: "{salutation_bm}", key: "salutation_bm", description: "Gender-based Malay salutation (Encik/Cik)." },
   { token: "{salutation_en}", key: "salutation_en", description: "Gender-based English salutation (Mr./Ms.)." },
   { token: "{phone}", key: "phone", description: "Normalized phone number of recipient." }
@@ -2471,6 +2471,14 @@ function refreshMarketingPreview() {
 
   el("marketingPreview").textContent = renderTemplate(template.body, buildMarketingTemplateVars(recipient));
 }
+
+function normalizeGenderKey(genderRaw) {
+  const g = String(genderRaw || "").trim().toLowerCase();
+  if (g === "female" || g === "f" || g === "perempuan" || g.includes("female")) return "female";
+  if (g === "male" || g === "m" || g === "lelaki" || g.includes("male")) return "male";
+  return "";
+}
+
 function applySettingsToUi() {
   const s = state.settings;
   el("settingGapMin").value = String(s.gapMinSec || 7);
@@ -2597,11 +2605,84 @@ async function prepareAppointmentSendItems(purposeKey, language) {
   return prepared.filter((x) => x && !x.skip && x.phone && x.text);
 }
 
-function openConfirmModal({ title, subtitle, recipientsText, sampleText }) {
+function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipientsEditable, renderSampleFromRecipient }) {
+  const recipientsPre = el("confirmRecipients");
+  const editorWrap = el("confirmRecipientsEditor");
+  const editorRows = el("confirmRecipientsEditorRows");
+  const samplePre = el("confirmSample");
+  const editableRows = Array.isArray(recipientsEditable) ? recipientsEditable : [];
+  const hasEditable = editableRows.length > 0;
+
   el("confirmTitle").textContent = title || "Confirm Send";
   el("confirmSubtitle").textContent = subtitle || "";
-  el("confirmRecipients").textContent = recipientsText || "-";
-  el("confirmSample").textContent = sampleText || "-";
+  recipientsPre.textContent = recipientsText || "-";
+
+  recipientsPre.classList.toggle("hidden", hasEditable);
+  editorWrap.classList.toggle("hidden", !hasEditable);
+  editorRows.innerHTML = "";
+
+  const updateSampleText = (idx = 0) => {
+    if (hasEditable && typeof renderSampleFromRecipient === "function") {
+      const safeIdx = clamp(idx, 0, Math.max(0, editableRows.length - 1), 0);
+      const row = editableRows[safeIdx];
+      samplePre.textContent = String(renderSampleFromRecipient(row) || sampleText || "-");
+      return;
+    }
+    samplePre.textContent = sampleText || "-";
+  };
+
+  if (hasEditable) {
+    editableRows.forEach((row, idx) => {
+      const item = row && typeof row === "object" ? row : {};
+      item.phone = normalizePhone(item.phone || "");
+      item.name = String(item.name || "").trim() || "Patient";
+      item.gender = normalizeGenderKey(item.gender);
+
+      const rowEl = document.createElement("div");
+      rowEl.className = "confirmRecipientsEditorRow";
+
+      const idxEl = document.createElement("span");
+      idxEl.className = "confirmRecipientsEditorIndex";
+      idxEl.textContent = `${idx + 1}.`;
+
+      const phoneEl = document.createElement("span");
+      phoneEl.className = "confirmRecipientsEditorPhone";
+      phoneEl.textContent = item.phone || "-";
+
+      const nameInput = document.createElement("input");
+      nameInput.type = "text";
+      nameInput.className = "fieldInput compact";
+      nameInput.value = item.name;
+      nameInput.placeholder = "Nickname";
+      nameInput.addEventListener("input", () => {
+        item.name = String(nameInput.value || "").trim() || "Patient";
+        updateSampleText(idx);
+      });
+
+      const genderSelect = document.createElement("select");
+      genderSelect.className = "fieldInput compact";
+      const optUnknown = document.createElement("option");
+      optUnknown.value = "";
+      optUnknown.textContent = "Unknown";
+      const optMale = document.createElement("option");
+      optMale.value = "male";
+      optMale.textContent = "Male";
+      const optFemale = document.createElement("option");
+      optFemale.value = "female";
+      optFemale.textContent = "Female";
+      genderSelect.append(optUnknown, optMale, optFemale);
+      genderSelect.value = item.gender;
+      genderSelect.addEventListener("change", () => {
+        item.gender = normalizeGenderKey(genderSelect.value);
+        updateSampleText(idx);
+      });
+
+      rowEl.append(idxEl, phoneEl, nameInput, genderSelect);
+      editorRows.appendChild(rowEl);
+    });
+  }
+
+  updateSampleText(0);
   el("confirmModal").classList.remove("hidden");
 
   return new Promise((resolve) => {
@@ -2836,39 +2917,82 @@ async function sendMarketing() {
   const skipAlreadySent = template.sendPolicy !== "multiple";
   const aiEnabled = !!el("aiMarketing").checked;
 
-  const varsByPhone = {};
-  const sendRows = [];
+  const selectedByPhone = new Map();
+  const editableRecipients = [];
   for (const row of selected) {
-    if (!isValidPhone(row.phone)) continue;
-    const vars = buildMarketingTemplateVars(row);
-    const rendered = renderTemplate(template.body, vars);
-    if (!String(rendered || "").trim()) continue;
-    varsByPhone[row.phone] = vars;
-    sendRows.push({ phone: row.phone, name: row.name || "Patient" });
+    const phone = normalizePhone(row.phone);
+    if (!isValidPhone(phone)) continue;
+    if (selectedByPhone.has(phone)) continue;
+    selectedByPhone.set(phone, row);
+    editableRecipients.push({
+      phone,
+      name: String(row.name || "").trim() || "Patient",
+      gender: normalizeGenderKey(row.gender)
+    });
   }
 
-  if (sendRows.length === 0) throw new Error("No valid messages to send");
+  if (editableRecipients.length === 0) throw new Error("No valid messages to send");
 
-  const confirmRecipients = sendRows
+  const sampleTextFromRecipient = (editRow) => {
+    const src = selectedByPhone.get(editRow?.phone) || {};
+    const merged = {
+      ...src,
+      phone: normalizePhone(editRow?.phone || src.phone || ""),
+      name: String(editRow?.name || src.name || "").trim() || "Patient",
+      gender: normalizeGenderKey(editRow?.gender || src.gender)
+    };
+    return renderTemplate(template.body, buildMarketingTemplateVars(merged));
+  };
+
+  const confirmRecipients = editableRecipients
     .slice(0, 40)
     .map((x, i) => `${i + 1}. ${x.name || "-"} (${x.phone})`)
     .join("\n");
-  const suffix = sendRows.length > 40 ? `\n... and ${sendRows.length - 40} more` : "";
-  const sampleText = renderTemplate(template.body, varsByPhone[sendRows[0].phone] || {});
+  const suffix = editableRecipients.length > 40 ? `\n... and ${editableRecipients.length - 40} more` : "";
+  const sampleText = sampleTextFromRecipient(editableRecipients[0]);
 
   const confirmed = await openConfirmModal({
     title: "Confirm Send",
-    subtitle: `${sendRows.length} messages will be sent one-by-one${
+    subtitle: `${editableRecipients.length} messages will be sent one-by-one${
       skipAlreadySent ? "\nNote: numbers that already received this template will be skipped." : ""
     }`,
     recipientsText: `${confirmRecipients}${suffix}`,
-    sampleText
+    sampleText,
+    recipientsEditable: editableRecipients,
+    renderSampleFromRecipient: sampleTextFromRecipient
   });
 
   if (!confirmed) {
     toast("Canceled", "Send canceled by user");
     return null;
   }
+
+  const varsByPhone = {};
+  const sendRows = [];
+  for (const editRow of editableRecipients) {
+    const phone = normalizePhone(editRow.phone);
+    if (!isValidPhone(phone)) continue;
+
+    const src = selectedByPhone.get(phone) || {};
+    const name = String(editRow.name || src.name || "").trim() || "Patient";
+    const gender = normalizeGenderKey(editRow.gender || src.gender);
+    const merged = { ...src, phone, name, gender };
+    const vars = buildMarketingTemplateVars(merged);
+    const rendered = renderTemplate(template.body, vars);
+    if (!String(rendered || "").trim()) continue;
+
+    if (src && typeof src === "object") {
+      src.name = name;
+      src.gender = gender;
+    }
+
+    varsByPhone[phone] = vars;
+    sendRows.push({ phone, name });
+  }
+
+  if (sendRows.length === 0) throw new Error("No valid messages to send after preview edits");
+  renderMarketingRecipients();
+  refreshMarketingPreview();
 
   state.lastMarketingSkippedPhones = [];
   state.lastMarketingSkippedTemplateId = templateId;

@@ -8,7 +8,9 @@
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder",
-    "dist:win": "electron-builder --win nsis --prepackaged dist/win-unpacked --config.win.signAndEditExecutable=false --config.win.verifyUpdateCodeSignature=false --publish never"
+    "dist:win": "electron-builder --win nsis --prepackaged dist/win-unpacked --config.win.signAndEditExecutable=false --config.win.verifyUpdateCodeSignature=false --publish never",
+    "stamp:win:exe": "node scripts/stamp-win-exe.mjs",
+    "dist:win:icon": "electron-builder --win dir && npm run stamp:win:exe && npm run dist:win"
   },
   "dependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
@@ -18,7 +20,8 @@
   },
   "devDependencies": {
     "electron": "^40.2.1",
-    "electron-builder": "^26.7.0"
+    "electron-builder": "^26.7.0",
+    "rcedit": "^5.0.2"
   },
   "build": {
     "appId": "com.dentabay.whatsconect",
