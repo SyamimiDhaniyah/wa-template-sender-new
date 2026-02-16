@@ -2498,6 +2498,56 @@ function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
   return out;
 }
 
+function resolveMsisdnForSendTarget(profileId, chatJidOrPhone) {
+  const target = normalizeSendTargetJid(chatJidOrPhone);
+  if (!target) return "";
+
+  const candidates = [];
+  const seen = new Set();
+  const push = (value) => {
+    const raw = cleanString(value);
+    if (!raw) return;
+    const normalized = normalizeJidForContact(raw) || raw;
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(target);
+  const profileKey = cleanString(profileId);
+  if (profileKey) {
+    push(getMappedPnJidForProfile(profileKey, target));
+    push(getMappedLidJidForProfile(profileKey, target));
+
+    const contact = findContactByJidForProfile(profileKey, target);
+    if (contact && typeof contact === "object") {
+      push(contact.msisdn);
+      push(contact.phoneNumber);
+      push(contact.jid);
+      push(contact.pnJid);
+      push(contact.lid);
+      push(contact.lidJid);
+    }
+
+    const recent = resolveRecentRemoteJidForChat(profileKey, target);
+    push(recent);
+    push(getMappedPnJidForProfile(profileKey, recent));
+
+    if (isLidJid(target)) {
+      const lidUser = jidUserPart(target);
+      if (/^\d{8,15}$/.test(lidUser)) push(lidUser);
+    }
+  }
+
+  for (const value of candidates) {
+    const fromAddress = msisdnFromContactAddress(value);
+    const msisdn = normalizeMsisdnSafe(fromAddress || value);
+    if (msisdn) return msisdn;
+  }
+
+  return "";
+}
+
 function normalizeStoredMessageForChatJid(rawMessage, targetChatJid) {
   const targetJid = normalizeChatJid(targetChatJid);
   if (!targetJid) return null;
@@ -4390,7 +4440,22 @@ async function sendChatMessage(payload) {
 
   const requestedChatJid = normalizeSendTargetJid(src.chatJid);
   if (!requestedChatJid) throw new Error("Invalid chat");
-  const targetCandidates = buildSendTargetCandidatesForProfile(profileId, requestedChatJid);
+
+  // Prefer phone-number routing for manual chat sends; fall back to original chat JID chain.
+  const preferredMsisdn = resolveMsisdnForSendTarget(profileId, requestedChatJid);
+  const targetCandidates = [];
+  const seenTarget = new Set();
+  const appendCandidatesFrom = (source) => {
+    for (const candidate of buildSendTargetCandidatesForProfile(profileId, source)) {
+      const normalized = normalizeChatJid(candidate);
+      if (!normalized || seenTarget.has(normalized)) continue;
+      seenTarget.add(normalized);
+      targetCandidates.push(normalized);
+    }
+  };
+  if (preferredMsisdn) appendCandidatesFrom(preferredMsisdn);
+  appendCandidatesFrom(requestedChatJid);
+
   if (targetCandidates.length === 0) throw new Error("Invalid chat");
 
   const text = String(src.text || "");

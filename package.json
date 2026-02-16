@@ -1,6 +1,6 @@
 {
   "name": "whatsconect",
-  "version": "1.2.0",
+  "version": "1.0.0",
   "description": "WhatsConect messaging console for templates, appointments, and marketing.",
   "author": "Dentabay",
   "private": true,
@@ -47,6 +47,10 @@
       "target": "dmg"
     },
     "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": true,
+      "createDesktopShortcut": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
       "installerHeaderIcon": "assets/icon.ico"
