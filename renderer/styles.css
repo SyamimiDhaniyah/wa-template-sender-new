@@ -644,6 +644,67 @@ p {
   gap: 8px;
 }
 
+.templateMessagesPanel {
+  border: 1px solid #d9e8e6;
+  border-radius: 12px;
+  background: #fbfdfd;
+  padding: 8px;
+  display: grid;
+  gap: 8px;
+}
+
+.templateMessagesLayout {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 8px;
+}
+
+.templateMessageList {
+  border: 1px solid #d5e5e2;
+  border-radius: 10px;
+  background: #fcfefe;
+  max-height: 340px;
+  overflow: auto;
+  padding: 6px;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+}
+
+.templateMessageItem {
+  border: 1px solid #d5e5e2;
+  border-radius: 9px;
+  background: #ffffff;
+  padding: 7px;
+  cursor: pointer;
+  display: grid;
+  gap: 3px;
+}
+
+.templateMessageItem:hover {
+  background: #f4fbfa;
+}
+
+.templateMessageItem.active {
+  background: #e5f7f4;
+  border-color: #9fd4ce;
+}
+
+.templateMessageItemTitle {
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.templateMessageItemMeta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.templateMessageEditor {
+  display: grid;
+  gap: 8px;
+}
+
 .apptTplDrawer {
   padding: 0;
   overflow: hidden;
@@ -1596,6 +1657,10 @@ p {
   }
 
   .templateManager {
+    grid-template-columns: 1fr;
+  }
+
+  .templateMessagesLayout {
     grid-template-columns: 1fr;
   }
 

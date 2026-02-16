@@ -393,8 +393,33 @@
                     <label class="fieldLabel">Template Name</label>
                     <input id="templateName" class="fieldInput" />
 
-                    <label class="fieldLabel">Message Body</label>
-                    <textarea id="templateBody" class="fieldInput" rows="7"></textarea>
+                    <div class="templateMessagesPanel">
+                      <div class="fieldLabel">Template Messages</div>
+                      <div class="templateMessagesLayout">
+                        <div class="templateMessageList" id="templateMessageList"></div>
+                        <div class="templateMessageEditor">
+                          <div class="inlineRow wrap">
+                            <label class="fieldLabel">Type</label>
+                            <select id="templateMessageType" class="fieldInput compact">
+                              <option value="text">Text</option>
+                              <option value="image">Image</option>
+                              <option value="video">Video</option>
+                            </select>
+                            <button class="btnGhost" id="btnTemplateAttachMedia" type="button">Attach Media</button>
+                            <button class="btnGhost" id="btnTemplateClearMedia" type="button">Clear Media</button>
+                            <button class="btnGhost" id="btnTemplateDeleteMessage" type="button">Delete Message</button>
+                          </div>
+                          <div class="smallText" id="templateMessageAttachmentText">No media attached.</div>
+                          <label class="fieldLabel" id="templateBodyLabel">Message Text</label>
+                          <textarea id="templateBody" class="fieldInput" rows="7"></textarea>
+                          <div class="inlineRow wrap">
+                            <button class="btnGhost" id="btnTemplateAddText" type="button">+ Text</button>
+                            <button class="btnGhost" id="btnTemplateAddImage" type="button">+ Image</button>
+                            <button class="btnGhost" id="btnTemplateAddVideo" type="button">+ Video</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
 
                     <div class="placeholderPanel">
                       <div class="fieldLabel">Ready placeholders (click to insert)</div>

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const crypto = require("crypto");
 const qrcode = require("qrcode");
 const Store = require("electron-store");
 const pino = require("pino");
@@ -74,6 +75,7 @@ const profilesRootDir = path.join(userDataDir, "wa_profiles");
 
 const dataDir = path.join(__dirname, "data");
 const templatesFile = path.join(dataDir, "templates.json");
+const templateMediaDir = path.join(dataDir, "template_media");
 const CLINIC_API_BASE = "https://xqoc-ewo0-x3u2.s2.xano.io";
 const CLINIC_TZ = "Asia/Kuala_Lumpur";
 const CLINIC_AUTH_SESSION_KEY = "clinicAuthSession";
@@ -992,14 +994,109 @@ function extractTemplateVars(body) {
   return Array.from(set);
 }
 
+function normalizeTemplateMessageType(typeRaw) {
+  const type = cleanString(typeRaw).toLowerCase();
+  if (type === "image" || type === "video" || type === "audio" || type === "document") return type;
+  return "text";
+}
+
+function normalizeTemplateAttachmentRecord(raw, forcedType = "") {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const filePath = cleanString(src.path || src.filePath || "");
+  const fileName = cleanString(src.fileName || src.name || path.basename(filePath || ""));
+  const mimeType = cleanString(src.mimeType || src.type || (filePath ? getMimeTypeForPath(filePath) : ""));
+  const inferredKind = normalizeTemplateMessageType(src.kind || attachmentKindFromMimeOrPath(mimeType, filePath));
+  const forcedKind = normalizeTemplateMessageType(forcedType);
+  const kind = forcedKind === "text" ? inferredKind : forcedKind;
+  const size = Math.max(0, Number(src.size || 0) || 0);
+  const assetId = cleanString(src.assetId || src.mediaAssetId || "");
+  if (!filePath && !fileName && !assetId) return null;
+  return {
+    path: filePath,
+    fileName: fileName || "Attachment",
+    mimeType,
+    kind,
+    size,
+    ...(assetId ? { assetId } : {})
+  };
+}
+
+function normalizeTemplateMessageRecord(raw, idx) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const type = normalizeTemplateMessageType(src.type);
+  const text = String(src.text ?? src.body ?? src.caption ?? "");
+  const attachment = type === "text" ? null : normalizeTemplateAttachmentRecord(src.attachment || src.media, type);
+  const fallbackId = `tm_${idx + 1}`;
+  return {
+    id: cleanString(src.id || fallbackId),
+    type,
+    text,
+    attachment
+  };
+}
+
+function normalizeTemplateMessagesList(input, legacyBody = "") {
+  const rows = Array.isArray(input) ? input.map((x, idx) => normalizeTemplateMessageRecord(x, idx)).filter(Boolean) : [];
+  const out =
+    rows.length > 0
+      ? rows
+      : [
+          {
+            id: "tm_1",
+            type: "text",
+            text: String(legacyBody || ""),
+            attachment: null
+          }
+        ];
+  if (out.length === 0) {
+    out.push({
+      id: "tm_1",
+      type: "text",
+      text: "",
+      attachment: null
+    });
+  }
+
+  const seenIds = new Set();
+  for (let i = 0; i < out.length; i++) {
+    let nextId = cleanString(out[i].id || `tm_${i + 1}`);
+    if (!nextId || seenIds.has(nextId)) nextId = `tm_${i + 1}`;
+    while (seenIds.has(nextId)) nextId = `${nextId}_${i + 1}`;
+    out[i].id = nextId;
+    seenIds.add(nextId);
+  }
+
+  return out;
+}
+
+function extractTemplateVarsFromMessages(messages) {
+  const vars = new Set();
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    for (const key of extractTemplateVars(msg?.text || "")) vars.add(key);
+  }
+  return Array.from(vars);
+}
+
+function getTemplatePrimaryBody(messages, fallback = "") {
+  const rows = Array.isArray(messages) ? messages : [];
+  for (const row of rows) {
+    if (normalizeTemplateMessageType(row?.type) !== "text") continue;
+    const text = String(row?.text || "");
+    if (text.trim()) return text;
+  }
+  return String(fallback || rows[0]?.text || "");
+}
+
 function normalizeTemplateRecord(raw, idx) {
   const t = raw && typeof raw === "object" ? raw : {};
-  const body = String(t.body || "");
+  const messages = normalizeTemplateMessagesList(t.messages, t.body || "");
+  const body = getTemplatePrimaryBody(messages, t.body || "");
 
   const vars = new Set();
   for (const v of Array.isArray(t.variables) ? t.variables : []) {
     if (isValidTemplateVarName(v)) vars.add(String(v));
   }
+  for (const v of extractTemplateVarsFromMessages(messages)) vars.add(v);
   for (const v of extractTemplateVars(body)) vars.add(v);
 
   const sendPolicy = t.sendPolicy === "multiple" ? "multiple" : "once";
@@ -1009,6 +1106,7 @@ function normalizeTemplateRecord(raw, idx) {
     id: String(t.id || fallbackId),
     name: String(t.name || "Untitled"),
     body,
+    messages,
     variables: Array.from(vars),
     sendPolicy
   };
@@ -1021,6 +1119,7 @@ function normalizeTemplatesList(input) {
 
 function ensureDataFiles() {
   ensureDir(dataDir);
+  ensureDir(templateMediaDir);
   if (!fs.existsSync(templatesFile)) {
     fs.writeFileSync(
       templatesFile,
@@ -1030,6 +1129,13 @@ function ensureDataFiles() {
             id: "t1",
             name: "Follow up quotation",
             body: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?",
+            messages: [
+              {
+                id: "tm_1",
+                type: "text",
+                text: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?"
+              }
+            ],
             variables: ["name", "topic"],
             sendPolicy: "once"
           },
@@ -1037,6 +1143,13 @@ function ensureDataFiles() {
             id: "t2",
             name: "Appointment reminder",
             body: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya.",
+            messages: [
+              {
+                id: "tm_1",
+                type: "text",
+                text: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya."
+              }
+            ],
             variables: ["name", "date", "time"],
             sendPolicy: "once"
           }
@@ -1062,11 +1175,198 @@ function saveTemplates(templates) {
   fs.writeFileSync(templatesFile, JSON.stringify(normalized, null, 2), "utf-8");
 }
 
+function normalizeTemplateAssetRecord(raw, idx) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const assetId = cleanString(src.assetId || src.id || `asset_${idx + 1}`);
+  const mimeType = cleanString(src.mimeType || src.type || "");
+  const fileName = cleanString(src.fileName || src.name || "");
+  const dataBase64 = cleanString(src.dataBase64 || src.base64 || src.data || "");
+  const kindRaw = cleanString(src.kind || attachmentKindFromMimeOrPath(mimeType, fileName));
+  const size = Math.max(0, Number(src.size || 0) || 0);
+  if (!assetId || !dataBase64) return null;
+  return {
+    assetId,
+    fileName,
+    mimeType,
+    kind: kindRaw,
+    size,
+    dataBase64
+  };
+}
+
+function buildTemplateAttachmentExportPayload(attachmentRaw, assetByPath, assetsOut) {
+  const attachment = normalizeTemplateAttachmentRecord(attachmentRaw);
+  if (!attachment) return null;
+
+  const filePath = cleanString(attachment.path);
+  const hasLocalFile = filePath && fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  if (!hasLocalFile) {
+    return {
+      path: filePath,
+      fileName: attachment.fileName || path.basename(filePath || "Attachment"),
+      mimeType: attachment.mimeType || (filePath ? getMimeTypeForPath(filePath) : ""),
+      kind: attachment.kind || attachmentKindFromMimeOrPath(attachment.mimeType, filePath),
+      size: Number(attachment.size || 0) || 0,
+      ...(attachment.assetId ? { assetId: attachment.assetId } : {})
+    };
+  }
+
+  const pathKey = filePath.toLowerCase();
+  let assetMeta = assetByPath.get(pathKey) || null;
+  if (!assetMeta) {
+    const fileBuffer = fs.readFileSync(filePath);
+    const stat = fs.statSync(filePath);
+    const mimeType = attachment.mimeType || getMimeTypeForPath(filePath);
+    const kind = attachment.kind || attachmentKindFromMimeOrPath(mimeType, filePath);
+    const hash = crypto.createHash("sha1").update(fileBuffer).digest("hex");
+    const ext = path.extname(filePath || "").toLowerCase();
+    const assetId = cleanString(attachment.assetId || `${hash}${ext ? "_" + ext.slice(1) : ""}`) || hash;
+    assetMeta = {
+      assetId,
+      fileName: attachment.fileName || path.basename(filePath),
+      mimeType,
+      kind,
+      size: Number(stat.size || 0) || 0
+    };
+    assetsOut.push({
+      ...assetMeta,
+      dataBase64: fileBuffer.toString("base64")
+    });
+    assetByPath.set(pathKey, assetMeta);
+  }
+
+  return {
+    path: filePath,
+    fileName: assetMeta.fileName,
+    mimeType: assetMeta.mimeType,
+    kind: assetMeta.kind,
+    size: assetMeta.size,
+    assetId: assetMeta.assetId
+  };
+}
+
+function buildMarketingTemplateExportData(templatesInput) {
+  const templates = normalizeTemplatesList(templatesInput);
+  const marketingTemplateAssets = [];
+  const assetsByPath = new Map();
+
+  const marketingTemplates = templates.map((template, idx) => {
+    const messages = normalizeTemplateMessagesList(template.messages, template.body || "").map((msg, msgIdx) => {
+      const type = normalizeTemplateMessageType(msg.type);
+      const attachment =
+        type === "text"
+          ? null
+          : buildTemplateAttachmentExportPayload(msg.attachment, assetsByPath, marketingTemplateAssets);
+      return {
+        id: cleanString(msg.id || `tm_${msgIdx + 1}`),
+        type,
+        text: String(msg.text || ""),
+        ...(attachment ? { attachment } : {})
+      };
+    });
+
+    return normalizeTemplateRecord(
+      {
+        ...template,
+        messages
+      },
+      idx
+    );
+  });
+
+  return { marketingTemplates, marketingTemplateAssets };
+}
+
+function restoreTemplateAssetsFromBundle(assetsInput) {
+  const rows = Array.isArray(assetsInput) ? assetsInput : [];
+  const assetMap = new Map();
+  if (rows.length === 0) return assetMap;
+  ensureDataFiles();
+  ensureDir(templateMediaDir);
+
+  rows.forEach((raw, idx) => {
+    const asset = normalizeTemplateAssetRecord(raw, idx);
+    if (!asset) return;
+    try {
+      const buffer = Buffer.from(asset.dataBase64, "base64");
+      if (!buffer || buffer.length === 0) return;
+      const inferredExt = path.extname(asset.fileName || "") || extensionFromMime(asset.mimeType) || "";
+      const fileNameBase = cleanString(asset.fileName) || `template_asset_${idx + 1}${inferredExt}`;
+      const safeName = sanitizePathSegment(fileNameBase, `template_asset_${idx + 1}${inferredExt}`);
+      const outputName = `${sanitizePathSegment(asset.assetId, "asset").slice(0, 20)}_${safeName}`;
+      const outputPath = path.join(templateMediaDir, outputName);
+      fs.writeFileSync(outputPath, buffer);
+      const mimeType = asset.mimeType || getMimeTypeForPath(outputPath);
+      const inferredKind = attachmentKindFromMimeOrPath(mimeType, outputPath);
+      assetMap.set(asset.assetId, {
+        path: outputPath,
+        fileName: cleanString(asset.fileName) || path.basename(outputPath),
+        mimeType,
+        kind: inferredKind,
+        size: Number(buffer.length || 0) || Number(asset.size || 0) || 0,
+        assetId: asset.assetId
+      });
+    } catch (e) {
+      log.warn({ err: e, assetId: asset.assetId }, "Failed to restore marketing template asset");
+    }
+  });
+
+  return assetMap;
+}
+
+function rehydrateTemplateAttachmentFromBundle(attachmentRaw, type, assetMap) {
+  const attachment = normalizeTemplateAttachmentRecord(attachmentRaw, type);
+  const assetId = cleanString(attachmentRaw?.assetId || attachment?.assetId || "");
+  const mappedAsset = assetId ? assetMap.get(assetId) || null : null;
+  if ((!attachment || !attachment.path) && mappedAsset) {
+    return {
+      ...mappedAsset,
+      kind: normalizeTemplateMessageType(type),
+      assetId
+    };
+  }
+  if (!attachment) return null;
+  return {
+    ...attachment,
+    kind: normalizeTemplateMessageType(type),
+    ...(assetId ? { assetId } : {})
+  };
+}
+
+function rehydrateMarketingTemplatesWithAssets(marketingTemplatesInput, assetsInput) {
+  const templates = Array.isArray(marketingTemplatesInput) ? marketingTemplatesInput : [];
+  const assetMap = restoreTemplateAssetsFromBundle(assetsInput);
+  return templates.map((template, idx) => {
+    const normalized = normalizeTemplateRecord(template, idx);
+    const messages = normalizeTemplateMessagesList(normalized.messages, normalized.body || "").map((msg, msgIdx) => {
+      const type = normalizeTemplateMessageType(msg.type);
+      const attachment =
+        type === "text" ? null : rehydrateTemplateAttachmentFromBundle(msg.attachment || {}, type, assetMap);
+      return {
+        id: cleanString(msg.id || `tm_${msgIdx + 1}`),
+        type,
+        text: String(msg.text || ""),
+        ...(attachment ? { attachment } : {})
+      };
+    });
+
+    return normalizeTemplateRecord(
+      {
+        ...normalized,
+        messages
+      },
+      idx
+    );
+  });
+}
+
 function getTemplateExportBundle() {
+  const marketingData = buildMarketingTemplateExportData(readTemplates());
   return {
     exported_at: nowIsoShort(),
     timezone: CLINIC_TZ,
-    marketingTemplates: readTemplates(),
+    marketingTemplates: marketingData.marketingTemplates,
+    marketingTemplateAssets: marketingData.marketingTemplateAssets,
     appointmentTemplates: getAppointmentTemplates()
   };
 }
@@ -1086,6 +1386,11 @@ function importTemplateBundle(raw) {
     : Array.isArray(src.templates)
       ? src.templates
       : null;
+  const marketingTemplateAssets = Array.isArray(src.marketingTemplateAssets)
+    ? src.marketingTemplateAssets
+    : Array.isArray(src.templateAssets)
+      ? src.templateAssets
+      : [];
   const appointmentTemplates =
     src.appointmentTemplates && typeof src.appointmentTemplates === "object" ? src.appointmentTemplates : null;
 
@@ -1093,7 +1398,7 @@ function importTemplateBundle(raw) {
   let appointmentUpdated = false;
 
   if (marketingTemplates) {
-    const normalizedMarketing = normalizeTemplatesList(marketingTemplates);
+    const normalizedMarketing = rehydrateMarketingTemplatesWithAssets(marketingTemplates, marketingTemplateAssets);
     saveTemplates(normalizedMarketing);
     marketingCount = normalizedMarketing.length;
   }
@@ -5408,14 +5713,129 @@ async function ensureConnectedForSend(profileId) {
   return await waitForConnectedState(16000);
 }
 
+async function sendPayloadToMsisdn(msisdn, messagePayload, sendOptions = {}) {
+  const profileId = getActiveProfileId();
+  const candidates = buildSendTargetCandidatesForProfile(profileId, msisdn);
+  if (candidates.length === 0) throw new Error("Invalid phone number");
+  await sendMessageWithTargetCandidates(candidates, messagePayload, sendOptions || {});
+}
+
 async function sendText(msisdn, text) {
   const profileId = getActiveProfileId();
   if (!(await ensureConnectedForSend(profileId)) || !sock || !isConnected) {
     throw new Error("WhatsApp not connected");
   }
-  const candidates = buildSendTargetCandidatesForProfile(profileId, msisdn);
-  if (candidates.length === 0) throw new Error("Invalid phone number");
-  await sendMessageWithTargetCandidates(candidates, { text: String(text || "") });
+  await sendPayloadToMsisdn(msisdn, { text: String(text || "") });
+}
+
+function normalizeTemplateMessagesForSend(inputMessages, legacyBody = "") {
+  return normalizeTemplateMessagesList(inputMessages, legacyBody).map((msg) => {
+    const type = normalizeTemplateMessageType(msg.type);
+    return {
+      id: cleanString(msg.id),
+      type,
+      text: String(msg.text || ""),
+      attachment: type === "text" ? null : normalizeTemplateAttachmentRecord(msg.attachment, type)
+    };
+  });
+}
+
+function validateTemplateMessagesForSend(messages) {
+  const rows = Array.isArray(messages) ? messages : [];
+  if (rows.length === 0) throw new Error("Template has no messages");
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] && typeof rows[i] === "object" ? rows[i] : {};
+    const type = normalizeTemplateMessageType(row.type);
+    if (type === "text") continue;
+    const attachment = normalizeTemplateAttachmentRecord(row.attachment, type);
+    const filePath = cleanString(attachment?.path || "");
+    if (!filePath) throw new Error(`Template message ${i + 1} is missing media attachment`);
+    if (!fs.existsSync(filePath)) throw new Error(`Template message ${i + 1} attachment file not found`);
+    const stat = fs.statSync(filePath);
+    if (!stat || !stat.isFile()) throw new Error(`Template message ${i + 1} attachment must be a file`);
+  }
+}
+
+function buildTemplateMessagePayload(message, textOverride = null) {
+  const row = message && typeof message === "object" ? message : {};
+  const type = normalizeTemplateMessageType(row.type);
+  const textValue = textOverride === null ? row.text : textOverride;
+  const text = String(textValue || "");
+  const trimmedText = text.trim();
+
+  if (type === "text") {
+    if (!trimmedText) return null;
+    return { text: trimmedText };
+  }
+
+  const attachment = normalizeTemplateAttachmentRecord(row.attachment, type);
+  const filePath = cleanString(attachment?.path || "");
+  if (!filePath) throw new Error("Template media attachment is missing");
+  if (!fs.existsSync(filePath)) throw new Error("Template media attachment file not found");
+  const fileStat = fs.statSync(filePath);
+  if (!fileStat || !fileStat.isFile()) throw new Error("Template media attachment must be a file");
+
+  const fileName = cleanString(attachment.fileName || path.basename(filePath));
+  const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(filePath));
+  const detectedKind = attachmentKindFromMimeOrPath(mimeType, filePath);
+  let kind = type;
+  if (kind === "text") kind = normalizeTemplateMessageType(detectedKind);
+  if (kind === "text") kind = detectedKind || "document";
+
+  if (kind === "image") {
+    return {
+      image: { url: filePath },
+      ...(trimmedText ? { caption: trimmedText } : {})
+    };
+  }
+  if (kind === "video") {
+    return {
+      video: { url: filePath },
+      ...(mimeType ? { mimetype: mimeType } : {}),
+      ...(trimmedText ? { caption: trimmedText } : {})
+    };
+  }
+  if (kind === "audio") {
+    return {
+      audio: { url: filePath },
+      ...(mimeType ? { mimetype: mimeType } : {}),
+      ptt: false
+    };
+  }
+  return {
+    document: { url: filePath },
+    fileName: fileName || path.basename(filePath),
+    ...(mimeType ? { mimetype: mimeType } : {}),
+    ...(trimmedText ? { caption: trimmedText } : {})
+  };
+}
+
+function summarizeTemplateMessagesForAudit(messages) {
+  const rows = Array.isArray(messages) ? messages : [];
+  const out = [];
+  for (const row of rows) {
+    const type = normalizeTemplateMessageType(row?.type);
+    const text = String(row?.text || "").trim();
+    if (type === "text") {
+      if (text) out.push(text);
+      continue;
+    }
+    const kindLabel =
+      type === "image"
+        ? "Image"
+        : type === "video"
+          ? "Video"
+          : type === "audio"
+            ? "Audio"
+            : type === "document"
+              ? "Document"
+              : "Media";
+    const fileLabel = cleanString(row?.attachment?.fileName || "");
+    const mediaHead = fileLabel ? `[${kindLabel}] ${fileLabel}` : `[${kindLabel}]`;
+    if (text) out.push(`${mediaHead}\n${text}`);
+    else out.push(mediaHead);
+  }
+  return out.join("\n\n").trim();
 }
 
 /* --------------------------- IPC ---------------------------- */
@@ -5836,6 +6256,7 @@ ipcMain.handle("app:openCsvDialogAndParse", async (_evt, mapping) => {
 ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const {
     templateId,
+    templateMessages,
     templateBody,
     recipients,
     varsByPhone,
@@ -5867,6 +6288,8 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   if (aiCfg.enabled && !aiAuthToken) {
     throw new Error("AI rewrite requires Authorization token. Please log in first.");
   }
+  const normalizedBatchMessages = normalizeTemplateMessagesForSend(templateMessages, templateBody || "");
+  validateTemplateMessagesForSend(normalizedBatchMessages);
 
   const activeProfileIdForBatch = getActiveProfileId();
   if (!(await ensureConnectedForSend(activeProfileIdForBatch)) || !isConnected || !sock) {
@@ -5956,39 +6379,80 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         if (hintedName) {
           rememberRecipientNameForProfile(activeProfileIdForBatch, msisdn, hintedName);
         }
-        const baseText = renderTemplate(templateBody, vars);
-        let text = baseText;
+        const preparedMessages = [];
+        for (let msgIdx = 0; msgIdx < normalizedBatchMessages.length; msgIdx++) {
+          const templateMessage = normalizedBatchMessages[msgIdx];
+          const baseText = renderTemplate(templateMessage.text, vars);
+          let renderedText = baseText;
 
-        if (aiCfg.enabled) {
-          const promptVars = { ...(vars || {}), msisdn, phone: msisdn, templateId };
-          const promptText = renderTemplate(aiCfg.prompt, promptVars);
-
-          try {
-            text = await rewriteMessageViaBackend({
-              endpoint: aiCfg.endpoint,
-              authToken: aiAuthToken,
-              prompt: promptText,
-              message: baseText,
-              variables: vars,
+          if (aiCfg.enabled && baseText.trim()) {
+            const promptVars = {
+              ...(vars || {}),
               msisdn,
-              templateId,
-              timeoutMs: aiCfg.timeoutMs
-            });
-          } catch (aiErr) {
-            if (!aiCfg.fallbackToOriginal) {
-              throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
-            }
-
-            text = baseText;
-            win?.webContents.send("batch:progress", {
-              ts: nowIsoShort(),
-              index: i + 1,
-              total: recipients.length,
               phone: msisdn,
-              status: "sending",
-              error: `AI fallback: ${String(aiErr?.message || aiErr)}`
-            });
+              templateId,
+              message_index: msgIdx + 1,
+              message_type: templateMessage.type
+            };
+            const promptText = renderTemplate(aiCfg.prompt, promptVars);
+            try {
+              renderedText = await rewriteMessageViaBackend({
+                endpoint: aiCfg.endpoint,
+                authToken: aiAuthToken,
+                prompt: promptText,
+                message: baseText,
+                variables: vars,
+                msisdn,
+                templateId,
+                timeoutMs: aiCfg.timeoutMs
+              });
+            } catch (aiErr) {
+              if (!aiCfg.fallbackToOriginal) {
+                throw new Error(`AI rewrite failed: ${String(aiErr?.message || aiErr)}`);
+              }
+              renderedText = baseText;
+              win?.webContents.send("batch:progress", {
+                ts: nowIsoShort(),
+                index: i + 1,
+                total: recipients.length,
+                phone: msisdn,
+                status: "sending",
+                error: `AI fallback (msg ${msgIdx + 1}): ${String(aiErr?.message || aiErr)}`
+              });
+            }
           }
+
+          const messagePayload = buildTemplateMessagePayload(templateMessage, renderedText);
+          if (!messagePayload) continue;
+          preparedMessages.push({
+            type: templateMessage.type,
+            text: renderedText,
+            attachment: templateMessage.attachment,
+            payload: messagePayload
+          });
+        }
+
+        if (preparedMessages.length === 0) {
+          skipped++;
+          win?.webContents.send("batch:progress", {
+            ts: nowIsoShort(),
+            index: i + 1,
+            total: recipients.length,
+            phone: msisdn,
+            status: "skipped",
+            error: "No sendable message after rendering"
+          });
+          if (i < recipients.length - 1) {
+            const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
+            const completedDelay = await waitDelayOrBatchCancel(batchJob, ms);
+            if (!completedDelay) {
+              stopped = true;
+              stoppedAtIndex = i + 2;
+              emitStopped(stoppedAtIndex);
+              break;
+            }
+          }
+          continue;
         }
 
         if (isBatchJobCancelRequested(batchJob)) {
@@ -6006,7 +6470,17 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
           status: "sending"
         });
 
-        await sendText(msisdn, text);
+        for (const entry of preparedMessages) {
+          if (isBatchJobCancelRequested(batchJob)) {
+            stopped = true;
+            stoppedAtIndex = i + 1;
+            emitStopped(stoppedAtIndex);
+            break;
+          }
+          await sendPayloadToMsisdn(msisdn, entry.payload);
+        }
+        if (stopped) break;
+
         markSent(templateId, msisdn);
         sent++;
 
@@ -6025,7 +6499,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
             name: recipientName,
             phone: msisdn,
             sent_by: sentBy,
-            message: text
+            message: summarizeTemplateMessagesForAudit(preparedMessages)
           }).catch((err) => {
             log.warn({ err, msisdn }, "Failed to record sent marketing message");
           });

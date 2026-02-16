@@ -155,6 +155,7 @@ const state = {
   lastMarketingSkippedTemplateId: "",
   activityRows: [],
   currentTemplateId: null,
+  currentTemplateMessageId: null,
   confirmResolver: null,
   templateBodyCaretPos: 0
 };
@@ -245,6 +246,130 @@ function extractTemplateVariables(body) {
   let m = null;
   while ((m = re.exec(text))) set.add(String(m[1]));
   return Array.from(set);
+}
+
+function normalizeTemplateMessageType(typeRaw) {
+  const type = String(typeRaw || "")
+    .trim()
+    .toLowerCase();
+  if (type === "image" || type === "video") return type;
+  return "text";
+}
+
+function templateMessageTypeLabel(typeRaw) {
+  const type = normalizeTemplateMessageType(typeRaw);
+  if (type === "image") return "Image";
+  if (type === "video") return "Video";
+  return "Text";
+}
+
+function templateAttachmentFileNameFromPath(filePath) {
+  const raw = String(filePath || "").trim();
+  if (!raw) return "";
+  return (
+    raw
+      .split(/[\\/]/)
+      .filter(Boolean)
+      .pop() || ""
+  );
+}
+
+function normalizeTemplateAttachment(raw, forcedKind = "") {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const filePath = String(src.path || src.filePath || "").trim();
+  const fileName = String(src.fileName || src.name || "").trim() || templateAttachmentFileNameFromPath(filePath);
+  const mimeType = String(src.mimeType || src.type || "").trim();
+  const inferredKind = waAttachmentKindFromMimeOrPath(mimeType, filePath);
+  const kindCandidate = normalizeTemplateMessageType(forcedKind || src.kind || inferredKind);
+  const kind = kindCandidate === "text" ? inferredKind : kindCandidate;
+  const size = Math.max(0, Number(src.size || 0) || 0);
+  if (!filePath && !fileName) return null;
+  return {
+    path: filePath,
+    fileName: fileName || "Attachment",
+    mimeType,
+    kind,
+    size
+  };
+}
+
+function buildDefaultTemplateMessage(typeRaw = "text") {
+  const type = normalizeTemplateMessageType(typeRaw);
+  return {
+    id: `tm_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 8)}`,
+    type,
+    text: "",
+    attachment: null
+  };
+}
+
+function normalizeTemplateMessage(raw, idx) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const type = normalizeTemplateMessageType(src.type);
+  const text = String(src.text ?? src.body ?? src.caption ?? "");
+  const attachment = type === "text" ? null : normalizeTemplateAttachment(src.attachment, type);
+  const fallbackId = `tm_${idx + 1}`;
+  return {
+    id: String(src.id || fallbackId),
+    type,
+    text,
+    attachment
+  };
+}
+
+function normalizeTemplateMessages(rawMessages, legacyBody = "") {
+  const sourceRows = Array.isArray(rawMessages) ? rawMessages : [];
+  let rows = sourceRows.map((x, idx) => normalizeTemplateMessage(x, idx)).filter(Boolean);
+  if (rows.length === 0) {
+    rows = [normalizeTemplateMessage({ type: "text", text: legacyBody || "" }, 0)];
+  }
+  if (rows.length === 0) rows = [buildDefaultTemplateMessage("text")];
+
+  const seenIds = new Set();
+  for (let i = 0; i < rows.length; i++) {
+    let nextId = String(rows[i].id || "").trim();
+    if (!nextId || seenIds.has(nextId)) nextId = `tm_${Date.now().toString(16)}_${i}_${Math.random().toString(16).slice(2, 6)}`;
+    seenIds.add(nextId);
+    rows[i].id = nextId;
+  }
+  return rows;
+}
+
+function extractTemplateVariablesFromMessages(messages) {
+  const out = new Set();
+  for (const msg of Array.isArray(messages) ? messages : []) {
+    for (const key of extractTemplateVariables(String(msg?.text || ""))) out.add(key);
+  }
+  return Array.from(out);
+}
+
+function getTemplatePrimaryBody(messages, fallback = "") {
+  const rows = Array.isArray(messages) ? messages : [];
+  for (const msg of rows) {
+    if (normalizeTemplateMessageType(msg?.type) !== "text") continue;
+    const text = String(msg?.text || "");
+    if (text.trim()) return text;
+  }
+  return String(fallback || rows[0]?.text || "");
+}
+
+function marketingTemplateSnippet(template) {
+  const t = template && typeof template === "object" ? template : {};
+  const messages = normalizeTemplateMessages(t.messages, t.body || "");
+  const first = messages[0] || null;
+  if (!first) return "-";
+  const type = normalizeTemplateMessageType(first.type);
+  const text = String(first.text || "").trim();
+  let head = "";
+  if (type === "text") {
+    head = templateSnippet(text || "(empty text)");
+  } else {
+    const fileLabel = String(first.attachment?.fileName || "").trim() || "(no file)";
+    const caption = text ? ` ${templateSnippet(text)}` : "";
+    head = `[${templateMessageTypeLabel(type)}] ${fileLabel}${caption ? ` | ${caption}` : ""}`;
+  }
+  if (messages.length > 1) head += ` (+${messages.length - 1} more)`;
+  return head;
 }
 
 function getPlaceholderMetaByKey(key) {
@@ -510,13 +635,16 @@ function setActiveTab(tabName) {
 
 function normalizeTemplate(raw, idx) {
   const src = raw && typeof raw === "object" ? raw : {};
-  const body = String(src.body || "");
+  const messages = normalizeTemplateMessages(src.messages, src.body || "");
+  const body = getTemplatePrimaryBody(messages, src.body || "");
   const vars = new Set(Array.isArray(src.variables) ? src.variables.map((v) => String(v)) : []);
+  for (const key of extractTemplateVariablesFromMessages(messages)) vars.add(key);
   for (const key of extractTemplateVariables(body)) vars.add(key);
   return {
     id: String(src.id || `t_${idx + 1}`),
     name: String(src.name || "Untitled"),
     body,
+    messages,
     variables: Array.from(vars),
     sendPolicy: src.sendPolicy === "multiple" ? "multiple" : "once"
   };
@@ -524,6 +652,190 @@ function normalizeTemplate(raw, idx) {
 
 function getSelectedMarketingTemplate() {
   return state.templates.find((t) => t.id === state.currentTemplateId) || null;
+}
+
+function ensureTemplateMessages(template) {
+  const t = template && typeof template === "object" ? template : null;
+  if (!t) return [];
+  t.messages = normalizeTemplateMessages(t.messages, t.body || "");
+  return t.messages;
+}
+
+function updateTemplateDerivedFields(template) {
+  const t = template && typeof template === "object" ? template : null;
+  if (!t) return;
+  const messages = ensureTemplateMessages(t);
+  t.body = getTemplatePrimaryBody(messages, t.body || "");
+  t.variables = extractTemplateVariablesFromMessages(messages);
+}
+
+function ensureSelectedTemplateMessage(template) {
+  const messages = ensureTemplateMessages(template);
+  if (messages.length === 0) {
+    state.currentTemplateMessageId = null;
+    return null;
+  }
+  if (!state.currentTemplateMessageId || !messages.some((x) => x.id === state.currentTemplateMessageId)) {
+    state.currentTemplateMessageId = messages[0].id;
+  }
+  return messages.find((x) => x.id === state.currentTemplateMessageId) || messages[0] || null;
+}
+
+function getSelectedTemplateMessage(template = null) {
+  const t = template || getSelectedMarketingTemplate();
+  return ensureSelectedTemplateMessage(t);
+}
+
+function templateMessageListMeta(message) {
+  const msg = message && typeof message === "object" ? message : {};
+  const type = normalizeTemplateMessageType(msg.type);
+  const text = String(msg.text || "").trim();
+  if (type === "text") return templateSnippet(text || "(empty text)");
+  const fileLabel = String(msg.attachment?.fileName || "").trim() || "(no file)";
+  if (!text) return fileLabel;
+  return `${fileLabel} | ${templateSnippet(text)}`;
+}
+
+function renderTemplateMessageList() {
+  const list = el("templateMessageList");
+  if (!list) return;
+  list.innerHTML = "";
+
+  const template = getSelectedMarketingTemplate();
+  if (!template) {
+    const empty = document.createElement("div");
+    empty.className = "smallText";
+    empty.textContent = "Select a template.";
+    list.appendChild(empty);
+    return;
+  }
+
+  const messages = ensureTemplateMessages(template);
+  const selected = ensureSelectedTemplateMessage(template);
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    const item = document.createElement("div");
+    item.className = `templateMessageItem${selected && selected.id === msg.id ? " active" : ""}`;
+    item.innerHTML = `<div class="templateMessageItemTitle">#${i + 1} ${escapeHtml(
+      templateMessageTypeLabel(msg.type)
+    )}</div><div class="templateMessageItemMeta">${escapeHtml(templateMessageListMeta(msg))}</div>`;
+    item.addEventListener("click", () => {
+      readMarketingTemplateEditorToState();
+      state.currentTemplateMessageId = msg.id;
+      renderTemplateMessageList();
+      renderTemplateMessageEditor();
+      const selectedMessage = getSelectedTemplateMessage(template);
+      renderTemplatePlaceholderPreview(selectedMessage?.text || "");
+      refreshMarketingPreview();
+    });
+    list.appendChild(item);
+  }
+}
+
+function renderTemplateMessageEditor() {
+  const typeSelect = el("templateMessageType");
+  const bodyInput = el("templateBody");
+  const bodyLabel = el("templateBodyLabel");
+  const attachBtn = el("btnTemplateAttachMedia");
+  const clearBtn = el("btnTemplateClearMedia");
+  const deleteBtn = el("btnTemplateDeleteMessage");
+  const attachmentText = el("templateMessageAttachmentText");
+  if (!typeSelect || !bodyInput || !bodyLabel || !attachBtn || !clearBtn || !deleteBtn || !attachmentText) return;
+
+  const template = getSelectedMarketingTemplate();
+  const message = getSelectedTemplateMessage(template);
+  const messages = ensureTemplateMessages(template);
+  if (!template || !message) {
+    typeSelect.value = "text";
+    typeSelect.disabled = true;
+    bodyInput.value = "";
+    bodyInput.disabled = true;
+    bodyLabel.textContent = "Message Text";
+    bodyInput.placeholder = "Select template.";
+    attachBtn.disabled = true;
+    clearBtn.disabled = true;
+    deleteBtn.disabled = true;
+    attachmentText.textContent = "No media attached.";
+    state.templateBodyCaretPos = 0;
+    return;
+  }
+
+  const type = normalizeTemplateMessageType(message.type);
+  const hasMedia = type === "image" || type === "video";
+  const attachment = hasMedia ? normalizeTemplateAttachment(message.attachment, type) : null;
+  message.type = type;
+  message.attachment = attachment;
+
+  typeSelect.disabled = false;
+  typeSelect.value = type;
+  bodyLabel.textContent = hasMedia ? "Caption (optional)" : "Message Text";
+  bodyInput.placeholder = hasMedia ? "Optional caption for media message" : "Type message";
+  bodyInput.disabled = false;
+  bodyInput.value = String(message.text || "");
+  state.templateBodyCaretPos = Number((message.text || "").length);
+
+  attachBtn.disabled = !hasMedia;
+  clearBtn.disabled = !hasMedia || !attachment;
+  deleteBtn.disabled = messages.length <= 1;
+
+  if (!hasMedia) {
+    attachmentText.textContent = "Text message. No media required.";
+  } else if (attachment?.path) {
+    const name = String(attachment.fileName || "").trim() || templateAttachmentFileNameFromPath(attachment.path) || "Attachment";
+    attachmentText.textContent = `${templateMessageTypeLabel(type)} attached: ${name}`;
+  } else if (attachment) {
+    const name = String(attachment.fileName || "").trim() || "Attachment";
+    attachmentText.textContent = `${templateMessageTypeLabel(type)} attached but file path is missing: ${name}`;
+  } else {
+    attachmentText.textContent = `No ${templateMessageTypeLabel(type).toLowerCase()} attached.`;
+  }
+}
+
+function refreshTemplateVariableSummary() {
+  const template = getSelectedMarketingTemplate();
+  const vars = template ? extractTemplateVariablesFromMessages(ensureTemplateMessages(template)) : [];
+  el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+}
+
+function formatMarketingPreviewFromMessages(messages) {
+  const rows = Array.isArray(messages) ? messages : [];
+  if (rows.length === 0) return "Template has no sendable messages.";
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const msg = rows[i];
+    const type = normalizeTemplateMessageType(msg.type);
+    out.push(`Message ${i + 1} (${templateMessageTypeLabel(type)}):`);
+    if (type !== "text") {
+      const fileLabel = String(msg.attachment?.fileName || "").trim() || "(no file)";
+      out.push(`[${templateMessageTypeLabel(type)}] ${fileLabel}`);
+    }
+    if (String(msg.text || "").trim()) out.push(String(msg.text || ""));
+    out.push("");
+  }
+  return out.join("\n").trim();
+}
+
+function buildRenderedMarketingMessages(template, vars, options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  const rows = normalizeTemplateMessages(template?.messages, template?.body || "");
+  const out = [];
+  for (const row of rows) {
+    const type = normalizeTemplateMessageType(row.type);
+    const text = renderTemplate(String(row.text || ""), vars || {});
+    if (type === "text") {
+      if (!String(text || "").trim() && opts.keepEmptyText !== true) continue;
+      out.push({ type: "text", text: String(text || ""), attachment: null });
+      continue;
+    }
+    const attachment = normalizeTemplateAttachment(row.attachment, type);
+    if (!attachment?.path && opts.includeMissingMedia !== true) continue;
+    out.push({
+      type,
+      text: String(text || ""),
+      attachment: attachment ? { ...attachment, kind: type } : null
+    });
+  }
+  return out;
 }
 
 function getBranchByName(branchName) {
@@ -2287,7 +2599,7 @@ function renderTemplateList() {
     const item = document.createElement("div");
     item.className = `templateItem${state.currentTemplateId === t.id ? " active" : ""}`;
     item.innerHTML = `<div class="templateItemName">${escapeHtml(t.name)}</div><div class="templateItemMeta">${escapeHtml(
-      templateSnippet(t.body)
+      marketingTemplateSnippet(t)
     )}</div>`;
     item.addEventListener("click", () => {
       state.currentTemplateId = t.id;
@@ -2310,21 +2622,25 @@ function renderTemplateList() {
 function loadTemplateEditor() {
   const t = getSelectedMarketingTemplate();
   if (!t) {
+    state.currentTemplateMessageId = null;
     el("templateName").value = "";
-    el("templateBody").value = "";
     el("templateSendPolicy").value = "once";
     el("templateVariablesText").textContent = "Variables: -";
     el("templatePlaceholderPreview").textContent = "Type template to preview placeholders.";
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
     return;
   }
 
+  updateTemplateDerivedFields(t);
+  ensureSelectedTemplateMessage(t);
   el("templateName").value = t.name;
-  el("templateBody").value = t.body;
-  state.templateBodyCaretPos = Number((t.body || "").length);
   el("templateSendPolicy").value = t.sendPolicy;
-  const vars = extractTemplateVariables(t.body);
-  el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
-  renderTemplatePlaceholderPreview(t.body);
+  renderTemplateMessageList();
+  renderTemplateMessageEditor();
+  refreshTemplateVariableSummary();
+  const selectedMessage = getSelectedTemplateMessage(t);
+  renderTemplatePlaceholderPreview(selectedMessage?.text || "");
 }
 
 function renderMarketingPlaceholderButtons() {
@@ -2360,9 +2676,9 @@ function insertPlaceholderIntoTemplate(token, btn) {
   textarea.setSelectionRange(caretPos, caretPos);
 
   readMarketingTemplateEditorToState();
-  const vars = extractTemplateVariables(next);
-  el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+  refreshTemplateVariableSummary();
   renderTemplatePlaceholderPreview(next);
+  renderTemplateMessageList();
   renderTemplateList();
   refreshMarketingPreview();
 
@@ -2468,8 +2784,12 @@ function refreshMarketingPreview() {
   const recipient = getSelectedMarketingRecipients()[0];
   if (!template) return (el("marketingPreview").textContent = "No marketing template selected.");
   if (!recipient) return (el("marketingPreview").textContent = "Select at least one recipient to preview.");
-
-  el("marketingPreview").textContent = renderTemplate(template.body, buildMarketingTemplateVars(recipient));
+  const vars = buildMarketingTemplateVars(recipient);
+  const rendered = buildRenderedMarketingMessages(template, vars, {
+    includeMissingMedia: true,
+    keepEmptyText: true
+  });
+  el("marketingPreview").textContent = formatMarketingPreviewFromMessages(rendered);
 }
 
 function normalizeGenderKey(genderRaw) {
@@ -2812,9 +3132,20 @@ function readMarketingTemplateEditorToState() {
   const t = getSelectedMarketingTemplate();
   if (!t) return;
   t.name = el("templateName").value.trim() || "Untitled";
-  t.body = el("templateBody").value || "";
   t.sendPolicy = el("templateSendPolicy").value === "multiple" ? "multiple" : "once";
-  t.variables = extractTemplateVariables(t.body);
+  const messages = ensureTemplateMessages(t);
+  const currentMessage = getSelectedTemplateMessage(t);
+  if (currentMessage && messages.length > 0) {
+    const nextType = normalizeTemplateMessageType(el("templateMessageType").value || currentMessage.type);
+    currentMessage.type = nextType;
+    currentMessage.text = el("templateBody").value || "";
+    if (nextType === "text") {
+      currentMessage.attachment = null;
+    } else {
+      currentMessage.attachment = normalizeTemplateAttachment(currentMessage.attachment, nextType);
+    }
+  }
+  updateTemplateDerivedFields(t);
 }
 
 async function loadAppointments() {
@@ -2909,6 +3240,17 @@ async function sendMarketing() {
 
   const template = getSelectedMarketingTemplate();
   if (!template) throw new Error("Please select a template");
+  const normalizedMessages = normalizeTemplateMessages(template.messages, template.body || "");
+  template.messages = normalizedMessages;
+  updateTemplateDerivedFields(template);
+  const missingMediaAt = normalizedMessages.findIndex((msg) => {
+    const type = normalizeTemplateMessageType(msg.type);
+    if (type !== "image" && type !== "video") return false;
+    return !String(msg?.attachment?.path || "").trim();
+  });
+  if (missingMediaAt >= 0) {
+    throw new Error(`Template message ${missingMediaAt + 1} is missing media attachment`);
+  }
 
   const selected = getSelectedMarketingRecipients();
   if (selected.length === 0) throw new Error("Please select recipients");
@@ -2941,7 +3283,11 @@ async function sendMarketing() {
       name: String(editRow?.name || src.name || "").trim() || "Patient",
       gender: normalizeGenderKey(editRow?.gender || src.gender)
     };
-    return renderTemplate(template.body, buildMarketingTemplateVars(merged));
+    const rendered = buildRenderedMarketingMessages(template, buildMarketingTemplateVars(merged), {
+      includeMissingMedia: true,
+      keepEmptyText: true
+    });
+    return formatMarketingPreviewFromMessages(rendered);
   };
 
   const confirmRecipients = editableRecipients
@@ -2978,8 +3324,8 @@ async function sendMarketing() {
     const gender = normalizeGenderKey(editRow.gender || src.gender);
     const merged = { ...src, phone, name, gender };
     const vars = buildMarketingTemplateVars(merged);
-    const rendered = renderTemplate(template.body, vars);
-    if (!String(rendered || "").trim()) continue;
+    const renderedMessages = buildRenderedMarketingMessages(template, vars);
+    if (renderedMessages.length === 0) continue;
 
     if (src && typeof src === "object") {
       src.name = name;
@@ -3003,6 +3349,7 @@ async function sendMarketing() {
   try {
     res = await window.api.waSendBatch({
       templateId,
+      templateMessages: template.messages,
       templateBody: template.body,
       recipients: sendRows.map((x) => x.phone),
       varsByPhone,
@@ -3805,16 +4152,16 @@ function bindEvents() {
   el("templateName").addEventListener("input", () => {
     readMarketingTemplateEditorToState();
     renderTemplateList();
+    renderTemplateMessageList();
     renderMarketingTemplateSelect();
   });
 
   el("templateBody").addEventListener("input", () => {
     rememberTemplateCaretPosition();
     readMarketingTemplateEditorToState();
-    const t = getSelectedMarketingTemplate();
-    const vars = t ? extractTemplateVariables(t.body) : [];
-    el("templateVariablesText").textContent = vars.length > 0 ? `Variables: ${vars.join(", ")}` : "Variables: -";
+    refreshTemplateVariableSummary();
     renderTemplatePlaceholderPreview(el("templateBody").value || "");
+    renderTemplateMessageList();
     renderTemplateList();
     refreshMarketingPreview();
   });
@@ -3823,18 +4170,151 @@ function bindEvents() {
   el("templateBody").addEventListener("select", rememberTemplateCaretPosition);
   el("templateBody").addEventListener("focus", rememberTemplateCaretPosition);
 
+  el("templateMessageType").addEventListener("change", () => {
+    readMarketingTemplateEditorToState();
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    const selected = getSelectedTemplateMessage();
+    renderTemplatePlaceholderPreview(selected?.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("btnTemplateAddText").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    readMarketingTemplateEditorToState();
+    const msg = buildDefaultTemplateMessage("text");
+    ensureTemplateMessages(template).push(msg);
+    state.currentTemplateMessageId = msg.id;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    renderTemplatePlaceholderPreview(msg.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("btnTemplateAddImage").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    readMarketingTemplateEditorToState();
+    const msg = buildDefaultTemplateMessage("image");
+    ensureTemplateMessages(template).push(msg);
+    state.currentTemplateMessageId = msg.id;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    renderTemplatePlaceholderPreview(msg.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("btnTemplateAddVideo").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    readMarketingTemplateEditorToState();
+    const msg = buildDefaultTemplateMessage("video");
+    ensureTemplateMessages(template).push(msg);
+    state.currentTemplateMessageId = msg.id;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    renderTemplatePlaceholderPreview(msg.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("btnTemplateDeleteMessage").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    readMarketingTemplateEditorToState();
+    const messages = ensureTemplateMessages(template);
+    if (messages.length <= 1) return;
+    const selectedId = String(state.currentTemplateMessageId || "");
+    const idx = Math.max(
+      0,
+      messages.findIndex((x) => x.id === selectedId)
+    );
+    messages.splice(idx, 1);
+    const fallback = messages[Math.max(0, idx - 1)] || messages[0] || null;
+    state.currentTemplateMessageId = fallback ? fallback.id : null;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    const nextSelected = getSelectedTemplateMessage(template);
+    renderTemplatePlaceholderPreview(nextSelected?.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
+  el("btnTemplateAttachMedia").addEventListener("click", async () => {
+    try {
+      const template = getSelectedMarketingTemplate();
+      if (!template) return;
+      const message = getSelectedTemplateMessage(template);
+      if (!message) return;
+      const type = normalizeTemplateMessageType(message.type);
+      if (type !== "image" && type !== "video") {
+        toast("Template", "Change message type to Image or Video first");
+        return;
+      }
+      const res = await window.api.waPickAttachment();
+      if (!res?.ok && res?.canceled) return;
+      if (!res?.ok) throw new Error("Attachment selection failed");
+      const pickedRows = Array.isArray(res?.attachments)
+        ? res.attachments
+        : res?.attachment
+          ? [res.attachment]
+          : [];
+      const normalized = normalizeWaAttachmentList(pickedRows);
+      const matched = normalized.find((x) => x.kind === type);
+      if (!matched) throw new Error(`Please select a ${type} file`);
+      message.attachment = normalizeTemplateAttachment(matched, type);
+      updateTemplateDerivedFields(template);
+      renderTemplateMessageList();
+      renderTemplateMessageEditor();
+      renderTemplateList();
+      refreshMarketingPreview();
+    } catch (e) {
+      toast("Template", String(e?.message || e));
+    }
+  });
+
+  el("btnTemplateClearMedia").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    const message = getSelectedTemplateMessage(template);
+    if (!message) return;
+    if (normalizeTemplateMessageType(message.type) === "text") return;
+    message.attachment = null;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
   el("templateSendPolicy").addEventListener("change", () => {
     readMarketingTemplateEditorToState();
   });
 
   el("btnNewTemplate").addEventListener("click", () => {
     const id = `t_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 8)}`;
+    const defaultMessage = buildDefaultTemplateMessage("text");
+    defaultMessage.text = "Hello {name},";
     state.templates.push(
       normalizeTemplate(
         {
           id,
           name: "New template",
-          body: "Hello {name},",
+          body: defaultMessage.text,
+          messages: [defaultMessage],
           variables: ["name"],
           sendPolicy: "once"
         },
@@ -3842,6 +4322,8 @@ function bindEvents() {
       )
     );
     state.currentTemplateId = id;
+    const selectedTemplate = getSelectedMarketingTemplate();
+    state.currentTemplateMessageId = selectedTemplate?.messages?.[0]?.id || null;
     renderTemplateList();
     loadTemplateEditor();
     renderMarketingTemplateSelect();
