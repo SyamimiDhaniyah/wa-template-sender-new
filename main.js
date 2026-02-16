@@ -444,6 +444,8 @@ function normalizeAppointmentRecord(raw) {
     Branch_Name: cleanString(src.Branch_Name),
     Dentist_Name: cleanString(src.Dentist_Name),
     Patient_Name: cleanString(src.Patient_Name),
+    nickname: cleanString(src.nickname),
+    gender: cleanString(src.gender).toLowerCase(),
     Patient_Phone_No: cleanString(src.Patient_Phone_No),
     Treatment: cleanString(src.Treatment),
     Status: src.Status === true,
@@ -475,6 +477,7 @@ function normalizePatientRecord(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   return {
     name: cleanString(src.name),
+    nickname: cleanString(src.nickname),
     ic_number: cleanString(src.ic_number),
     phone: cleanString(src.phone),
     gender: cleanString(src.gender).toLowerCase(),
@@ -504,6 +507,8 @@ function normalizePastPatientRecord(raw) {
     Appt_Start_Time: Number(src.Appt_Start_Time || 0) || 0,
     Dentist_Name: cleanString(src.Dentist_Name),
     Patient_Name: cleanString(src.Patient_Name),
+    nickname: cleanString(src.nickname),
+    gender: cleanString(src.gender).toLowerCase(),
     Patient_Phone_No: cleanString(src.Patient_Phone_No)
   };
 }

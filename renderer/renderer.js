@@ -16,13 +16,16 @@ const DEFAULT_APPOINTMENT_TEMPLATES = {
 };
 
 const MARKETING_PLACEHOLDERS = [
-  { token: "{name}", key: "name", description: "Patient name from recipient list." },
+  { token: "{name}", key: "name", description: "Patient nickname from recipient list." },
   { token: "{branch}", key: "branch", description: "Branch selected in Marketing tab." },
   { token: "{my_branch}", key: "my_branch", description: "Your login branch from account profile." },
   { token: "{date}", key: "date", description: "Recipient appointment date, or today if unavailable." },
   { token: "{day}", key: "day", description: "Day name from appointment date, or today." },
   { token: "{time}", key: "time", description: "Recipient appointment time if available." },
   { token: "{dentist}", key: "dentist", description: "Dentist name from recipient row if available." },
+  { token: "{salutation}", key: "salutation", description: "Gender-based salutation (English by default)." },
+  { token: "{salutation_bm}", key: "salutation_bm", description: "Gender-based Malay salutation (Encik/Cik)." },
+  { token: "{salutation_en}", key: "salutation_en", description: "Gender-based English salutation (Mr./Ms.)." },
   { token: "{phone}", key: "phone", description: "Normalized phone number of recipient." }
 ];
 
@@ -1912,7 +1915,7 @@ async function openAppointmentPatientWaChat(appt) {
   const chatJid = waJidFromAppointmentPhone(src.Patient_Phone_No || src.phone || "");
   if (!chatJid) throw new Error("Invalid or missing patient phone");
 
-  const patientName = String(src.Patient_Name || src.name || "").trim();
+  const patientName = String(src.nickname || src.Patient_Name || src.name || "").trim();
   setActiveTab("whatsapp");
   upsertLocalWaChatStub(chatJid, patientName);
   await openWaChat(chatJid);
@@ -1943,7 +1946,8 @@ function renderAppointmentTable() {
     const tdTime = document.createElement("td");
     tdTime.textContent = formatTimeRange(appt.Appt_Start_Time, appt.Appt_End_Time);
     const tdPatient = document.createElement("td");
-    tdPatient.innerHTML = `<strong>${escapeHtml(appt.Patient_Name)}</strong><br/><span class="smallText">${escapeHtml(
+    const patientName = String(appt.nickname || appt.Patient_Name || "").trim();
+    tdPatient.innerHTML = `<strong>${escapeHtml(patientName || "-")}</strong><br/><span class="smallText">${escapeHtml(
       appt.Patient_Phone_No || "-"
     )}</span>`;
     const tdDentist = document.createElement("td");
@@ -1956,7 +1960,7 @@ function renderAppointmentTable() {
     waBtn.type = "button";
     waBtn.className = "apptWaBtn";
     waBtn.title = "Open WhatsApp chat";
-    waBtn.setAttribute("aria-label", `Open WhatsApp chat with ${String(appt.Patient_Name || "patient")}`);
+    waBtn.setAttribute("aria-label", `Open WhatsApp chat with ${String(patientName || "patient")}`);
     const waIcon = document.createElement("img");
     waIcon.className = "apptWaIcon";
     waIcon.src = "./assets/whatsapp-logo.svg";
@@ -2050,6 +2054,7 @@ function upsertMarketingRecipient(input) {
   if (existing) {
     if (!existing.name && src.name) existing.name = String(src.name);
     if (!existing.dentist && src.dentist) existing.dentist = String(src.dentist);
+    if (!existing.gender && src.gender) existing.gender = String(src.gender).trim().toLowerCase();
     const nextApptDate = toInt(src.apptDate, 0);
     if (nextApptDate && (!existing.apptDate || nextApptDate > toInt(existing.apptDate, 0))) existing.apptDate = nextApptDate;
 
@@ -2066,6 +2071,7 @@ function upsertMarketingRecipient(input) {
     phone,
     name: String(src.name || "").trim(),
     dentist: String(src.dentist || "").trim(),
+    gender: String(src.gender || "").trim().toLowerCase(),
     apptDate: toInt(src.apptDate, 0),
     apptStartTime: toInt(src.apptStartTime, 0),
     selected: src.selected !== false
@@ -2437,6 +2443,7 @@ function buildMarketingTemplateVars(recipient) {
   const myBranch = state.session.user?.Branch || selectedBranch || "";
   const dateTs = toInt(row.apptDate, 0) || toInt(row.apptStartTime, 0) || Date.now();
   const weekday = formatWeekdayForMessage(dateTs, "english");
+  const titles = normalizeGenderTitles(row.gender);
 
   return {
     name: row.name || "Patient",
@@ -2447,6 +2454,11 @@ function buildMarketingTemplateVars(recipient) {
     day: weekday,
     weekday,
     time: toInt(row.apptStartTime, 0) ? formatTimeForMessage(row.apptStartTime) : "",
+    salutation: titles.salutation_bm,
+    salutation_bm: titles.salutation_bm,
+    salutation_en: titles.salutation_en,
+    title_bm: titles.title_bm,
+    title_en: titles.title_en,
     phone: normalizePhone(row.phone || "")
   };
 }
@@ -2489,10 +2501,19 @@ function readAppointmentTemplatesFromUi() {
 }
 
 function normalizeGenderTitles(genderRaw) {
-  const g = String(genderRaw || "").toLowerCase();
-  if (g.includes("male") || g === "m" || g === "lelaki") return { title_bm: "Encik", title_en: "Mr" };
-  if (g.includes("female") || g === "f" || g === "perempuan") return { title_bm: "Cik", title_en: "Ms" };
-  return { title_bm: "Encik / Cik", title_en: "Mr / Mrs" };
+  const g = String(genderRaw || "").trim().toLowerCase();
+  if (g === "female" || g === "f" || g === "perempuan" || g.includes("female")) {
+    return { title_bm: "Cik", title_en: "Ms", salutation_bm: "Cik", salutation_en: "Ms." };
+  }
+  if (g === "male" || g === "m" || g === "lelaki" || g.includes("male")) {
+    return { title_bm: "Encik", title_en: "Mr", salutation_bm: "Encik", salutation_en: "Mr." };
+  }
+  return {
+    title_bm: "Encik / Cik",
+    title_en: "Mr / Ms",
+    salutation_bm: "Encik / Cik",
+    salutation_en: "Mr. / Ms."
+  };
 }
 
 async function mapWithConcurrency(items, limit, mapper) {
@@ -2537,9 +2558,10 @@ async function prepareAppointmentSendItems(purposeKey, language) {
     }
 
     const branchInfo = getBranchByName(appt.Branch_Name) || {};
-    const titles = normalizeGenderTitles(patient?.gender);
-    const name = String(patient?.name || appt.Patient_Name || "Patient");
+    const titles = normalizeGenderTitles(appt?.gender || patient?.gender);
+    const name = String(appt?.nickname || patient?.nickname || appt.Patient_Name || patient?.name || "Patient");
     const phone = normalizePhone(patient?.phone || appt.Patient_Phone_No || "");
+    const salutation = language === "bahasa" ? titles.salutation_bm : titles.salutation_en;
 
     if (!isValidPhone(phone)) return { skip: true, reason: "Invalid or missing phone", name, phone };
 
@@ -2555,6 +2577,9 @@ async function prepareAppointmentSendItems(purposeKey, language) {
       google_direction: branchInfo.google_direction || "",
       waze_direction: branchInfo.waze_direction || "",
       google_review_link: branchInfo.Google_Review || "",
+      salutation,
+      salutation_bm: titles.salutation_bm,
+      salutation_en: titles.salutation_en,
       title_bm: titles.title_bm,
       title_en: titles.title_en
     };
@@ -2754,6 +2779,7 @@ async function loadPastPatients() {
         phone,
         name: "",
         dentist: "",
+        gender: "",
         apptDate: 0,
         apptStartTime: 0,
         selected: false
@@ -2764,7 +2790,10 @@ async function loadPastPatients() {
     const candidateKey = apptStartTime || apptDate;
     const existingKey = toInt(existing.apptStartTime, 0) || toInt(existing.apptDate, 0);
 
-    if (!existing.name && row?.Patient_Name) existing.name = String(row.Patient_Name || "").trim();
+    const nickname = String(row?.nickname || "").trim();
+    if (nickname) existing.name = nickname;
+    else if (!existing.name && row?.Patient_Name) existing.name = String(row.Patient_Name || "").trim();
+    if (!existing.gender && row?.gender) existing.gender = String(row.gender).trim().toLowerCase();
     if (candidateKey && (!existingKey || candidateKey > existingKey)) {
       if (row?.Dentist_Name) existing.dentist = String(row.Dentist_Name || "").trim();
       if (apptDate) existing.apptDate = apptDate;
@@ -3594,6 +3623,7 @@ function bindEvents() {
         phone: row.phone,
         name: row.name,
         dentist: row.dentist,
+        gender: row.gender,
         apptDate: row.apptDate,
         apptStartTime: row.apptStartTime,
         selected: true
