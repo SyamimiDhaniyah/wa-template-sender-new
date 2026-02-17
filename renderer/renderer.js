@@ -256,7 +256,7 @@ function normalizeTemplateMessageType(typeRaw) {
   const type = String(typeRaw || "")
     .trim()
     .toLowerCase();
-  if (type === "image" || type === "video") return type;
+  if (type === "image" || type === "video" || type === "document") return type;
   return "text";
 }
 
@@ -264,6 +264,7 @@ function templateMessageTypeLabel(typeRaw) {
   const type = normalizeTemplateMessageType(typeRaw);
   if (type === "image") return "Image";
   if (type === "video") return "Video";
+  if (type === "document") return "Document";
   return "Text";
 }
 
@@ -769,28 +770,28 @@ function renderTemplateMessageEditor() {
   }
 
   const type = normalizeTemplateMessageType(message.type);
-  const hasMedia = type === "image" || type === "video";
-  const attachment = hasMedia ? normalizeTemplateAttachment(message.attachment, type) : null;
+  const needsAttachment = type !== "text";
+  const attachment = needsAttachment ? normalizeTemplateAttachment(message.attachment, type) : null;
   message.type = type;
   message.attachment = attachment;
 
   typeSelect.disabled = false;
   emojiBtn.disabled = false;
   typeSelect.value = type;
-  bodyLabel.textContent = hasMedia ? "Caption (optional)" : "Message Text";
-  bodyInput.placeholder = hasMedia ? "Optional caption for media message" : "Type message";
+  bodyLabel.textContent = needsAttachment ? "Caption (optional)" : "Message Text";
+  bodyInput.placeholder = needsAttachment ? "Optional caption for media message" : "Type message";
   bodyInput.disabled = false;
   bodyInput.value = String(message.text || "");
   state.templateBodyCaretPos = Number((message.text || "").length);
 
   attachBtn.disabled = false;
-  attachBtn.title = hasMedia
+  attachBtn.title = needsAttachment
     ? `Attach ${templateMessageTypeLabel(type).toLowerCase()} file`
-    : "Set Type to Image or Video first";
-  clearBtn.disabled = !hasMedia || !attachment;
+    : "Set Type to Image, Video, or Document first";
+  clearBtn.disabled = !needsAttachment || !attachment;
   deleteBtn.disabled = messages.length <= 1;
 
-  if (!hasMedia) {
+  if (!needsAttachment) {
     attachmentText.textContent = "Text message. No media required.";
   } else if (attachment?.path) {
     const name = String(attachment.fileName || "").trim() || templateAttachmentFileNameFromPath(attachment.path) || "Attachment";
@@ -3311,7 +3312,7 @@ async function sendMarketing() {
   updateTemplateDerivedFields(template);
   const missingMediaAt = normalizedMessages.findIndex((msg) => {
     const type = normalizeTemplateMessageType(msg.type);
-    if (type !== "image" && type !== "video") return false;
+    if (type === "text") return false;
     return !String(msg?.attachment?.path || "").trim();
   });
   if (missingMediaAt >= 0) {
@@ -4308,6 +4309,22 @@ function bindEvents() {
     refreshMarketingPreview();
   });
 
+  el("btnTemplateAddDocument").addEventListener("click", () => {
+    const template = getSelectedMarketingTemplate();
+    if (!template) return;
+    readMarketingTemplateEditorToState();
+    const msg = buildDefaultTemplateMessage("document");
+    ensureTemplateMessages(template).push(msg);
+    state.currentTemplateMessageId = msg.id;
+    updateTemplateDerivedFields(template);
+    renderTemplateMessageList();
+    renderTemplateMessageEditor();
+    refreshTemplateVariableSummary();
+    renderTemplatePlaceholderPreview(msg.text || "");
+    renderTemplateList();
+    refreshMarketingPreview();
+  });
+
   el("btnTemplateDeleteMessage").addEventListener("click", () => {
     const template = getSelectedMarketingTemplate();
     if (!template) return;
@@ -4339,8 +4356,8 @@ function bindEvents() {
       const message = getSelectedTemplateMessage(template);
       if (!message) return;
       const type = normalizeTemplateMessageType(message.type);
-      if (type !== "image" && type !== "video") {
-        toast("Template", "Change message type to Image or Video first");
+      if (type === "text") {
+        toast("Template", "Change message type to Image, Video, or Document first");
         return;
       }
       const res = await window.api.waPickAttachment();

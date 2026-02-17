@@ -655,8 +655,14 @@ p {
 
 .templateMessagesLayout {
   display: grid;
-  grid-template-columns: 220px 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
+}
+
+.templateMessageListPane {
+  display: grid;
+  gap: 8px;
+  align-content: start;
 }
 
 .templateMessageList {
