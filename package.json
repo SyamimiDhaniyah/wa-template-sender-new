@@ -36,6 +36,12 @@
       "buildResources": "assets",
       "output": "dist"
     },
+    "extraFiles": [
+      {
+        "from": "assets/WhatsConect Launcher.cmd",
+        "to": "WhatsConect Launcher.cmd"
+      }
+    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico",
@@ -53,7 +59,8 @@
       "createDesktopShortcut": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/icon.ico"
+      "installerHeaderIcon": "assets/icon.ico",
+      "include": "assets/installer.nsh"
     }
   }
 }

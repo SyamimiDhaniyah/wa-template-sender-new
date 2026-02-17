@@ -1,4 +1,27 @@
-const { app, BrowserWindow, ipcMain, dialog, nativeImage } = require("electron");
+const electron = require("electron");
+const { spawn } = require("child_process");
+
+if ((!electron || typeof electron !== "object" || !electron.app) && process.env.ELECTRON_RUN_AS_NODE) {
+  // Self-heal when launched from an environment that forces Electron into Node mode.
+  const relaunchEnv = { ...process.env };
+  delete relaunchEnv.ELECTRON_RUN_AS_NODE;
+  try {
+    const child = spawn(process.execPath, process.argv.slice(1), {
+      detached: true,
+      stdio: "ignore",
+      env: relaunchEnv
+    });
+    child.unref();
+  } catch {
+    // ignore; explicit error below handles unrecoverable startup failures
+  }
+  process.exit(0);
+}
+
+const { app, BrowserWindow, ipcMain, dialog, nativeImage } = electron;
+if (!app) {
+  throw new Error("Electron app module unavailable. Ensure ELECTRON_RUN_AS_NODE is not set.");
+}
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
@@ -73,7 +96,8 @@ const store = new Store();
 const userDataDir = app.getPath("userData");
 const profilesRootDir = path.join(userDataDir, "wa_profiles");
 
-const dataDir = path.join(__dirname, "data");
+const bundledDataDir = path.join(__dirname, "data");
+const dataDir = app.isPackaged ? path.join(userDataDir, "data") : bundledDataDir;
 const templatesFile = path.join(dataDir, "templates.json");
 const templateMediaDir = path.join(dataDir, "template_media");
 const CLINIC_API_BASE = "https://xqoc-ewo0-x3u2.s2.xano.io";
@@ -1121,44 +1145,19 @@ function ensureDataFiles() {
   ensureDir(dataDir);
   ensureDir(templateMediaDir);
   if (!fs.existsSync(templatesFile)) {
-    fs.writeFileSync(
-      templatesFile,
-      JSON.stringify(
-        [
-          {
-            id: "t1",
-            name: "Follow up quotation",
-            body: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?",
-            messages: [
-              {
-                id: "tm_1",
-                type: "text",
-                text: "Hi {name}, saya nak follow up pasal quotation {topic}. Awak free bila untuk saya explain ringkas?"
-              }
-            ],
-            variables: ["name", "topic"],
-            sendPolicy: "once"
-          },
-          {
-            id: "t2",
-            name: "Appointment reminder",
-            body: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya.",
-            messages: [
-              {
-                id: "tm_1",
-                type: "text",
-                text: "Hi {name}, reminder appointment awak pada {date} jam {time}. Jika nak reschedule, reply ya."
-              }
-            ],
-            variables: ["name", "date", "time"],
-            sendPolicy: "once"
-          }
-        ],
-        null,
-        2
-      ),
-      "utf-8"
-    );
+    const seededTemplatesPath = path.join(bundledDataDir, "templates.json");
+    if (fs.existsSync(seededTemplatesPath)) {
+      try {
+        const seededRaw = fs.readFileSync(seededTemplatesPath, "utf-8");
+        const seededTemplates = normalizeTemplatesList(JSON.parse(seededRaw));
+        fs.writeFileSync(templatesFile, JSON.stringify(seededTemplates, null, 2), "utf-8");
+        return;
+      } catch {
+        // Fallback to an empty template list if bundled seed data is invalid.
+      }
+    }
+
+    fs.writeFileSync(templatesFile, JSON.stringify([], null, 2), "utf-8");
   }
 }
 
