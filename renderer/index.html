@@ -368,8 +368,8 @@
                 <p>Manage marketing templates and appointment message templates.</p>
               </div>
               <div class="inlineRow">
-                <button class="btnGhost" id="btnImportTemplates">Import</button>
-                <button class="btnGhost" id="btnExportTemplates">Export</button>
+                <button class="btnGhost" id="btnImportTemplates">Import Template</button>
+                <button class="btnGhost" id="btnExportTemplates">Export Template</button>
               </div>
             </div>
 
@@ -395,6 +395,7 @@
 
                     <div class="templateMessagesPanel">
                       <div class="fieldLabel">Template Messages</div>
+                      <div class="smallText">Create sequence here. Add multiple messages below and they will send from top to bottom.</div>
                       <div class="templateMessagesLayout">
                         <div class="templateMessageList" id="templateMessageList"></div>
                         <div class="templateMessageEditor">
@@ -405,6 +406,7 @@
                               <option value="image">Image</option>
                               <option value="video">Video</option>
                             </select>
+                            <button class="btnGhost" id="btnTemplateEmoji" type="button">Emoji</button>
                             <button class="btnGhost" id="btnTemplateAttachMedia" type="button">Attach Media</button>
                             <button class="btnGhost" id="btnTemplateClearMedia" type="button">Clear Media</button>
                             <button class="btnGhost" id="btnTemplateDeleteMessage" type="button">Delete Message</button>
@@ -412,6 +414,9 @@
                           <div class="smallText" id="templateMessageAttachmentText">No media attached.</div>
                           <label class="fieldLabel" id="templateBodyLabel">Message Text</label>
                           <textarea id="templateBody" class="fieldInput" rows="7"></textarea>
+                          <div class="templateEmojiPicker hidden" id="templateEmojiPicker">
+                            <div class="templateEmojiGrid" id="templateEmojiGrid"></div>
+                          </div>
                           <div class="inlineRow wrap">
                             <button class="btnGhost" id="btnTemplateAddText" type="button">+ Text</button>
                             <button class="btnGhost" id="btnTemplateAddImage" type="button">+ Image</button>

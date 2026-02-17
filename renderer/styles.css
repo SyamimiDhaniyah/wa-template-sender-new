@@ -703,6 +703,39 @@ p {
 .templateMessageEditor {
   display: grid;
   gap: 8px;
+  position: relative;
+}
+
+.templateEmojiPicker {
+  border: 1px solid #c6ddd9;
+  border-radius: 10px;
+  background: #f8fffd;
+  padding: 6px;
+  box-shadow: 0 10px 20px rgba(17, 42, 40, 0.15);
+}
+
+.templateEmojiGrid {
+  max-height: 148px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(10, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.templateEmojiBtn {
+  border: 1px solid transparent;
+  background: transparent;
+  border-radius: 8px;
+  min-height: 30px;
+  font-size: 17px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+}
+
+.templateEmojiBtn:hover {
+  background: #e9f6f3;
+  border-color: #d0e7e2;
 }
 
 .apptTplDrawer {

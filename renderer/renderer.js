@@ -104,6 +104,9 @@ const WA_EMOJI_GROUPS = [
   }
 ];
 
+const TEMPLATE_EDITOR_EMOJIS =
+  "😀 😁 😊 🙂 🙏 👍 👋 🎉 📣 📢 📌 📍 📅 ⏰ 🦷 🪥 💬 📞 📲 ❤️ 💙 💚 ⭐ ✅ ⚠️ ❗ 👨‍⚕️ 👩‍⚕️".split(" ");
+
 const state = {
   session: { authToken: "", user: {} },
   settings: { ...DEFAULT_CLINIC_SETTINGS },
@@ -131,6 +134,7 @@ const state = {
   waPendingAttachments: [],
   waComposerSending: false,
   waEmojiPickerOpen: false,
+  templateEmojiPickerOpen: false,
   waEmojiCategoryId: WA_EMOJI_GROUPS[0]?.id || "smileys",
   waDropDepth: 0,
   waSyncTimer: null,
@@ -734,25 +738,29 @@ function renderTemplateMessageList() {
 
 function renderTemplateMessageEditor() {
   const typeSelect = el("templateMessageType");
+  const emojiBtn = el("btnTemplateEmoji");
   const bodyInput = el("templateBody");
   const bodyLabel = el("templateBodyLabel");
   const attachBtn = el("btnTemplateAttachMedia");
   const clearBtn = el("btnTemplateClearMedia");
   const deleteBtn = el("btnTemplateDeleteMessage");
   const attachmentText = el("templateMessageAttachmentText");
-  if (!typeSelect || !bodyInput || !bodyLabel || !attachBtn || !clearBtn || !deleteBtn || !attachmentText) return;
+  if (!typeSelect || !emojiBtn || !bodyInput || !bodyLabel || !attachBtn || !clearBtn || !deleteBtn || !attachmentText) return;
 
   const template = getSelectedMarketingTemplate();
   const message = getSelectedTemplateMessage(template);
   const messages = ensureTemplateMessages(template);
   if (!template || !message) {
+    setTemplateEmojiPickerOpen(false);
     typeSelect.value = "text";
     typeSelect.disabled = true;
+    emojiBtn.disabled = true;
     bodyInput.value = "";
     bodyInput.disabled = true;
     bodyLabel.textContent = "Message Text";
     bodyInput.placeholder = "Select template.";
     attachBtn.disabled = true;
+    attachBtn.title = "Select a template message first";
     clearBtn.disabled = true;
     deleteBtn.disabled = true;
     attachmentText.textContent = "No media attached.";
@@ -767,6 +775,7 @@ function renderTemplateMessageEditor() {
   message.attachment = attachment;
 
   typeSelect.disabled = false;
+  emojiBtn.disabled = false;
   typeSelect.value = type;
   bodyLabel.textContent = hasMedia ? "Caption (optional)" : "Message Text";
   bodyInput.placeholder = hasMedia ? "Optional caption for media message" : "Type message";
@@ -774,7 +783,10 @@ function renderTemplateMessageEditor() {
   bodyInput.value = String(message.text || "");
   state.templateBodyCaretPos = Number((message.text || "").length);
 
-  attachBtn.disabled = !hasMedia;
+  attachBtn.disabled = false;
+  attachBtn.title = hasMedia
+    ? `Attach ${templateMessageTypeLabel(type).toLowerCase()} file`
+    : "Set Type to Image or Video first";
   clearBtn.disabled = !hasMedia || !attachment;
   deleteBtn.disabled = messages.length <= 1;
 
@@ -2620,6 +2632,7 @@ function renderTemplateList() {
 }
 
 function loadTemplateEditor() {
+  setTemplateEmojiPickerOpen(false);
   const t = getSelectedMarketingTemplate();
   if (!t) {
     state.currentTemplateMessageId = null;
@@ -2693,6 +2706,59 @@ function rememberTemplateCaretPosition() {
   if (!textarea) return;
   const start = Number(textarea.selectionStart || 0);
   state.templateBodyCaretPos = Math.max(0, start);
+}
+
+function setTemplateEmojiPickerOpen(open) {
+  state.templateEmojiPickerOpen = !!open;
+  const picker = el("templateEmojiPicker");
+  const btn = el("btnTemplateEmoji");
+  if (picker) picker.classList.toggle("hidden", !state.templateEmojiPickerOpen);
+  if (btn) btn.classList.toggle("active", state.templateEmojiPickerOpen);
+}
+
+function insertEmojiIntoTemplate(rawEmoji) {
+  const emoji = String(rawEmoji || "").trim();
+  if (!emoji) return;
+  const textarea = el("templateBody");
+  if (!textarea || textarea.disabled) return;
+
+  const value = String(textarea.value || "");
+  const liveStart = Number(textarea.selectionStart || 0);
+  const liveEnd = Number(textarea.selectionEnd || liveStart);
+  const isActive = document.activeElement === textarea;
+  const start = isActive ? liveStart : Number(state.templateBodyCaretPos || 0);
+  const end = isActive ? liveEnd : start;
+  const safeStart = Math.max(0, Math.min(value.length, start));
+  const safeEnd = Math.max(safeStart, Math.min(value.length, end));
+  const next = `${value.slice(0, safeStart)}${emoji}${value.slice(safeEnd)}`;
+  textarea.value = next;
+  const caret = safeStart + emoji.length;
+  state.templateBodyCaretPos = caret;
+  textarea.focus();
+  textarea.setSelectionRange(caret, caret);
+  readMarketingTemplateEditorToState();
+  refreshTemplateVariableSummary();
+  renderTemplatePlaceholderPreview(next);
+  renderTemplateMessageList();
+  renderTemplateList();
+  refreshMarketingPreview();
+}
+
+function renderTemplateEmojiPicker() {
+  const grid = el("templateEmojiGrid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  for (const emoji of TEMPLATE_EDITOR_EMOJIS) {
+    const value = String(emoji || "").trim();
+    if (!value) continue;
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "templateEmojiBtn";
+    btn.textContent = value;
+    btn.dataset.emojiValue = value;
+    btn.title = `Insert ${value}`;
+    grid.appendChild(btn);
+  }
 }
 
 function renderTemplatePlaceholderPreview(text) {
@@ -4169,6 +4235,19 @@ function bindEvents() {
   el("templateBody").addEventListener("keyup", rememberTemplateCaretPosition);
   el("templateBody").addEventListener("select", rememberTemplateCaretPosition);
   el("templateBody").addEventListener("focus", rememberTemplateCaretPosition);
+  el("btnTemplateEmoji").addEventListener("click", () => {
+    const btn = el("btnTemplateEmoji");
+    if (!btn || btn.disabled) return;
+    const nextOpen = !state.templateEmojiPickerOpen;
+    if (nextOpen) renderTemplateEmojiPicker();
+    setTemplateEmojiPickerOpen(nextOpen);
+  });
+  el("templateEmojiGrid").addEventListener("click", (evt) => {
+    const target = evt.target?.closest?.("button[data-emoji-value]");
+    const value = String(target?.dataset?.emojiValue || "");
+    if (!value) return;
+    insertEmojiIntoTemplate(value);
+  });
 
   el("templateMessageType").addEventListener("change", () => {
     readMarketingTemplateEditorToState();
@@ -4374,11 +4453,13 @@ function bindEvents() {
 
   el("btnImportTemplates").addEventListener("click", async () => {
     try {
-      const res = await window.api.importTemplatesBundle();
+      const res = await window.api.importTemplatesBundle({ mode: "single_marketing_template" });
       if (!res?.ok && res?.canceled) return;
       if (!res?.ok) throw new Error("Import failed");
       await reloadTemplateData();
-      toast("Templates", `Imported. Marketing: ${res.marketingCount}`);
+      const action = res?.replaced ? "replaced" : "added";
+      const name = String(res?.templateName || "").trim() || "Template";
+      toast("Templates", `Imported ${action}: ${name}`);
     } catch (e) {
       toast("Templates import", String(e?.message || e));
     }
@@ -4386,7 +4467,12 @@ function bindEvents() {
 
   el("btnExportTemplates").addEventListener("click", async () => {
     try {
-      const res = await window.api.exportTemplatesBundle();
+      const selected = getSelectedMarketingTemplate();
+      if (!selected) throw new Error("Select a marketing template first");
+      const res = await window.api.exportTemplatesBundle({
+        mode: "single_marketing_template",
+        templateId: selected.id
+      });
       if (!res?.ok && res?.canceled) return;
       if (!res?.ok) throw new Error("Export failed");
       toast("Templates", `Exported to ${res.filePath}`);
@@ -4543,16 +4629,28 @@ function bindEvents() {
     closeCreateProfileModal();
     closeWaImageLightbox();
     closeWaEmojiPicker({ restoreFocus: false });
+    setTemplateEmojiPickerOpen(false);
   });
 
   document.addEventListener("mousedown", (evt) => {
-    if (!state.waEmojiPickerOpen) return;
-    const picker = el("waEmojiPicker");
-    const emojiBtn = el("btnWaEmoji");
     const target = evt.target;
-    if (!picker || !emojiBtn || !target) return;
-    if (picker.contains(target) || emojiBtn.contains(target)) return;
-    closeWaEmojiPicker({ restoreFocus: false });
+    if (!target) return;
+
+    if (state.waEmojiPickerOpen) {
+      const picker = el("waEmojiPicker");
+      const emojiBtn = el("btnWaEmoji");
+      if (picker && emojiBtn && !picker.contains(target) && !emojiBtn.contains(target)) {
+        closeWaEmojiPicker({ restoreFocus: false });
+      }
+    }
+
+    if (state.templateEmojiPickerOpen) {
+      const picker = el("templateEmojiPicker");
+      const emojiBtn = el("btnTemplateEmoji");
+      if (picker && emojiBtn && !picker.contains(target) && !emojiBtn.contains(target)) {
+        setTemplateEmojiPickerOpen(false);
+      }
+    }
   });
 
   window.api.onQR((dataUrl) => {

@@ -7,8 +7,8 @@ contextBridge.exposeInMainWorld("api", {
   saveAppointmentTemplates: (templates) => ipcRenderer.invoke("app:saveAppointmentTemplates", templates),
   getClinicSettings: () => ipcRenderer.invoke("app:getClinicSettings"),
   saveClinicSettings: (settings) => ipcRenderer.invoke("app:saveClinicSettings", settings),
-  exportTemplatesBundle: () => ipcRenderer.invoke("app:exportTemplatesBundle"),
-  importTemplatesBundle: () => ipcRenderer.invoke("app:importTemplatesBundle"),
+  exportTemplatesBundle: (payload) => ipcRenderer.invoke("app:exportTemplatesBundle", payload || {}),
+  importTemplatesBundle: (payload) => ipcRenderer.invoke("app:importTemplatesBundle", payload || {}),
   getAiRewriteConfig: () => ipcRenderer.invoke("app:getAiRewriteConfig"),
   saveAiRewriteConfig: (config) => ipcRenderer.invoke("app:saveAiRewriteConfig", config),
 

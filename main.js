@@ -1371,6 +1371,81 @@ function getTemplateExportBundle() {
   };
 }
 
+function getSingleMarketingTemplateExportBundle(templateId) {
+  const targetId = cleanString(templateId);
+  if (!targetId) throw new Error("Missing templateId");
+  const currentTemplates = readTemplates();
+  const selected = currentTemplates.find((t) => cleanString(t?.id) === targetId) || null;
+  if (!selected) throw new Error("Marketing template not found");
+
+  const marketingData = buildMarketingTemplateExportData([selected]);
+  return {
+    exported_at: nowIsoShort(),
+    timezone: CLINIC_TZ,
+    scope: "single_marketing_template",
+    marketingTemplate: marketingData.marketingTemplates[0] || null,
+    marketingTemplateAssets: marketingData.marketingTemplateAssets
+  };
+}
+
+function extractSingleMarketingTemplateFromImport(raw) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const one = src.marketingTemplate && typeof src.marketingTemplate === "object" ? src.marketingTemplate : null;
+  if (one) {
+    const assets = Array.isArray(src.marketingTemplateAssets)
+      ? src.marketingTemplateAssets
+      : Array.isArray(src.templateAssets)
+        ? src.templateAssets
+        : [];
+    return { template: one, assets };
+  }
+
+  const list = Array.isArray(src.marketingTemplates)
+    ? src.marketingTemplates
+    : Array.isArray(src.templates)
+      ? src.templates
+      : [];
+  if (list.length === 0) return { template: null, assets: [] };
+  if (list.length > 1) {
+    throw new Error("Import file contains multiple marketing templates. Please use a single-template export file.");
+  }
+  const assets = Array.isArray(src.marketingTemplateAssets)
+    ? src.marketingTemplateAssets
+    : Array.isArray(src.templateAssets)
+      ? src.templateAssets
+      : [];
+  return { template: list[0], assets };
+}
+
+function importSingleMarketingTemplateBundle(raw) {
+  const extracted = extractSingleMarketingTemplateFromImport(raw);
+  if (!extracted.template) throw new Error("No marketing template found in import file");
+
+  const normalizedList = rehydrateMarketingTemplatesWithAssets([extracted.template], extracted.assets);
+  if (!Array.isArray(normalizedList) || normalizedList.length === 0) {
+    throw new Error("No valid marketing template found in import file");
+  }
+  const imported = normalizedList[0];
+
+  const current = readTemplates();
+  const idx = current.findIndex((t) => cleanString(t?.id) === cleanString(imported.id));
+  let replaced = false;
+  if (idx >= 0) {
+    current[idx] = imported;
+    replaced = true;
+  } else {
+    current.push(imported);
+  }
+  saveTemplates(current);
+
+  return {
+    marketingCount: current.length,
+    templateId: imported.id,
+    templateName: imported.name,
+    replaced
+  };
+}
+
 function importTemplateBundle(raw) {
   if (Array.isArray(raw)) {
     saveTemplates(raw);
@@ -5864,22 +5939,41 @@ ipcMain.handle("app:saveClinicSettings", async (_evt, settings) => {
   return { ok: true, settings: saved };
 });
 
-ipcMain.handle("app:exportTemplatesBundle", async () => {
+ipcMain.handle("app:exportTemplatesBundle", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const mode = cleanString(src.mode).toLowerCase();
+  const selectedTemplateId = cleanString(src.templateId);
+  const isSingleTemplateMode = mode === "single_marketing_template";
+  const exportLabel = isSingleTemplateMode ? "Export marketing template" : "Export templates";
+  let defaultPath = `clinic_templates_${new Date().toISOString().slice(0, 10)}.json`;
+  if (isSingleTemplateMode) {
+    const currentTemplates = readTemplates();
+    const selected = currentTemplates.find((t) => cleanString(t?.id) === selectedTemplateId) || null;
+    const safeName = sanitizePathSegment(selected?.name || selectedTemplateId || "marketing_template", "marketing_template");
+    defaultPath = `${safeName}_${new Date().toISOString().slice(0, 10)}.json`;
+  }
+
   const saveRes = await dialog.showSaveDialog({
-    title: "Export templates",
-    defaultPath: `clinic_templates_${new Date().toISOString().slice(0, 10)}.json`,
+    title: exportLabel,
+    defaultPath,
     filters: [{ name: "JSON", extensions: ["json"] }]
   });
   if (saveRes.canceled || !saveRes.filePath) return { ok: false, canceled: true };
 
-  const payload = getTemplateExportBundle();
-  fs.writeFileSync(saveRes.filePath, JSON.stringify(payload, null, 2), "utf-8");
+  const exportPayload = isSingleTemplateMode
+    ? getSingleMarketingTemplateExportBundle(selectedTemplateId)
+    : getTemplateExportBundle();
+  fs.writeFileSync(saveRes.filePath, JSON.stringify(exportPayload, null, 2), "utf-8");
   return { ok: true, filePath: saveRes.filePath };
 });
 
-ipcMain.handle("app:importTemplatesBundle", async () => {
+ipcMain.handle("app:importTemplatesBundle", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const mode = cleanString(src.mode).toLowerCase();
+  const isSingleTemplateMode = mode === "single_marketing_template";
+
   const openRes = await dialog.showOpenDialog({
-    title: "Import templates",
+    title: isSingleTemplateMode ? "Import marketing template" : "Import templates",
     properties: ["openFile"],
     filters: [{ name: "JSON", extensions: ["json"] }]
   });
@@ -5894,7 +5988,7 @@ ipcMain.handle("app:importTemplatesBundle", async () => {
     throw new Error("Invalid JSON file");
   }
 
-  const result = importTemplateBundle(parsed);
+  const result = isSingleTemplateMode ? importSingleMarketingTemplateBundle(parsed) : importTemplateBundle(parsed);
   return { ok: true, filePath, ...result };
 });
 
