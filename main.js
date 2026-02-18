@@ -68,6 +68,7 @@ const appStateResyncBackoffUntilByProfile = new Map();
 const contactPhotoEnrichInFlightByProfile = new Map();
 const contactPhotoBackoffUntilByProfile = new Map();
 const contactLookupCacheByProfile = new Map();
+const profileSelfIdentityCache = new Map();
 const waLidPnMapByProfileMem = {};
 const startupPhotoBackfillDoneByProfile = new Set();
 
@@ -1767,6 +1768,7 @@ function saveProfiles(profiles) {
   const list = Array.isArray(profiles) ? profiles : [];
   const normalized = list.map((p, idx) => normalizeProfileRecord(p, `p_${idx + 1}`));
   store.set("profiles", normalized);
+  profileSelfIdentityCache.clear();
   return normalized;
 }
 
@@ -1794,6 +1796,7 @@ function loadProfiles() {
   const defaultProfile = normalizeProfileRecord({ id: "p_default", name: DEFAULT_WA_PROFILE_NAME, customName: false });
   store.set("profiles", [defaultProfile]);
   store.set("activeProfileId", defaultProfile.id);
+  profileSelfIdentityCache.clear();
   return [defaultProfile];
 }
 
@@ -2056,14 +2059,18 @@ function choosePreferredIdentityLabel(existingValue, incomingValue) {
 function getProfileSelfIdentity(profileId) {
   const key = cleanString(profileId);
   if (!key) return { msisdn: "", name: "", nameLower: "" };
+  const cached = profileSelfIdentityCache.get(key);
+  if (cached && typeof cached === "object") return cached;
   const profile = loadProfiles().find((p) => p && p.id === key);
   const msisdn = normalizeMsisdnSafe(profile?.waMsisdn || msisdnFromUserJid(profile?.waJid || ""));
   const name = sanitizeContactName(profile?.waName || "");
-  return {
+  const identity = {
     msisdn,
     name,
     nameLower: name.toLowerCase()
   };
+  profileSelfIdentityCache.set(key, identity);
+  return identity;
 }
 
 function sanitizeIdentityLabelForProfile(profileId, candidateLabel, candidateMsisdn) {
@@ -4037,7 +4044,9 @@ function serializeChatSummary(profileId, chat) {
 
 function getRecentChatsForProfile(profileId, options) {
   const opts = options && typeof options === "object" ? options : {};
-  reconcileCanonicalChatAliasesForProfile(profileId);
+  if (opts.reconcileAliases === true) {
+    reconcileCanonicalChatAliasesForProfile(profileId);
+  }
   const state = ensureWaChatStateForProfile(profileId);
   const search = cleanString(opts.search || "").toLowerCase();
   const limitRaw = Number(opts.limit);
