@@ -2187,6 +2187,8 @@ function upsertMessagesAsContactsForProfile(profileId, messages) {
   const contacts = [];
   for (const msg of messages) {
     const key = msg?.key && typeof msg.key === "object" ? msg.key : {};
+    const fromMe = key.fromMe === true || msg?.fromMe === true;
+    if (fromMe) continue;
     const primaryJidSource =
       key.participantAlt ||
       key.remoteJidAlt ||
@@ -3729,7 +3731,9 @@ function upsertMessagesForProfile(profileId, messages) {
     }
 
     const isLatest = Number(normalized.timestampMs || 0) >= Number(chat.lastMessageTimestampMs || 0);
-    const nextName = choosePreferredIdentityLabel(chat.name, normalized.pushName);
+    // Ignore outgoing pushName hints so our own profile name cannot overwrite recipient chat labels.
+    const incomingPushName = normalized.fromMe ? "" : normalized.pushName;
+    const nextName = choosePreferredIdentityLabel(chat.name, incomingPushName);
     if (isLatest || !chat.lastMessagePreview || !chat.lastMessageTimestampMs) {
       const nextChat = {
         ...chat,
