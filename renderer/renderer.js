@@ -2934,6 +2934,25 @@ async function mapWithConcurrency(items, limit, mapper) {
   return out;
 }
 
+function buildAppointmentTemplateVars({ baseVars, language, name, gender }) {
+  const varsBase = baseVars && typeof baseVars === "object" ? baseVars : {};
+  const safeLanguage = String(language || "").trim().toLowerCase() === "english" ? "english" : "bahasa";
+  const safeName = String(name || "").trim() || "Patient";
+  const genderKey = normalizeGenderKey(gender);
+  const titles = normalizeGenderTitles(genderKey);
+  const salutation = safeLanguage === "bahasa" ? titles.salutation_bm : titles.salutation_en;
+
+  return {
+    ...varsBase,
+    name: safeName,
+    salutation,
+    salutation_bm: titles.salutation_bm,
+    salutation_en: titles.salutation_en,
+    title_bm: titles.title_bm,
+    title_en: titles.title_en
+  };
+}
+
 async function prepareAppointmentSendItems(purposeKey, language) {
   const selected = Array.from(state.selectedAppointmentIds).map((id) => getAppointmentById(id)).filter(Boolean);
   if (selected.length === 0) throw new Error("Please select at least one appointment first");
@@ -2953,15 +2972,13 @@ async function prepareAppointmentSendItems(purposeKey, language) {
     }
 
     const branchInfo = getBranchByName(appt.Branch_Name) || {};
-    const titles = normalizeGenderTitles(appt?.gender || patient?.gender);
+    const gender = normalizeGenderKey(appt?.gender || patient?.gender);
     const name = String(appt?.nickname || patient?.nickname || appt.Patient_Name || patient?.name || "Patient");
     const phone = normalizePhone(patient?.phone || appt.Patient_Phone_No || "");
-    const salutation = language === "bahasa" ? titles.salutation_bm : titles.salutation_en;
 
     if (!isValidPhone(phone)) return { skip: true, reason: "Invalid or missing phone", name, phone };
 
-    const vars = {
-      name,
+    const baseVars = {
       branch: appt.Branch_Name || branchInfo.label || "",
       dentist: appt.Dentist_Name || "",
       date: formatDateForMessage(appt.Appt_Date || appt.Appt_Start_Time, language),
@@ -2971,21 +2988,21 @@ async function prepareAppointmentSendItems(purposeKey, language) {
       branch_phone: branchInfo.branch_phone || "",
       google_direction: branchInfo.google_direction || "",
       waze_direction: branchInfo.waze_direction || "",
-      google_review_link: branchInfo.Google_Review || "",
-      salutation,
-      salutation_bm: titles.salutation_bm,
-      salutation_en: titles.salutation_en,
-      title_bm: titles.title_bm,
-      title_en: titles.title_en
+      google_review_link: branchInfo.Google_Review || ""
     };
+    const vars = buildAppointmentTemplateVars({ baseVars, language, name, gender });
 
     return {
       skip: false,
       name,
+      gender,
       phone,
       text: renderTemplate(templateText, vars),
       aiVariables: vars,
-      templateId: `appointment_${purposeKey}_${language}`
+      templateId: `appointment_${purposeKey}_${language}`,
+      language,
+      templateText,
+      baseVars
     };
   });
 
@@ -3117,7 +3134,7 @@ async function createProfileFromModal() {
   toast("Profile", `Created ${name}`);
 }
 
-async function sendPreparedItems(items, batchLabel, aiEnabled) {
+async function sendPreparedItems(items, batchLabel, aiEnabled, options = {}) {
   const sendItems = (Array.isArray(items) ? items : []).map((x) => ({
     phone: x.phone,
     name: x.name,
@@ -3135,16 +3152,18 @@ async function sendPreparedItems(items, batchLabel, aiEnabled) {
     .join("\n");
   const suffix = sendItems.length > 40 ? `\n... and ${sendItems.length - 40} more` : "";
 
-  const confirmed = await openConfirmModal({
-    title: "Confirm Send",
-    subtitle: `${sendItems.length} messages will be sent one-by-one`,
-    recipientsText: `${confirmRecipients}${suffix}`,
-    sampleText: sendItems[0].text
-  });
+  if (!options.skipConfirm) {
+    const confirmed = await openConfirmModal({
+      title: "Confirm Send",
+      subtitle: `${sendItems.length} messages will be sent one-by-one`,
+      recipientsText: `${confirmRecipients}${suffix}`,
+      sampleText: sendItems[0].text
+    });
 
-  if (!confirmed) {
-    toast("Canceled", "Send canceled by user");
-    return null;
+    if (!confirmed) {
+      toast("Canceled", "Send canceled by user");
+      return null;
+    }
   }
 
   setBatchSending(true);
@@ -3185,7 +3204,78 @@ async function doAppointmentSend(purposeKey, langId, aiId) {
     return;
   }
 
-  const res = await sendPreparedItems(items, `appointment_${purposeKey}`, !!el(aiId).checked);
+  const editableRecipients = items.map((item, idx) => ({
+    idx,
+    phone: normalizePhone(item.phone || ""),
+    name: String(item.name || "").trim() || "Patient",
+    gender: normalizeGenderKey(item.gender)
+  }));
+
+  const renderSampleFromRecipient = (editRow) => {
+    const rawIdx = Number(editRow?.idx);
+    const idx = Number.isFinite(rawIdx) ? clamp(rawIdx, 0, Math.max(0, items.length - 1), 0) : 0;
+    const src = items[idx] || items[0] || {};
+    const vars = buildAppointmentTemplateVars({
+      baseVars: src.baseVars || {},
+      language: src.language || el(langId).value || "bahasa",
+      name: String(editRow?.name || src.name || "").trim() || "Patient",
+      gender: editRow?.gender || src.gender
+    });
+    return renderTemplate(src.templateText || src.text || "", vars);
+  };
+
+  const confirmRecipients = editableRecipients
+    .slice(0, 40)
+    .map((x, i) => `${i + 1}. ${x.name || "-"} (${x.phone})`)
+    .join("\n");
+  const suffix = editableRecipients.length > 40 ? `\n... and ${editableRecipients.length - 40} more` : "";
+  const confirmed = await openConfirmModal({
+    title: "Confirm Send",
+    subtitle: `${editableRecipients.length} messages will be sent one-by-one`,
+    recipientsText: `${confirmRecipients}${suffix}`,
+    sampleText: renderSampleFromRecipient(editableRecipients[0]),
+    recipientsEditable: editableRecipients,
+    renderSampleFromRecipient
+  });
+
+  if (!confirmed) {
+    toast("Canceled", "Send canceled by user");
+    return;
+  }
+
+  const sendItems = editableRecipients
+    .map((editRow) => {
+      const rawIdx = Number(editRow?.idx);
+      const idx = Number.isFinite(rawIdx) ? clamp(rawIdx, 0, Math.max(0, items.length - 1), 0) : 0;
+      const src = items[idx] || {};
+      const phone = normalizePhone(src.phone || editRow.phone || "");
+      if (!isValidPhone(phone)) return null;
+
+      const vars = buildAppointmentTemplateVars({
+        baseVars: src.baseVars || {},
+        language: src.language || el(langId).value || "bahasa",
+        name: String(editRow?.name || src.name || "").trim() || "Patient",
+        gender: editRow?.gender || src.gender
+      });
+      const text = renderTemplate(src.templateText || src.text || "", vars);
+      if (!String(text || "").trim()) return null;
+
+      return {
+        phone,
+        name: vars.name,
+        text,
+        aiVariables: vars,
+        templateId: src.templateId || `appointment_${purposeKey}_${el(langId).value || "bahasa"}`
+      };
+    })
+    .filter(Boolean);
+
+  if (sendItems.length === 0) {
+    toast("No recipients", "No valid recipients after preview edits.");
+    return;
+  }
+
+  const res = await sendPreparedItems(sendItems, `appointment_${purposeKey}`, !!el(aiId).checked, { skipConfirm: true });
   if (!res) return;
   if (res.stopped) {
     toast("Appointment send stopped", `Sent: ${res.sent}, Failed: ${res.failed}, Skipped: ${res.skipped}`);
