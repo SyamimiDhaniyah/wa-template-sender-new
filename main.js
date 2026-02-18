@@ -5290,22 +5290,12 @@ function extractAssistantTextFromApiResponse(data) {
 async function rewriteMessageViaBackend({
   endpoint,
   authToken,
-  prompt,
   message,
-  variables,
-  msisdn,
-  templateId,
   timeoutMs
 }) {
   if (!endpoint) throw new Error("AI rewrite endpoint is not set");
-  const finalPrompt = renderTemplate(String(prompt || "{message}"), {
-    ...(variables && typeof variables === "object" ? variables : {}),
-    message: String(message || ""),
-    msisdn: String(msisdn || ""),
-    phone: String(msisdn || ""),
-    templateId: String(templateId || "")
-  }).trim();
-  if (!finalPrompt) throw new Error("AI rewrite prompt is empty");
+  const messageText = String(message || "").trim();
+  if (!messageText) throw new Error("AI rewrite message is empty");
 
   const controller = new AbortController();
   const timeoutValue = Number.isFinite(Number(timeoutMs)) ? Number(timeoutMs) : 30000;
@@ -5316,8 +5306,9 @@ async function rewriteMessageViaBackend({
       headers.Authorization = authToken.startsWith("Bearer ") ? authToken : `Bearer ${authToken}`;
     }
 
-    // Xano contract: one input field named "prompt"
-    const payload = { prompt: finalPrompt };
+    // Xano contract: one input field named "prompt".
+    // Backend already owns the system prompt; client sends only message text.
+    const payload = { prompt: messageText };
 
     const res = await fetch(endpoint, {
       method: "POST",
@@ -6561,9 +6552,6 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   if (aiCfg.enabled && !aiCfg.endpoint) {
     throw new Error("AI rewrite is enabled but backend endpoint is empty");
   }
-  if (aiCfg.enabled && !aiCfg.prompt) {
-    throw new Error("AI rewrite is enabled but prompt is empty");
-  }
   if (aiCfg.enabled && !aiAuthToken) {
     throw new Error("AI rewrite requires Authorization token. Please log in first.");
   }
@@ -6665,24 +6653,11 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
           let renderedText = baseText;
 
           if (aiCfg.enabled && baseText.trim()) {
-            const promptVars = {
-              ...(vars || {}),
-              msisdn,
-              phone: msisdn,
-              templateId,
-              message_index: msgIdx + 1,
-              message_type: templateMessage.type
-            };
-            const promptText = renderTemplate(aiCfg.prompt, promptVars);
             try {
               renderedText = await rewriteMessageViaBackend({
                 endpoint: aiCfg.endpoint,
                 authToken: aiAuthToken,
-                prompt: promptText,
                 message: baseText,
-                variables: vars,
-                msisdn,
-                templateId,
                 timeoutMs: aiCfg.timeoutMs
               });
             } catch (aiErr) {
@@ -6865,7 +6840,6 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   const sessionAuthToken = cleanString(clinicSession?.authToken);
   const aiAuthToken = cleanString(aiCfg.authToken) || sessionAuthToken;
   if (aiCfg.enabled && !aiCfg.endpoint) throw new Error("AI rewrite endpoint is required");
-  if (aiCfg.enabled && !aiCfg.prompt) throw new Error("AI rewrite prompt is required");
   if (aiCfg.enabled && !aiAuthToken) {
     throw new Error("AI rewrite requires Authorization token. Please log in first.");
   }
@@ -6944,17 +6918,11 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
       try {
         let text = baseText;
         if (aiCfg.enabled) {
-          const aiVars = item.aiVariables && typeof item.aiVariables === "object" ? item.aiVariables : {};
-          const aiPromptTemplate = cleanString(item.aiPrompt) || aiCfg.prompt;
           try {
             text = await rewriteMessageViaBackend({
               endpoint: aiCfg.endpoint,
               authToken: aiAuthToken,
-              prompt: aiPromptTemplate,
               message: baseText,
-              variables: aiVars,
-              msisdn,
-              templateId,
               timeoutMs: aiCfg.timeoutMs
             });
           } catch (aiErr) {
