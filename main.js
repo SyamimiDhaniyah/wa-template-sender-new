@@ -113,6 +113,8 @@ const DEFAULT_CLINIC_SETTINGS = {
   timezone: CLINIC_TZ,
   gapMinSec: 7,
   gapMaxSec: 45,
+  templateGapMinSec: 2,
+  templateGapMaxSec: 4,
   marketingMonthsAgoDefault: 6,
   marketingPageSizeDefault: 50
 };
@@ -214,6 +216,14 @@ function normalizeClinicSettings(input) {
   const gapMinSec = clampInt(src.gapMinSec, 7, 45, DEFAULT_CLINIC_SETTINGS.gapMinSec);
   const gapMaxCandidate = clampInt(src.gapMaxSec, 7, 45, DEFAULT_CLINIC_SETTINGS.gapMaxSec);
   const gapMaxSec = Math.max(gapMinSec, gapMaxCandidate);
+  const templateGapMinSec = clampInt(src.templateGapMinSec, 1, 30, DEFAULT_CLINIC_SETTINGS.templateGapMinSec);
+  const templateGapMaxCandidate = clampInt(
+    src.templateGapMaxSec,
+    1,
+    30,
+    DEFAULT_CLINIC_SETTINGS.templateGapMaxSec
+  );
+  const templateGapMaxSec = Math.max(templateGapMinSec, templateGapMaxCandidate);
   const marketingMonthsAgoDefault = clampInt(src.marketingMonthsAgoDefault, 1, 24, 6);
   const marketingPageSizeDefault = clampInt(src.marketingPageSizeDefault, 10, 500, DEFAULT_CLINIC_SETTINGS.marketingPageSizeDefault);
 
@@ -221,6 +231,8 @@ function normalizeClinicSettings(input) {
     timezone: CLINIC_TZ,
     gapMinSec,
     gapMaxSec,
+    templateGapMinSec,
+    templateGapMaxSec,
     marketingMonthsAgoDefault,
     marketingPageSizeDefault
   };
@@ -715,6 +727,15 @@ function clearLidPnMappingsForProfile(profileId) {
   delete waLidPnMapByProfileMem[key];
 }
 
+function lidPnMappingStrength(lidJid, pnJid) {
+  const lidUser = jidUserPart(lidJid);
+  const pnUser = jidUserPart(pnJid);
+  if (!lidUser || !pnUser) return 0;
+  // Weak mapping: PN candidate is just the numeric LID user echoed as @s.whatsapp.net.
+  if (lidUser === pnUser) return 1;
+  return 2;
+}
+
 function rememberLidPnMappingForProfile(profileId, lidInput, pnInput) {
   const key = cleanString(profileId);
   if (!key) return 0;
@@ -725,14 +746,30 @@ function rememberLidPnMappingForProfile(profileId, lidInput, pnInput) {
   if (!state) return 0;
 
   let changed = 0;
-  if (state.lidToPn[lid] !== pn) {
-    state.lidToPn[lid] = pn;
-    changed++;
+  const knownPn = normalizePhoneNumberJid(state.lidToPn[lid] || "");
+  const knownStrength = knownPn ? lidPnMappingStrength(lid, knownPn) : 0;
+  const incomingStrength = lidPnMappingStrength(lid, pn);
+
+  if (
+    !knownPn ||
+    knownPn === pn ||
+    incomingStrength > knownStrength
+  ) {
+    if (state.lidToPn[lid] !== pn) {
+      state.lidToPn[lid] = pn;
+      changed++;
+    }
   }
 
-  const knownLid = cleanString(state.pnToLid[pn] || "");
-  if (!knownLid || knownLid === lid) {
-    if (knownLid !== lid) {
+  const knownLid = normalizeLidJid(state.pnToLid[pn] || "");
+  const knownLidStrength = knownLid ? lidPnMappingStrength(knownLid, pn) : 0;
+  const incomingLidStrength = lidPnMappingStrength(lid, pn);
+  if (
+    !knownLid ||
+    knownLid === lid ||
+    incomingLidStrength > knownLidStrength
+  ) {
+    if (state.pnToLid[pn] !== lid) {
       state.pnToLid[pn] = lid;
       changed++;
     }
@@ -761,6 +798,39 @@ function getMappedLidJidForProfile(profileId, inputJid) {
   if (!state || typeof state !== "object") return "";
   const mapped = normalizeLidJid(state?.pnToLid?.[jid] || "");
   return mapped;
+}
+
+function getPreferredPnJidForLidFromContacts(profileId, lidInput) {
+  const key = cleanString(profileId);
+  const lid = normalizeLidJid(lidInput);
+  if (!key || !lid) return "";
+
+  const byPhone =
+    waContactsByProfileMem &&
+    waContactsByProfileMem[key] &&
+    typeof waContactsByProfileMem[key] === "object"
+      ? waContactsByProfileMem[key]
+      : {};
+
+  let strong = "";
+  let weak = "";
+  for (const contactRaw of Object.values(byPhone)) {
+    const contact = contactRaw && typeof contactRaw === "object" ? contactRaw : null;
+    if (!contact) continue;
+    const contactLid = normalizeLidJid(contact.lid || contact.lidJid || "");
+    if (!contactLid || contactLid !== lid) continue;
+
+    const pn = normalizePhoneNumberJid(contact.jid || contact.phoneNumber || contact.pnJid || "");
+    if (!pn) continue;
+    const strength = lidPnMappingStrength(lid, pn);
+    if (strength >= 2) {
+      if (!strong) strong = pn;
+      continue;
+    }
+    if (!weak) weak = pn;
+  }
+
+  return strong || weak || "";
 }
 
 function rebuildLidPnMappingsFromContactsCache() {
@@ -1983,12 +2053,41 @@ function choosePreferredIdentityLabel(existingValue, incomingValue) {
   return existing;
 }
 
-function getContactDisplayName(c) {
+function getProfileSelfIdentity(profileId) {
+  const key = cleanString(profileId);
+  if (!key) return { msisdn: "", name: "", nameLower: "" };
+  const profile = loadProfiles().find((p) => p && p.id === key);
+  const msisdn = normalizeMsisdnSafe(profile?.waMsisdn || msisdnFromUserJid(profile?.waJid || ""));
+  const name = sanitizeContactName(profile?.waName || "");
+  return {
+    msisdn,
+    name,
+    nameLower: name.toLowerCase()
+  };
+}
+
+function sanitizeIdentityLabelForProfile(profileId, candidateLabel, candidateMsisdn) {
+  const label = sanitizeContactName(candidateLabel);
+  if (!label) return "";
+
+  const self = getProfileSelfIdentity(profileId);
+  if (!self.nameLower) return label;
+
+  const candidateLower = label.toLowerCase();
+  if (candidateLower !== self.nameLower) return label;
+
+  const msisdn = normalizeMsisdnSafe(candidateMsisdn);
+  if (self.msisdn && msisdn && self.msisdn === msisdn) return label;
+  return "";
+}
+
+function getContactDisplayName(c, profileId = "") {
+  const msisdn = normalizeMsisdnSafe(c?.msisdn || msisdnFromContactAddress(c?.jid || c?.lid || ""));
   let best = "";
-  best = choosePreferredIdentityLabel(best, c?.name);
-  best = choosePreferredIdentityLabel(best, c?.notify);
-  best = choosePreferredIdentityLabel(best, c?.verifiedName);
-  return best;
+  best = choosePreferredIdentityLabel(best, sanitizeIdentityLabelForProfile(profileId, c?.name, msisdn));
+  best = choosePreferredIdentityLabel(best, sanitizeIdentityLabelForProfile(profileId, c?.notify, msisdn));
+  best = choosePreferredIdentityLabel(best, sanitizeIdentityLabelForProfile(profileId, c?.verifiedName, msisdn));
+  return sanitizeIdentityLabelForProfile(profileId, best, msisdn);
 }
 
 function firstNonEmptyString(values) {
@@ -2090,7 +2189,7 @@ function upsertContactsForProfile(profileId, contacts) {
     const secondaryLid = isLidJid(secondaryJid) ? secondaryJid : "";
 
     const existing = byPhone[msisdn] && typeof byPhone[msisdn] === "object" ? byPhone[msisdn] : {};
-    const incomingName = firstNonEmptyString([
+    const incomingNameRaw = firstNonEmptyString([
       c?.name,
       c?.fullName,
       c?.firstName,
@@ -2098,10 +2197,13 @@ function upsertContactsForProfile(profileId, contacts) {
       c?.short,
       c?.username
     ]);
+    const incomingName = sanitizeIdentityLabelForProfile(profileId, incomingNameRaw, msisdn);
     const nameCandidate = choosePreferredIdentityLabel(existing?.name, incomingName);
-    const incomingNotify = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname]);
+    const incomingNotifyRaw = firstNonEmptyString([c?.notify, c?.pushName, c?.pushname]);
+    const incomingNotify = sanitizeIdentityLabelForProfile(profileId, incomingNotifyRaw, msisdn);
     const notify = choosePreferredIdentityLabel(existing?.notify, incomingNotify);
-    const incomingVerifiedName = firstNonEmptyString([c?.verifiedName, c?.vname]);
+    const incomingVerifiedNameRaw = firstNonEmptyString([c?.verifiedName, c?.vname]);
+    const incomingVerifiedName = sanitizeIdentityLabelForProfile(profileId, incomingVerifiedNameRaw, msisdn);
     const verifiedName = choosePreferredIdentityLabel(existing?.verifiedName, incomingVerifiedName);
     const lid = firstNonEmptyString([contactLidJid, c?.lid, c?.lidJid, secondaryLid, existing?.lid]);
     const imgUrl =
@@ -2249,8 +2351,8 @@ function getContactsForProfile(profileId) {
   const rows = Object.values(byPhone).filter((x) => x && typeof x === "object");
 
   rows.sort((a, b) => {
-    const an = getContactDisplayName(a).toLowerCase();
-    const bn = getContactDisplayName(b).toLowerCase();
+    const an = getContactDisplayName(a, profileId).toLowerCase();
+    const bn = getContactDisplayName(b, profileId).toLowerCase();
     if (an && bn) return an.localeCompare(bn);
     if (an) return -1;
     if (bn) return 1;
@@ -2260,8 +2362,8 @@ function getContactsForProfile(profileId) {
   return rows;
 }
 
-function contactHasAnyName(contact) {
-  return !!getContactDisplayName(contact);
+function contactHasAnyName(contact, profileId = "") {
+  return !!getContactDisplayName(contact, profileId);
 }
 
 function rememberRecipientNameForProfile(profileId, recipient, rawName) {
@@ -2298,7 +2400,7 @@ function promoteChatNamesFromContactsForProfile(profileId) {
   for (const [chatJid, chatRaw] of Object.entries(state.chatsByJid || {})) {
     const chat = chatRaw && typeof chatRaw === "object" ? chatRaw : {};
     const contact = getContactByChatJid(profileId, chatJid);
-    const contactName = getContactDisplayName(contact);
+    const contactName = getContactDisplayName(contact, profileId);
     const nextName = choosePreferredIdentityLabel(chat.name, contactName);
     if (!nextName || nextName === String(chat.name || "")) continue;
     state.chatsByJid[chatJid] = {
@@ -2782,10 +2884,31 @@ function canonicalizeChatJidForProfile(profileId, chatJid) {
   const normalized = normalizeChatJid(chatJid);
   if (!normalized) return "";
   if (!profileId) return normalized;
-  if (isPnJid(normalized)) return normalized;
 
   const mappedByCache = getMappedPnJidForProfile(profileId, normalized);
-  if (mappedByCache) return mappedByCache;
+  if (isLidJid(normalized)) {
+    const preferredFromContacts = getPreferredPnJidForLidFromContacts(profileId, normalized);
+    if (preferredFromContacts) {
+      rememberLidPnMappingForProfile(profileId, normalized, preferredFromContacts);
+      return preferredFromContacts;
+    }
+    if (mappedByCache) return mappedByCache;
+  } else if (mappedByCache) {
+    return mappedByCache;
+  }
+
+  if (isPnJid(normalized)) {
+    const contact = findContactByJidForProfile(profileId, normalized);
+    const contactLid = normalizeLidJid(contact?.lid || contact?.lidJid || "");
+    const mappedFromContactLid = contactLid
+      ? getPreferredPnJidForLidFromContacts(profileId, contactLid) || getMappedPnJidForProfile(profileId, contactLid)
+      : "";
+    if (mappedFromContactLid && mappedFromContactLid !== normalized) {
+      rememberLidPnMappingForProfile(profileId, contactLid, mappedFromContactLid);
+      return mappedFromContactLid;
+    }
+    return normalized;
+  }
 
   if (!isLidJid(normalized)) return normalized;
 
@@ -3522,9 +3645,14 @@ function fallbackTitleForChatJid(chatJid) {
 
 function resolveChatTitle(profileId, chat) {
   const c = chat && typeof chat === "object" ? chat : {};
-  const direct = firstNonEmptyString([c.name, c.subject, c.notify, c.pushName]);
+  const chatMsisdn = msisdnFromContactAddress(c.jid);
+  const direct = sanitizeIdentityLabelForProfile(
+    profileId,
+    firstNonEmptyString([c.name, c.subject, c.notify, c.pushName]),
+    chatMsisdn
+  );
   const byContact = getContactByChatJid(profileId, c.jid);
-  const contactName = getContactDisplayName(byContact);
+  const contactName = getContactDisplayName(byContact, profileId);
   const fallback = fallbackTitleForChatJid(c.jid);
   let best = "";
   best = choosePreferredIdentityLabel(best, direct);
@@ -3541,7 +3669,7 @@ function resolveMessageSenderName(profileId, chatJid, messageRecord) {
   const fromJid = participant || normalizeJidForContact(chatJid);
   const contact = findContactByJidForProfile(profileId, fromJid);
   if (contact) {
-    const name = getContactDisplayName(contact);
+    const name = getContactDisplayName(contact, profileId);
     if (name) return name;
     if (contact.msisdn) return String(contact.msisdn);
   }
@@ -3589,7 +3717,11 @@ function upsertChatsForProfile(profileId, chats) {
     const chat = ensureChatSummary(profileId, chatJid);
     if (!chat) continue;
 
-    const incomingName = firstNonEmptyString([src.name, src.subject, src.notify, src.pushName]);
+    const incomingName = sanitizeIdentityLabelForProfile(
+      profileId,
+      firstNonEmptyString([src.name, src.subject, src.notify, src.pushName]),
+      msisdnFromContactAddress(chatJid)
+    );
     const nextName = choosePreferredIdentityLabel(chat.name, incomingName);
     const nextTs = normalizeEpochMs(
       src.conversationTimestamp || src.lastMessageRecvTimestamp || src.lastMessageTimestamp || src.timestamp,
@@ -3905,6 +4037,7 @@ function serializeChatSummary(profileId, chat) {
 
 function getRecentChatsForProfile(profileId, options) {
   const opts = options && typeof options === "object" ? options : {};
+  reconcileCanonicalChatAliasesForProfile(profileId);
   const state = ensureWaChatStateForProfile(profileId);
   const search = cleanString(opts.search || "").toLowerCase();
   const limitRaw = Number(opts.limit);
@@ -6150,7 +6283,7 @@ ipcMain.handle("wa:getContacts", async (_evt, options) => {
     if (opts.forceNameSync) {
       await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
       contacts = getContactsForProfile(profileId);
-    } else if (contacts.length > 0 && contacts.some((c) => !contactHasAnyName(c))) {
+    } else if (contacts.length > 0 && contacts.some((c) => !contactHasAnyName(c, profileId))) {
       syncContactNamesForProfile(profileId, { force: false, isInitialSync: false }).catch(() => {});
     }
   }
@@ -6395,6 +6528,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     varsByPhone,
     aiRewrite,
     pacing = { pattern: "cycle", minSec: 7, maxSec: 10 },
+    templatePacing = { pattern: "random", minSec: 2, maxSec: 4 },
     safety = { maxRecipients: 200 },
     skipAlreadySent = true
   } = payload || {};
@@ -6408,6 +6542,9 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const pattern = pacing.pattern || "cycle";
   const minSec = pacing.minSec ?? 7;
   const maxSec = pacing.maxSec ?? 10;
+  const templatePattern = templatePacing.pattern === "cycle" ? "cycle" : "random";
+  const templateMinSec = clampInt(templatePacing.minSec, 1, 90, 2);
+  const templateMaxSec = Math.max(templateMinSec, clampInt(templatePacing.maxSec, 1, 90, 4));
   const aiCfg = normalizeAiRewriteConfig({ ...getAiRewriteConfig(), ...(aiRewrite || {}) });
   const clinicSession = getAuthSession();
   const sessionAuthToken = cleanString(clinicSession?.authToken);
@@ -6603,7 +6740,8 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
           status: "sending"
         });
 
-        for (const entry of preparedMessages) {
+        for (let preparedIdx = 0; preparedIdx < preparedMessages.length; preparedIdx++) {
+          const entry = preparedMessages[preparedIdx];
           if (isBatchJobCancelRequested(batchJob)) {
             stopped = true;
             stoppedAtIndex = i + 1;
@@ -6611,6 +6749,17 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
             break;
           }
           await sendPayloadToMsisdn(msisdn, entry.payload);
+
+          if (preparedIdx < preparedMessages.length - 1) {
+            const templateDelayMs = delayMsFromPattern(templatePattern, templateMinSec, templateMaxSec, preparedIdx);
+            const completedTemplateDelay = await waitDelayOrBatchCancel(batchJob, templateDelayMs);
+            if (!completedTemplateDelay) {
+              stopped = true;
+              stoppedAtIndex = i + 1;
+              emitStopped(stoppedAtIndex);
+              break;
+            }
+          }
         }
         if (stopped) break;
 

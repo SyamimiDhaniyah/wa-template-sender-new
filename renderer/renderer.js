@@ -6,6 +6,8 @@ const DEFAULT_CLINIC_SETTINGS = {
   timezone: TIMEZONE,
   gapMinSec: 7,
   gapMaxSec: 45,
+  templateGapMinSec: 2,
+  templateGapMaxSec: 4,
   marketingMonthsAgoDefault: 6,
   marketingPageSizeDefault: 50
 };
@@ -2904,6 +2906,8 @@ function applySettingsToUi() {
   const s = state.settings;
   el("settingGapMin").value = String(s.gapMinSec || 7);
   el("settingGapMax").value = String(s.gapMaxSec || 45);
+  el("settingTemplateGapMin").value = String(s.templateGapMinSec || 2);
+  el("settingTemplateGapMax").value = String(s.templateGapMaxSec || 4);
   el("settingMarketingMonths").value = String(s.marketingMonthsAgoDefault || 6);
   el("settingMarketingPageSize").value = String(s.marketingPageSizeDefault || 50);
   el("marketingMonthsAgo").value = String(s.marketingMonthsAgoDefault || 6);
@@ -3575,6 +3579,11 @@ async function sendMarketing() {
       recipients: sendRows.map((x) => x.phone),
       varsByPhone,
       pacing: { pattern: "random", minSec: state.settings.gapMinSec, maxSec: state.settings.gapMaxSec },
+      templatePacing: {
+        pattern: "random",
+        minSec: state.settings.templateGapMinSec,
+        maxSec: state.settings.templateGapMaxSec
+      },
       aiRewrite: aiEnabled ? { enabled: true, prompt: AI_VARIATION_PROMPT, fallbackToOriginal: true } : { enabled: false },
       safety: { maxRecipients: 500 },
       skipAlreadySent
@@ -3604,10 +3613,13 @@ async function saveSettings() {
   const next = {
     gapMinSec: clamp(el("settingGapMin").value, 7, 45, 7),
     gapMaxSec: clamp(el("settingGapMax").value, 7, 45, 45),
+    templateGapMinSec: clamp(el("settingTemplateGapMin").value, 1, 30, 2),
+    templateGapMaxSec: clamp(el("settingTemplateGapMax").value, 1, 30, 4),
     marketingMonthsAgoDefault: clamp(el("settingMarketingMonths").value, 1, 24, 6),
     marketingPageSizeDefault: clamp(el("settingMarketingPageSize").value, 10, 500, 50)
   };
   if (next.gapMaxSec < next.gapMinSec) next.gapMaxSec = next.gapMinSec;
+  if (next.templateGapMaxSec < next.templateGapMinSec) next.templateGapMaxSec = next.templateGapMinSec;
 
   const res = await window.api.saveClinicSettings(next);
   state.settings = { ...DEFAULT_CLINIC_SETTINGS, ...(res?.settings || {}) };

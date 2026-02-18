@@ -616,8 +616,8 @@
 
             <div class="settingsLayout">
               <div class="card">
-                <h3>Message Gap Range</h3>
-                <p class="smallText">Applied to appointment and marketing sends.</p>
+                <h3>Message Gap Between Recipients</h3>
+                <p class="smallText">Delay after each recipient (appointment and marketing sends).</p>
 
                 <div class="inlineRow wrap">
                   <label class="fieldLabel">Min seconds</label>
@@ -625,6 +625,19 @@
 
                   <label class="fieldLabel">Max seconds</label>
                   <input id="settingGapMax" class="fieldInput compact small" type="number" min="7" max="45" />
+                </div>
+              </div>
+
+              <div class="card">
+                <h3>Message Gap Between Template Messages</h3>
+                <p class="smallText">Delay between message 1, 2, 3... for multi-message marketing templates.</p>
+
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Min seconds</label>
+                  <input id="settingTemplateGapMin" class="fieldInput compact small" type="number" min="1" max="30" />
+
+                  <label class="fieldLabel">Max seconds</label>
+                  <input id="settingTemplateGapMax" class="fieldInput compact small" type="number" min="1" max="30" />
                 </div>
               </div>
 
