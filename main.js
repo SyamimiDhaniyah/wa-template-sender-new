@@ -535,7 +535,8 @@ function normalizePastPatientRecord(raw) {
     Patient_Name: cleanString(src.Patient_Name),
     nickname: cleanString(src.nickname),
     gender: cleanString(src.gender).toLowerCase(),
-    Patient_Phone_No: cleanString(src.Patient_Phone_No)
+    Patient_Phone_No: cleanString(src.Patient_Phone_No),
+    ic_number: cleanString(src.ic_number || src.IC_Number)
   };
 }
 
@@ -560,6 +561,26 @@ async function clinicGetPastPatients(authToken, payload) {
   });
 
   return Array.isArray(data) ? data.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No) : [];
+}
+
+async function clinicEditPatient(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const icNumber = cleanString(src.ic_number || src.icNumber);
+  const nickname = cleanString(src.nickname);
+  const gender = cleanString(src.gender).toLowerCase();
+  if (!icNumber) throw new Error("ic_number is required");
+  if (!nickname && !gender) throw new Error("nickname or gender is required");
+
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/edit_patient`;
+  return await clinicFetchJson(endpoint, {
+    method: "PUT",
+    headers: clinicAuthHeaders(authToken, true),
+    body: JSON.stringify({
+      ic_number: icNumber,
+      nickname,
+      gender
+    })
+  });
 }
 
 async function getLatestWaVersionSafe(fetchLatestBaileysVersion) {
@@ -6048,6 +6069,21 @@ ipcMain.handle("clinic:getPastPatients", async (_evt, payload) => {
   if (!session.authToken) throw new Error("Not logged in");
   const records = await clinicGetPastPatients(session.authToken, payload || {});
   return { ok: true, patients: records };
+});
+
+ipcMain.handle("clinic:editPatient", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) return { ok: false, skipped: true, reason: "not_logged_in" };
+
+  try {
+    await clinicEditPatient(session.authToken, payload || {});
+    return { ok: true };
+  } catch (e) {
+    return {
+      ok: false,
+      error: String(e?.message || e)
+    };
+  }
 });
 
 ipcMain.handle("app:getAiRewriteConfig", async () => {

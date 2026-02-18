@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld("api", {
   clinicGetAppointmentList: (payload) => ipcRenderer.invoke("clinic:getAppointmentList", payload),
   clinicGetPatient: (payload) => ipcRenderer.invoke("clinic:getPatient", payload),
   clinicGetPastPatients: (payload) => ipcRenderer.invoke("clinic:getPastPatients", payload),
+  clinicEditPatient: (payload) => ipcRenderer.invoke("clinic:editPatient", payload),
 
   getProfiles: () => ipcRenderer.invoke("app:getProfiles"),
   createProfile: (name) => ipcRenderer.invoke("app:createProfile", name),

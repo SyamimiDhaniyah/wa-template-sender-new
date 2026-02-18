@@ -231,6 +231,37 @@ function isValidPhone(input) {
   return /^\d{8,}$/.test(normalizePhone(input));
 }
 
+function normalizeIcNumber(input) {
+  return String(input || "").trim();
+}
+
+function queueSilentPatientProfileUpdates(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) return;
+
+  const byIc = new Map();
+  for (const raw of list) {
+    const row = raw && typeof raw === "object" ? raw : {};
+    const icNumber = normalizeIcNumber(row.ic_number || row.icNumber || row.ic);
+    if (!icNumber) continue;
+    const nickname = String(row.name || row.nickname || "").trim();
+    const gender = normalizeGenderKey(row.gender);
+    if (!nickname && !gender) continue;
+    byIc.set(icNumber, {
+      ic_number: icNumber,
+      nickname,
+      gender
+    });
+  }
+  if (byIc.size === 0) return;
+
+  Promise.allSettled(
+    Array.from(byIc.values()).map((payload) => {
+      return window.api.clinicEditPatient(payload);
+    })
+  ).catch(() => {});
+}
+
 function templateSnippet(text) {
   const s = String(text || "").replace(/\s+/g, " ").trim();
   return s.length > 90 ? `${s.slice(0, 90)}...` : s;
@@ -2374,12 +2405,14 @@ function upsertMarketingRecipient(input) {
   const src = input && typeof input === "object" ? input : {};
   const phone = normalizePhone(src.phone);
   if (!isValidPhone(phone)) return false;
+  const incomingIcNumber = normalizeIcNumber(src.ic_number || src.icNumber);
 
   const existing = state.marketingRecipients.find((x) => x.phone === phone);
   if (existing) {
     if (!existing.name && src.name) existing.name = String(src.name);
     if (!existing.dentist && src.dentist) existing.dentist = String(src.dentist);
     if (!existing.gender && src.gender) existing.gender = String(src.gender).trim().toLowerCase();
+    if (!existing.ic_number && incomingIcNumber) existing.ic_number = incomingIcNumber;
     const nextApptDate = toInt(src.apptDate, 0);
     if (nextApptDate && (!existing.apptDate || nextApptDate > toInt(existing.apptDate, 0))) existing.apptDate = nextApptDate;
 
@@ -2397,6 +2430,7 @@ function upsertMarketingRecipient(input) {
     name: String(src.name || "").trim(),
     dentist: String(src.dentist || "").trim(),
     gender: String(src.gender || "").trim().toLowerCase(),
+    ic_number: incomingIcNumber,
     apptDate: toInt(src.apptDate, 0),
     apptStartTime: toInt(src.apptStartTime, 0),
     selected: src.selected !== false
@@ -2975,6 +3009,7 @@ async function prepareAppointmentSendItems(purposeKey, language) {
     const gender = normalizeGenderKey(appt?.gender || patient?.gender);
     const name = String(appt?.nickname || patient?.nickname || appt.Patient_Name || patient?.name || "Patient");
     const phone = normalizePhone(patient?.phone || appt.Patient_Phone_No || "");
+    const ic_number = normalizeIcNumber(appt?.ic_number || patient?.ic_number);
 
     if (!isValidPhone(phone)) return { skip: true, reason: "Invalid or missing phone", name, phone };
 
@@ -2996,6 +3031,7 @@ async function prepareAppointmentSendItems(purposeKey, language) {
       skip: false,
       name,
       gender,
+      ic_number,
       phone,
       text: renderTemplate(templateText, vars),
       aiVariables: vars,
@@ -3208,7 +3244,8 @@ async function doAppointmentSend(purposeKey, langId, aiId) {
     idx,
     phone: normalizePhone(item.phone || ""),
     name: String(item.name || "").trim() || "Patient",
-    gender: normalizeGenderKey(item.gender)
+    gender: normalizeGenderKey(item.gender),
+    ic_number: normalizeIcNumber(item.ic_number)
   }));
 
   const renderSampleFromRecipient = (editRow) => {
@@ -3242,6 +3279,7 @@ async function doAppointmentSend(purposeKey, langId, aiId) {
     toast("Canceled", "Send canceled by user");
     return;
   }
+  queueSilentPatientProfileUpdates(editableRecipients);
 
   const sendItems = editableRecipients
     .map((editRow) => {
@@ -3349,6 +3387,7 @@ async function loadPastPatients() {
         name: "",
         dentist: "",
         gender: "",
+        ic_number: "",
         apptDate: 0,
         apptStartTime: 0,
         selected: false
@@ -3356,6 +3395,7 @@ async function loadPastPatients() {
 
     const apptDate = toInt(row?.Appt_Date, 0);
     const apptStartTime = toInt(row?.Appt_Start_Time, 0);
+    const icNumber = normalizeIcNumber(row?.ic_number || row?.IC_Number);
     const candidateKey = apptStartTime || apptDate;
     const existingKey = toInt(existing.apptStartTime, 0) || toInt(existing.apptDate, 0);
 
@@ -3363,6 +3403,7 @@ async function loadPastPatients() {
     if (nickname) existing.name = nickname;
     else if (!existing.name && row?.Patient_Name) existing.name = String(row.Patient_Name || "").trim();
     if (!existing.gender && row?.gender) existing.gender = String(row.gender).trim().toLowerCase();
+    if (!existing.ic_number && icNumber) existing.ic_number = icNumber;
     if (candidateKey && (!existingKey || candidateKey > existingKey)) {
       if (row?.Dentist_Name) existing.dentist = String(row.Dentist_Name || "").trim();
       if (apptDate) existing.apptDate = apptDate;
@@ -3426,7 +3467,8 @@ async function sendMarketing() {
     editableRecipients.push({
       phone,
       name: String(row.name || "").trim() || "Patient",
-      gender: normalizeGenderKey(row.gender)
+      gender: normalizeGenderKey(row.gender),
+      ic_number: normalizeIcNumber(row.ic_number)
     });
   }
 
@@ -3469,6 +3511,7 @@ async function sendMarketing() {
     toast("Canceled", "Send canceled by user");
     return null;
   }
+  queueSilentPatientProfileUpdates(editableRecipients);
 
   const varsByPhone = {};
   const sendRows = [];
@@ -4252,6 +4295,7 @@ function bindEvents() {
         name: row.name,
         dentist: row.dentist,
         gender: row.gender,
+        ic_number: row.ic_number,
         apptDate: row.apptDate,
         apptStartTime: row.apptStartTime,
         selected: true
