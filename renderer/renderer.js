@@ -3051,7 +3051,9 @@ function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipie
   const editorRows = el("confirmRecipientsEditorRows");
   const samplePre = el("confirmSample");
   const editableRows = Array.isArray(recipientsEditable) ? recipientsEditable : [];
+  const editorRowEls = [];
   const hasEditable = editableRows.length > 0;
+  let selectedRowIdx = 0;
 
   el("confirmTitle").textContent = title || "Confirm Send";
   el("confirmSubtitle").textContent = subtitle || "";
@@ -3061,11 +3063,15 @@ function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipie
   editorWrap.classList.toggle("hidden", !hasEditable);
   editorRows.innerHTML = "";
 
-  const updateSampleText = (idx = 0) => {
+  const updateSampleText = (idx = selectedRowIdx) => {
     if (hasEditable && typeof renderSampleFromRecipient === "function") {
       const safeIdx = clamp(idx, 0, Math.max(0, editableRows.length - 1), 0);
+      selectedRowIdx = safeIdx;
       const row = editableRows[safeIdx];
       samplePre.textContent = String(renderSampleFromRecipient(row) || sampleText || "-");
+      editorRowEls.forEach((node, nodeIdx) => {
+        node.classList.toggle("active", nodeIdx === safeIdx);
+      });
       return;
     }
     samplePre.textContent = sampleText || "-";
@@ -3080,6 +3086,7 @@ function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipie
 
       const rowEl = document.createElement("div");
       rowEl.className = "confirmRecipientsEditorRow";
+      rowEl.tabIndex = 0;
 
       const idxEl = document.createElement("span");
       idxEl.className = "confirmRecipientsEditorIndex";
@@ -3117,8 +3124,22 @@ function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipie
         updateSampleText(idx);
       });
 
+      rowEl.addEventListener("click", () => {
+        updateSampleText(idx);
+      });
+      rowEl.addEventListener("focusin", () => {
+        updateSampleText(idx);
+      });
+      rowEl.addEventListener("keydown", (evt) => {
+        if (evt.key === "Enter" || evt.key === " ") {
+          evt.preventDefault();
+          updateSampleText(idx);
+        }
+      });
+
       rowEl.append(idxEl, phoneEl, nameInput, genderSelect);
       editorRows.appendChild(rowEl);
+      editorRowEls.push(rowEl);
     });
   }
 

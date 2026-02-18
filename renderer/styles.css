@@ -1628,6 +1628,20 @@ p {
   grid-template-columns: 42px 1.1fr 1.2fr 120px;
   gap: 6px;
   align-items: center;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.confirmRecipientsEditorRow:hover {
+  border-color: var(--line);
+  background: var(--surface-alt);
+}
+
+.confirmRecipientsEditorRow.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
 }
 
 .confirmRecipientsEditorIndex,
