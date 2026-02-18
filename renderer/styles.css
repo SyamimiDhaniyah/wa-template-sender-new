@@ -1479,6 +1479,10 @@ p {
   font-size: 15px;
 }
 
+#queueSummaryText {
+  margin-top: 2px;
+}
+
 .statusPill {
   font-size: 11px;
   border-radius: 999px;

@@ -160,6 +160,7 @@ const state = {
   lastMarketingSkippedPhones: [],
   lastMarketingSkippedTemplateId: "",
   activityRows: [],
+  queueStats: { total: 0, byIndex: {} },
   currentTemplateId: null,
   currentTemplateMessageId: null,
   confirmResolver: null,
@@ -2182,6 +2183,90 @@ async function handleWaFileDrop(evt) {
   appendWaPendingAttachments(attachments);
   toast("WhatsApp", `Attached ${attachments.length} file${attachments.length > 1 ? "s" : ""}. Press Send when ready.`);
 }
+
+function makeQueueStats(total = 0) {
+  return {
+    total: Math.max(0, Number(total || 0) || 0),
+    byIndex: {}
+  };
+}
+
+function getQueueStatsCounts() {
+  const stats = state.queueStats && typeof state.queueStats === "object" ? state.queueStats : makeQueueStats(0);
+  const byIndex = stats.byIndex && typeof stats.byIndex === "object" ? stats.byIndex : {};
+  let tried = 0;
+  let success = 0;
+  let failed = 0;
+  let skipped = 0;
+
+  for (const statusRaw of Object.values(byIndex)) {
+    const status = String(statusRaw || "")
+      .trim()
+      .toLowerCase();
+    if (status === "sent") success++;
+    else if (status === "failed") failed++;
+    else if (status === "skipped") skipped++;
+    if (status === "sending" || status === "sent" || status === "failed") tried++;
+  }
+
+  return {
+    total: Math.max(0, Number(stats.total || 0) || 0),
+    tried,
+    success,
+    failed,
+    skipped
+  };
+}
+
+function renderQueueStats() {
+  const node = el("queueSummaryText");
+  if (!node) return;
+  const stats = getQueueStatsCounts();
+  let text = `${stats.tried}/${stats.total} (success: ${stats.success}, failed: ${stats.failed}`;
+  if (stats.skipped > 0) text += `, skipped: ${stats.skipped}`;
+  text += ")";
+  node.textContent = text;
+}
+
+function resetQueueStats(total = 0) {
+  state.queueStats = makeQueueStats(total);
+  renderQueueStats();
+}
+
+function updateQueueStatsFromProgress(row) {
+  const src = row && typeof row === "object" ? row : {};
+  const status = String(src.status || "")
+    .trim()
+    .toLowerCase();
+  const idx = Math.max(0, Number(src.index || 0) || 0);
+  const total = Math.max(0, Number(src.total || 0) || 0);
+
+  if (!state.queueStats || typeof state.queueStats !== "object") {
+    state.queueStats = makeQueueStats(total);
+  }
+  if (total > 0 && state.queueStats.total === 0) {
+    state.queueStats.total = total;
+  }
+
+  const isBatchStart = idx === 1 && status === "sending" && total > 0;
+  if (isBatchStart && (state.queueStats.total !== total || Object.keys(state.queueStats.byIndex || {}).length > 0)) {
+    state.queueStats = makeQueueStats(total);
+  }
+
+  if (idx > 0 && ["sending", "sent", "failed", "skipped"].includes(status)) {
+    const key = String(idx);
+    const prev = String(state.queueStats.byIndex?.[key] || "")
+      .trim()
+      .toLowerCase();
+    const prevIsFinal = prev === "sent" || prev === "failed" || prev === "skipped";
+    if (!(prevIsFinal && status === "sending")) {
+      state.queueStats.byIndex[key] = status;
+    }
+  }
+
+  renderQueueStats();
+}
+
 function renderActivity() {
   const tbody = el("activityBody");
   tbody.innerHTML = "";
@@ -2195,12 +2280,14 @@ function renderActivity() {
     `;
     tbody.appendChild(tr);
   }
+  renderQueueStats();
 }
 
 function pushActivity(row) {
+  const rawError = String(row?.error || "").trim();
   state.activityRows.unshift({
     ...row,
-    error: sanitizeUserFacingError(row?.error || "")
+    error: rawError ? sanitizeUserFacingError(rawError) : ""
   });
   if (state.activityRows.length > 500) state.activityRows = state.activityRows.slice(0, 500);
   renderActivity();
@@ -3135,6 +3222,15 @@ function openConfirmModal({ title, subtitle, recipientsText, sampleText, recipie
         updateSampleText(idx);
       });
       rowEl.addEventListener("keydown", (evt) => {
+        const targetEl = evt.target;
+        const targetTag = String(targetEl?.tagName || "").toLowerCase();
+        const isTypingTarget =
+          targetTag === "input" ||
+          targetTag === "textarea" ||
+          targetTag === "select" ||
+          targetEl?.isContentEditable === true;
+        if (isTypingTarget) return;
+
         if (evt.key === "Enter" || evt.key === " ") {
           evt.preventDefault();
           updateSampleText(idx);
@@ -3227,6 +3323,7 @@ async function sendPreparedItems(items, batchLabel, aiEnabled, options = {}) {
     }
   }
 
+  resetQueueStats(sendItems.length);
   setBatchSending(true);
   try {
     return await window.api.waSendPreparedBatch({
@@ -3569,6 +3666,7 @@ async function sendMarketing() {
   state.lastMarketingSkippedTemplateId = templateId;
   updateMarketingSkippedControls();
 
+  resetQueueStats(sendRows.length);
   setBatchSending(true);
   let res = null;
   try {
@@ -3831,6 +3929,7 @@ async function loadInitialDataAfterLogin() {
   state.waEmojiPickerOpen = false;
   state.batchSending = false;
   state.batchStopPending = false;
+  state.queueStats = { total: 0, byIndex: {} };
   state.lastMarketingSkippedPhones = [];
   state.lastMarketingSkippedTemplateId = "";
   setWaDropActive(false);
@@ -3887,6 +3986,7 @@ function showLoginScreen() {
   state.waEmojiPickerOpen = false;
   state.batchSending = false;
   state.batchStopPending = false;
+  state.queueStats = { total: 0, byIndex: {} };
   setWaDropActive(false);
   stopWaOutgoingTyping({ sendPaused: false });
   clearAllWaPresenceState({ render: false });
@@ -3947,6 +4047,7 @@ async function tryRestoreSession() {
 function bindEvents() {
   renderWaEmojiPicker();
   setBatchSending(false);
+  renderQueueStats();
 
   document.querySelectorAll(".tabBtn").forEach((btn) => {
     btn.addEventListener("click", async () => {
@@ -4759,6 +4860,7 @@ function bindEvents() {
 
   el("btnClearActivity").addEventListener("click", () => {
     state.activityRows = [];
+    resetQueueStats(0);
     renderActivity();
   });
   el("btnStopSending").addEventListener("click", async () => {
@@ -4908,10 +5010,14 @@ function bindEvents() {
     if (row.status === "stopped") {
       setBatchSending(false);
     }
+    updateQueueStatsFromProgress(row);
+    const normalizedStatus = String(row.status || "")
+      .trim()
+      .toLowerCase();
     pushActivity({
       ts: row.ts || "",
       phone: row.phone || "",
-      status: row.status || "failed",
+      status: normalizedStatus || "sending",
       error: row.error || ""
     });
   });

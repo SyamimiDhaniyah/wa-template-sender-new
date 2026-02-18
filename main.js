@@ -898,6 +898,7 @@ function normalizePersistedChatMedia(raw) {
 
 function normalizePersistedChatMessage(raw, fallbackChatJid) {
   const src = raw && typeof raw === "object" ? raw : {};
+  if (isStatusBroadcastEnvelope(src)) return null;
   const key = normalizeMessageKey(src.key || {}, fallbackChatJid);
   const chatJid = normalizeChatJid(src.chatJid || key.remoteJid || fallbackChatJid || "");
   if (!chatJid || !key.id) return null;
@@ -2316,6 +2317,7 @@ function upsertMessagesAsContactsForProfile(profileId, messages) {
 
   const contacts = [];
   for (const msg of messages) {
+    if (isStatusBroadcastEnvelope(msg)) continue;
     const key = msg?.key && typeof msg.key === "object" ? msg.key : {};
     const fromMe = key.fromMe === true || msg?.fromMe === true;
     if (fromMe) continue;
@@ -2995,6 +2997,7 @@ function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
   // Prefer phone-number JIDs for direct chats because they are the most
   // reliable send target across Baileys v7 RC builds.
   if (isLidJid(target)) {
+    push(getPreferredPnJidForLidFromContacts(profileKey, target));
     push(getMappedPnJidForProfile(profileKey, target));
     const lidUser = jidUserPart(target);
     if (/^\d{8,15}$/.test(lidUser)) {
@@ -3017,6 +3020,7 @@ function buildSendTargetCandidatesForProfile(profileId, chatJidOrPhone) {
   const recent = resolveRecentRemoteJidForChat(profileKey, target);
   if (recent) {
     if (isLidJid(recent)) {
+      push(getPreferredPnJidForLidFromContacts(profileKey, recent));
       push(getMappedPnJidForProfile(profileKey, recent));
       const recentUser = jidUserPart(recent);
       if (/^\d{8,15}$/.test(recentUser)) {
@@ -3048,6 +3052,7 @@ function resolveMsisdnForSendTarget(profileId, chatJidOrPhone) {
   push(target);
   const profileKey = cleanString(profileId);
   if (profileKey) {
+    push(getPreferredPnJidForLidFromContacts(profileKey, target));
     push(getMappedPnJidForProfile(profileKey, target));
     push(getMappedLidJidForProfile(profileKey, target));
 
@@ -3063,6 +3068,7 @@ function resolveMsisdnForSendTarget(profileId, chatJidOrPhone) {
 
     const recent = resolveRecentRemoteJidForChat(profileKey, target);
     push(recent);
+    push(getPreferredPnJidForLidFromContacts(profileKey, recent));
     push(getMappedPnJidForProfile(profileKey, recent));
 
     if (isLidJid(target)) {
@@ -3570,14 +3576,18 @@ function summarizeMessagePayload(rawMessage) {
 
 function normalizeMessageKey(key, fallbackRemoteJid, profileId = "") {
   const src = key && typeof key === "object" ? key : {};
+  const rawRemotePrimary = normalizeJidForContact(src.remoteJid || fallbackRemoteJid || "");
+  const id = cleanString(src.id || "");
+  const fromMe = src.fromMe === true;
+  if (rawRemotePrimary === "status@broadcast") {
+    return { remoteJid: "", id, participant: "", fromMe };
+  }
   const remotePrimary = normalizeChatJid(src.remoteJid || fallbackRemoteJid || "");
   const remoteAlt = normalizeChatJid(src.remoteJidAlt || src.remoteJidPn || "");
   let remoteJid = remoteAlt || remotePrimary;
-  const id = cleanString(src.id || "");
   const participantPrimary = normalizeJidForContact(src.participant || "");
   const participantAlt = normalizeJidForContact(src.participantAlt || src.participantPn || "");
   let participant = participantAlt || participantPrimary;
-  const fromMe = src.fromMe === true;
 
   const profileKey = cleanString(profileId);
   if (profileKey) {
@@ -3604,6 +3614,17 @@ function normalizeMessageKey(key, fallbackRemoteJid, profileId = "") {
   }
 
   return { remoteJid, id, participant, fromMe };
+}
+
+function isStatusBroadcastEnvelope(rawMessage) {
+  const msg = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
+  const key = msg.key && typeof msg.key === "object" ? msg.key : {};
+  const candidates = [key.remoteJid, key.remoteJidAlt, key.remoteJidPn, msg.remoteJid, msg.chatId, msg.jid];
+  for (const candidate of candidates) {
+    const normalized = normalizeJidForContact(candidate || "");
+    if (normalized === "status@broadcast") return true;
+  }
+  return false;
 }
 
 function messageKeyHash(key) {
@@ -3780,6 +3801,7 @@ function upsertChatsForProfile(profileId, chats) {
 
 function normalizeMessageRecord(profileId, rawMessage) {
   const msg = rawMessage && typeof rawMessage === "object" ? rawMessage : {};
+  if (isStatusBroadcastEnvelope(msg)) return null;
   const key = normalizeMessageKey(msg.key, msg?.key?.remoteJid || msg?.remoteJid || "", profileId);
   const rawChatJid = key.remoteJid || normalizeChatJid(msg?.chatId || msg?.jid || "");
   const chatJid = canonicalizeChatJidForProfile(profileId, rawChatJid);
@@ -4934,11 +4956,8 @@ async function sendMessageWithTargetCandidates(targetCandidates, messagePayload,
         return { sentMessage, targetJid: jid };
       } catch (error) {
         lastError = error;
-        const hasMoreCandidates = i < ordered.length - 1;
-        if (!hasMoreCandidates) break;
-        const shouldTryNext =
-          shouldRetrySendWithAlternateTarget(error) || shouldExpandSendTargetsAfterFailure(error);
-        if (!shouldTryNext) break;
+        // Keep trying alternate targets for direct chats unless socket itself is disconnected.
+        if (isSendConnectionError(error)) break;
       }
     }
     return null;
