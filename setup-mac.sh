@@ -11,22 +11,16 @@ echo "======================================"
 
 # 1. Check and Auto-Install Node.js
 if ! command -v node &> /dev/null; then
-    echo "⚠️  Node.js not found! Downloading Node.js installer..."
-    
-    # Download the official universal Node.js macOS pkg installer (LTS version)
-    curl -o node-installer.pkg "https://nodejs.org/dist/v20.11.1/node-v20.11.1.pkg"
-    
-    echo "📦 Opening Node.js Installer..."
-    echo "🚨 IMPORTANT: A window will pop up. Please click 'Continue' and 'Install' to finish setting up Node.js."
-    echo "Once installation is complete, close the installer to continue."
-    
-    # Open the UI installer and wait for the user to finish
-    open -W node-installer.pkg
-    
-    # Cleanup installer
-    rm -f node-installer.pkg
+    if [ "${CI:-}" = "true" ]; then
+        echo "❌ Node.js is missing in CI. Install it in the workflow first."
+        exit 1
+    fi
 
-    # Refresh path
+    echo "⚠️  Node.js not found! Downloading Node.js installer..."
+    curl -L -o node-installer.pkg "https://nodejs.org/dist/v20.11.1/node-v20.11.1.pkg"
+    echo "Please complete the installer window."
+    open -W node-installer.pkg
+    rm -f node-installer.pkg
     export PATH="/usr/local/bin:$PATH"
 
     if ! command -v node &> /dev/null; then
