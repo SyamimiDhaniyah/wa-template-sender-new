@@ -39,18 +39,18 @@
       "buildResources": "assets",
       "output": "dist"
     },
-    "extraFiles": [
-      {
-        "from": "assets/WhatsConect Launcher.cmd",
-        "to": "WhatsConect Launcher.cmd"
-      }
-    ],
     "win": {
       "target": "nsis",
       "icon": "assets/icon.ico",
       "signAndEditExecutable": false,
       "verifyUpdateCodeSignature": false,
-      "requestedExecutionLevel": "asInvoker"
+      "requestedExecutionLevel": "asInvoker",
+      "extraFiles": [
+        {
+          "from": "assets/WhatsConect Launcher.cmd",
+          "to": "WhatsConect Launcher.cmd"
+        }
+      ]
     },
     "mac": {
       "target": "dmg",
