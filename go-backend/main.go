@@ -463,6 +463,12 @@ func main() {
 	// Use specific SQLite dialect for WhatsMeow to prevent pragma strict check panics
 	container := sqlstore.NewWithDB(db, "sqlite", dbLog)
 
+	// Initialize database schema (Creates whatsmeow_device, etc.)
+	err = container.Upgrade(context.Background())
+	if err != nil {
+		log.Printf("Failed to upgrade database: %v", err)
+	}
+
 	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		log.Fatal(err)
