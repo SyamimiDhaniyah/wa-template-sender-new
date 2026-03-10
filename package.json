@@ -52,7 +52,9 @@
       "requestedExecutionLevel": "asInvoker"
     },
     "mac": {
-      "target": "dmg"
+      "target": "dmg",
+      "mergeASARs": false,
+      "x64ArchFiles": "go-backend/go-backend-mac-amd64"
     },
     "nsis": {
       "oneClick": false,
