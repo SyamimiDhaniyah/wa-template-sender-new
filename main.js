@@ -70,6 +70,36 @@ const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recor
 // --- Go Backend Sidecar ---
 let goBackendProcess = null;
 
+function resolveGoBackendExecutable(backendDir) {
+  const candidates = [];
+
+  if (process.platform === "win32") {
+    candidates.push("go-backend.exe");
+  } else if (process.platform === "darwin") {
+    candidates.push(process.arch === "arm64" ? "go-backend-mac-arm64" : "go-backend-mac-amd64");
+    candidates.push("go-backend");
+  } else {
+    candidates.push("go-backend");
+  }
+
+  for (const fileName of candidates) {
+    const fullPath = path.join(backendDir, fileName);
+    if (!fs.existsSync(fullPath)) continue;
+
+    if (process.platform !== "win32") {
+      try {
+        fs.chmodSync(fullPath, 0o755);
+      } catch (error) {
+        console.warn("Unable to ensure backend executable permissions:", error);
+      }
+    }
+
+    return fullPath;
+  }
+
+  throw new Error(`Go backend executable not found in ${backendDir}`);
+}
+
 function startGoBackend() {
   if (goBackendProcess) return;
   // In a packaged Electron app, __dirname points inside app.asar which is read-only.
@@ -77,10 +107,10 @@ function startGoBackend() {
   const backendDir = app.isPackaged
     ? path.join(process.resourcesPath, "app.asar.unpacked", "go-backend")
     : path.join(__dirname, "go-backend");
+  const backendPath = resolveGoBackendExecutable(backendDir);
   console.log("Starting Go Backend...");
-  const isWin = process.platform === "win32";
-  const exeName = isWin ? "go-backend.exe" : "go-backend";
-  goBackendProcess = spawn(path.join(backendDir, exeName), [], {
+  console.log("Using Go backend executable:", backendPath);
+  goBackendProcess = spawn(backendPath, [], {
     cwd: backendDir,
     stdio: ["ignore", "pipe", "pipe"]
   });
