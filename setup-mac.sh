@@ -1,70 +1,78 @@
 #!/bin/bash
 # WhatsConect – Mac Setup Script
-# Run this once to install dependencies and get the Go backend for macOS.
+# Run this once to install Node, get the Go backend, and launch standard app.
 # Usage: chmod +x setup-mac.sh && ./setup-mac.sh
 
 set -e
 
 echo "======================================"
-echo "  WhatsConect – Mac Setup"
+echo "  WhatsConect – Mac Auto-Setup"
 echo "======================================"
 
-# 1. Check Node.js
+# 1. Check and Auto-Install Node.js
 if ! command -v node &> /dev/null; then
-    echo ""
-    echo "❌ Node.js not found."
-    echo "   Please install Node.js from https://nodejs.org (LTS version)"
-    echo "   Then run this script again."
-    exit 1
+    echo "⚠️  Node.js not found! Downloading Node.js installer..."
+    
+    # Download the official universal Node.js macOS pkg installer (LTS version)
+    curl -o node-installer.pkg "https://nodejs.org/dist/v20.11.1/node-v20.11.1.pkg"
+    
+    echo "📦 Opening Node.js Installer..."
+    echo "🚨 IMPORTANT: A window will pop up. Please click 'Continue' and 'Install' to finish setting up Node.js."
+    echo "Once installation is complete, close the installer to continue."
+    
+    # Open the UI installer and wait for the user to finish
+    open -W node-installer.pkg
+    
+    # Cleanup installer
+    rm -f node-installer.pkg
+
+    # Refresh path
+    export PATH="/usr/local/bin:$PATH"
+
+    if ! command -v node &> /dev/null; then
+        echo "❌ Node.js installation failed or was cancelled."
+        exit 1
+    fi
 fi
-echo "✅ Node.js: $(node --version)"
+echo "✅ Node.js ready: $(node --version)"
 
 # 2. Setup Go Backend
 echo ""
 cd go-backend || { echo "❌ go-backend folder missing"; exit 1; }
 
-# Determine Mac architecture
 ARCH=$(uname -m)
 if [ "$ARCH" = "arm64" ]; then
     BIN_NAME="go-backend-mac-arm64"
-    echo "🔍 Detected Apple Silicon Mac (M1/M2/M3)..."
+    echo "🔍 Apple Silicon Mac detected."
 else
     BIN_NAME="go-backend-mac-amd64"
-    echo "🔍 Detected Intel Mac..."
+    echo "🔍 Intel Mac detected."
 fi
 
 if command -v go &> /dev/null; then
     echo "✅ Go compiler found. Compiling backend locally..."
     go build -o go-backend main.go
 else
-    echo "⚠️  Go compiler not found. Fetching pre-built binary..."
-    
-    # URL to raw binary on GitHub (from the latest release or main branch)
-    # Since we push binaries to the repo via GitHub Actions, we can just download the raw file!
+    echo "⬇️  Fetching pre-built Go backend from GitHub..."
     DOWNLOAD_URL="https://raw.githubusercontent.com/SyamimiDhaniyah/wa-template-sender-new/main/go-backend/$BIN_NAME"
-    
-    echo "⬇️  Downloading $BIN_NAME from GitHub..."
     curl -sL "$DOWNLOAD_URL" -o "$BIN_NAME"
     
     if [ ! -f "$BIN_NAME" ] || [ ! -s "$BIN_NAME" ]; then
         echo "❌ Failed to download pre-built binary."
-        echo "   Please check your internet connection and try again."
         exit 1
     fi
-    
-    echo "✅ Download complete."
     cp "$BIN_NAME" go-backend
     chmod +x go-backend
 fi
 cd ..
-echo "✅ Go backend ready: go-backend/go-backend"
+echo "✅ Go backend ready"
 
 # 3. Install npm dependencies
 echo ""
-echo "📦 Installing npm dependencies..."
-npm install
+echo "📦 Installing internal app dependencies..."
+npm install --silent
 
 # 4. Launch the app
 echo ""
-echo "🚀 Starting WhatsConect..."
+echo "🚀 Everything installed! Starting WhatsConect..."
 npm start
