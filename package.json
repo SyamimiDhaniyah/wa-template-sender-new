@@ -24,6 +24,7 @@
   "build": {
     "appId": "com.dentabay.whatsconect",
     "productName": "WhatsConect",
+    "afterPack": "scripts/after-pack-mac.cjs",
     "files": [
       "main.js",
       "preload.js",
@@ -53,8 +54,7 @@
     },
     "mac": {
       "target": "dmg",
-      "mergeASARs": false,
-      "x64ArchFiles": "**/app.asar.unpacked/go-backend/go-backend-mac-amd64"
+      "mergeASARs": false
     },
     "nsis": {
       "oneClick": false,
