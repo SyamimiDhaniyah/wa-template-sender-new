@@ -32,6 +32,8 @@ exports.default = async function afterPack(context) {
   const arm64Backend = path.join(backendDir, "go-backend-mac-arm64");
   const amd64Backend = path.join(backendDir, "go-backend-mac-amd64");
   const packagedBackend = path.join(backendDir, "go-backend");
+  const windowsBackend = path.join(backendDir, "go-backend.exe");
+  const windowsLauncher = path.join(backendDir, "WhatsConect Launcher.cmd");
 
   const selectedBackend = context.arch === Arch.arm64 ? arm64Backend : amd64Backend;
   const otherBackend = context.arch === Arch.arm64 ? amd64Backend : arm64Backend;
@@ -49,5 +51,13 @@ exports.default = async function afterPack(context) {
 
   if (fs.existsSync(otherBackend)) {
     fs.rmSync(otherBackend, { force: true });
+  }
+
+  if (fs.existsSync(windowsBackend)) {
+    fs.rmSync(windowsBackend, { force: true });
+  }
+
+  if (fs.existsSync(windowsLauncher)) {
+    fs.rmSync(windowsLauncher, { force: true });
   }
 };
