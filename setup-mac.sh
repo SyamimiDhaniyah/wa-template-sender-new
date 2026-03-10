@@ -37,14 +37,22 @@ if command -v go &> /dev/null; then
     echo "✅ Go compiler found. Compiling backend locally..."
     go build -o go-backend main.go
 else
-    echo "⚠️  Go compiler not found. Falling back to pre-built CI binary..."
-    if [ ! -f "$BIN_NAME" ]; then
-        echo "❌ Pre-built binary ($BIN_NAME) not found!"
-        echo "   Please download the latest binaries from GitHub Actions"
-        echo "   and place them in the 'go-backend' folder."
+    echo "⚠️  Go compiler not found. Fetching pre-built binary..."
+    
+    # URL to raw binary on GitHub (from the latest release or main branch)
+    # Since we push binaries to the repo via GitHub Actions, we can just download the raw file!
+    DOWNLOAD_URL="https://raw.githubusercontent.com/SyamimiDhaniyah/wa-template-sender-new/main/go-backend/$BIN_NAME"
+    
+    echo "⬇️  Downloading $BIN_NAME from GitHub..."
+    curl -sL "$DOWNLOAD_URL" -o "$BIN_NAME"
+    
+    if [ ! -f "$BIN_NAME" ] || [ ! -s "$BIN_NAME" ]; then
+        echo "❌ Failed to download pre-built binary."
+        echo "   Please check your internet connection and try again."
         exit 1
     fi
-    echo "✅ Found pre-built binary: $BIN_NAME"
+    
+    echo "✅ Download complete."
     cp "$BIN_NAME" go-backend
     chmod +x go-backend
 fi
