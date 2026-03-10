@@ -1,6 +1,8 @@
-name: Build macOS (DMG/ZIP)
+name: Build macOS (DMG/ZIP + Go backend)
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -16,8 +18,23 @@ jobs:
           node-version: 20
           cache: npm
 
-      - name: Install dependencies
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install npm dependencies
         run: npm ci
+
+      - name: Build go-backend for macOS (Apple Silicon)
+        run: |
+          cd go-backend
+          GOOS=darwin GOARCH=arm64 go build -o go-backend-mac-arm64 main.go
+
+      - name: Build go-backend for macOS (Intel)
+        run: |
+          cd go-backend
+          GOOS=darwin GOARCH=amd64 go build -o go-backend-mac-amd64 main.go
 
       - name: Generate icns from logo
         shell: bash
@@ -30,27 +47,34 @@ jobs:
           rm -rf "$ICONSET"
           mkdir -p "$ICONSET"
 
-          # Create required iconset sizes (and their @2x variants).
-          sips -z 16 16     "$SRC" --out "$ICONSET/icon_16x16.png" >/dev/null
-          sips -z 32 32     "$SRC" --out "$ICONSET/icon_16x16@2x.png" >/dev/null
-          sips -z 32 32     "$SRC" --out "$ICONSET/icon_32x32.png" >/dev/null
-          sips -z 64 64     "$SRC" --out "$ICONSET/icon_32x32@2x.png" >/dev/null
-          sips -z 128 128   "$SRC" --out "$ICONSET/icon_128x128.png" >/dev/null
-          sips -z 256 256   "$SRC" --out "$ICONSET/icon_128x128@2x.png" >/dev/null
-          sips -z 256 256   "$SRC" --out "$ICONSET/icon_256x256.png" >/dev/null
-          sips -z 512 512   "$SRC" --out "$ICONSET/icon_256x256@2x.png" >/dev/null
-          sips -z 512 512   "$SRC" --out "$ICONSET/icon_512x512.png" >/dev/null
-          sips -z 1024 1024 "$SRC" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
+          sips -z 16 16     "$SRC" --out "$ICONSET/icon_16x16.png" > /dev/null
+          sips -z 32 32     "$SRC" --out "$ICONSET/icon_16x16@2x.png" > /dev/null
+          sips -z 32 32     "$SRC" --out "$ICONSET/icon_32x32.png" > /dev/null
+          sips -z 64 64     "$SRC" --out "$ICONSET/icon_32x32@2x.png" > /dev/null
+          sips -z 128 128   "$SRC" --out "$ICONSET/icon_128x128.png" > /dev/null
+          sips -z 256 256   "$SRC" --out "$ICONSET/icon_128x128@2x.png" > /dev/null
+          sips -z 256 256   "$SRC" --out "$ICONSET/icon_256x256.png" > /dev/null
+          sips -z 512 512   "$SRC" --out "$ICONSET/icon_256x256@2x.png" > /dev/null
+          sips -z 512 512   "$SRC" --out "$ICONSET/icon_512x512.png" > /dev/null
+          sips -z 1024 1024 "$SRC" --out "$ICONSET/icon_512x512@2x.png" > /dev/null
 
           iconutil -c icns "$ICONSET" -o "$OUT"
 
-      - name: Build macOS (dmg + zip)
+      - name: Build macOS app (dmg + zip)
         run: npx electron-builder --mac dmg zip --universal --config.mac.icon=assets/icon.icns --publish never
 
-      - name: Upload artifacts
+      - name: Upload macOS app artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsConect-macos
+          name: WhatsConect-macos-app
           path: |
             dist/*.dmg
             dist/*.zip
+
+      - name: Upload go-backend Mac binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhatsConect-mac-go-backend
+          path: |
+            go-backend/go-backend-mac-arm64
+            go-backend/go-backend-mac-amd64
