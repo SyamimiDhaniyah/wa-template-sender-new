@@ -1,4 +1,4 @@
-name: Build macOS (DMG/ZIP + Go backend)
+name: Build macOS (DMG/ZIP per arch + Go backend)
 
 on:
   push:
@@ -60,8 +60,11 @@ jobs:
 
           iconutil -c icns "$ICONSET" -o "$OUT"
 
-      - name: Build macOS app (dmg + zip)
-        run: npx electron-builder --mac dmg zip --universal --config.mac.icon=assets/icon.icns --publish never
+      - name: Build macOS app (Apple Silicon)
+        run: npx electron-builder --mac dmg zip --arm64 --config.mac.icon=assets/icon.icns --publish never
+
+      - name: Build macOS app (Intel)
+        run: npx electron-builder --mac dmg zip --x64 --config.mac.icon=assets/icon.icns --publish never
 
       - name: Upload macOS app artifacts
         uses: actions/upload-artifact@v4
