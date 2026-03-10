@@ -61,7 +61,7 @@
       "createDesktopShortcut": true,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",
-      "installerHeaderIcon": "assets/dentabay.png",
+      "installerHeaderIcon": "assets/icon.ico",
       "include": "assets/installer.nsh"
     }
   }
