@@ -54,7 +54,7 @@
     "mac": {
       "target": "dmg",
       "mergeASARs": false,
-      "x64ArchFiles": "go-backend/go-backend-mac-amd64"
+      "x64ArchFiles": "**/app.asar.unpacked/go-backend/go-backend-mac-amd64"
     },
     "nsis": {
       "oneClick": false,
