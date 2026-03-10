@@ -1,67 +1,136 @@
 # Developer Documentation
 
-This document describes the WhatsApp integration end-to-end, which uses **WhatsMeow (Go Sidecar)** for:
-- connection and authentication
-- receive and sync
-- send (single and batch)
-- read state
-- typing/presence
-- media download and preview
-- profile/contact enrichment
+This document describes the WhatsApp integration end-to-end.
 
-All frontend references below are in `main.js`, `preload.js`, and `renderer/renderer.js`. The backend engine is housed in `go-backend/`.
+The **WhatsApp engine** is 100% WhatsMeow (Go). All Baileys code has been removed.
+
+---
 
 ## 1. Runtime Architecture
 
 ### Main process (`main.js` / Node.js)
 - Owns the Go Sidecar lifecycle (`child_process.spawn`).
-- Proxies UI requests to the local Go HTTP/WS server.
+- In **packaged builds**, resolves the Go binary from `app.asar.unpacked/go-backend/` via `process.resourcesPath`.
+- In **dev builds**, resolves from `__dirname/go-backend/`.
+- Proxies UI IPC requests to the local Go HTTP server at `http://127.0.0.1:12345`.
+- Manages message/chat cache via `electron-store` (persisted JSON).
 
 ### Preload (`preload.js`)
-- Exposes `window.api` methods and event listeners through `contextBridge`.
-- Renderer never talks to the Go sidecar or WhatsApp directly.
+- Exposes `window.api` methods and event listeners via `contextBridge`.
+- Renderer never communicates with the Go sidecar or WhatsApp directly.
 
 ### Renderer (`renderer/renderer.js`)
-- Renders chats/messages.
+- Renders chats/messages and handles composer input.
 - Sends user actions through IPC (`waSendChatMessage`, `waSendPresence`, `waMarkChatRead`, etc.).
 - Keeps request sequencing guards (`waChatsReqSeq`, `waMessagesReqSeq`) to avoid stale updates.
 
 ### Backend Process (`go-backend/` / WhatsMeow)
-- Handles the actual WhatsApp protocol connection via WhatsMeow.
-- Manages profile auth SQLite databases.
-- Normalizes and stores contacts/chats/messages in memory and SQLite.
-- Exposes local endpoints for the Electron `main.js` to communicate with.
+- Handles WhatsApp protocol connection via WhatsMeow.
+- Manages profile auth SQLite databases at `%APPDATA%/whatsconect/wa_profiles/<profileId>/store.db`.
+- Exposes local HTTP endpoints consumed by `main.js`.
+- Emits `chatSync` / `historySync` / `status` / `presence` JSON events to stdout, consumed by `main.js`.
 
-## 2. Connection Lifecycle
-The Go sidecar handles the connection to WhatsApp. 
+---
+
+## 2. Go Backend API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/status` | Connection status (connected, loggedIn, pushName, jid) |
+| GET | `/api/login/qr` | Start QR login, returns QR code string |
+| GET | `/api/login/pair?phone=...` | Start phone pairing, returns 8-digit code |
+| GET | `/api/contacts` | All contacts |
+| GET | `/api/chats` | Chat settings |
+| GET | `/api/messages` | Recent messages |
+| POST | `/api/send` | Send message (text or image) |
+| POST | `/api/presence` | Set typing/online presence |
+| POST | `/api/read` | Mark message as read |
+| POST | `/api/onwhatsapp` | Check if phones are on WhatsApp |
+| POST | `/api/logout` | Log out and clear session |
+| POST | `/api/media/download` | Download media bytes for a stored message |
+
+---
+
+## 3. Connection Lifecycle
 
 ### Handshake modes
 1. Renderer calls `wa:handshake` with `method: "qr"` or `"pairing"`.
 2. Main passes this to the Go backend.
-3. Go backend streams the QR or pairing code back through WebSocket.
-4. Main emits `wa:qr` or `wa:pairingCode` to the UI.
+3. Go backend streams the QR or pairing code back.
+4. Main emits `wa:qr` or `wa:pairingCode` to the renderer.
 
-## 3. Event Subscriptions & Data Model
-The Go sidecar subscribes to all WhatsApp events (messages, presence, etc.) and updates its local SQLite/Memory cache. 
-When data changes, the Go backend emits an invalidation signal through WebSocket to Node.js, which emits `wa:chatSync` to the Renderer.
-The Renderer then fetches the full current state via IPC (which asks the Go backend for the JSON payload).
+### Status Reporting
+The `wa:status` IPC event includes a `text` field (e.g., `"Connected"`, `"Logged Out"`, `"Not connected"`) so the UI accurately reflects backend state.
 
-## 4. Sending Messages
-Renderer handles composer input and calls `waSendChatMessage`.
-Main receives it and makes an HTTP POST request to the Go backend.
-The Go backend handles the `@s.whatsapp.net` / `@lid` formatting and dispatches via WhatsMeow.
+---
 
-Batch sending works similarly but the Go backend manages the pacing controls (pattern/min/max delay) natively.
+## 4. Profiles
 
-## 15. Development Commands
+Profiles represent individual WhatsApp sessions.
 
-Run:
-```bash
-npm install
-npm start
+- **Default profile**: `p_default` named **"Dentabay"** (auto-created on first run or reset).
+- **Migration**: On upgrade, any non-user-renamed `p_default` profile is automatically renamed to `"Dentabay"`.
+- Profile actions: Create, Rename, Delete, Terminate (clear auth only).
+- On delete/terminate of the active profile, calls `disconnectActiveProfileSocket()` to cleanly stop the session.
+
+---
+
+## 5. Sending Messages
+
+Renderer calls `waSendChatMessage` → Main → HTTP POST to `go-backend /api/send`.
+
+Go backend handles:
+- JID normalization (`@s.whatsapp.net` / `@lid` / `@g.us` groups)
+- Image upload via `client.Upload(ctx, data, whatsmeow.MediaImage)`
+- After successful send, emits a `chatSync` event to stdout so `main.js` immediately persists the message
+
+### Anti-Ban Protections
+- **Daily limit**: 200 messages per profile per day (tracked by `main.js`)
+- **Pacing**: Min/max delay between batch messages
+- Limit warnings are shown in the UI before blocking further sends
+
+---
+
+## 6. Media / Image Preview
+
+Image thumbnails are extracted from the `imageMessage.jpegThumbnail` field in WhatsMeow's protojson output (serialized as base64 strings). The `bytesToBase64` function handles both raw bytes and base64 strings.
+
+For full-resolution preview:
+- `ensureLocalImageForStoredMessage` calls `/api/media/download` with the stored proto message.
+- Go backend calls `client.DownloadAny(ctx, &protoMsg)` and returns base64 bytes.
+- Result is saved as a local file in `%APPDATA%/whatsconect/wa_media/images/`.
+
+---
+
+## 7. Device Branding
+
+In `go-backend/main.go`, before creating the WhatsApp client:
+
+```go
+store.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
+store.DeviceProps.Os = &osName // "WhatsConect"
 ```
 
-Build:
+This makes WhatsApp Linked Devices show the connection as **Chrome** instead of "Other device".
+
+> Note: The device name is registered at scan/pairing time. An existing session needs to be re-linked to reflect this change.
+
+---
+
+## 8. Development Commands
+
 ```bash
+# Install dependencies
+npm install
+
+# Run in development
+npm start
+
+# Build installer
 npm run dist
+# Output: dist/WhatsConect Setup x.x.x.exe
+
+# Rebuild Go backend only
+cd go-backend
+go build -o go-backend.exe main.go
 ```

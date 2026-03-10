@@ -12,9 +12,18 @@ const DEFAULT_CLINIC_SETTINGS = {
   marketingPageSizeDefault: 50
 };
 const DEFAULT_APPOINTMENT_TEMPLATES = {
-  remindAppointment: { bahasa: "", english: "" },
-  followUp: { bahasa: "", english: "" },
-  requestReview: { bahasa: "", english: "" }
+  remindAppointment: {
+    bahasa: "Halo {name}, mau ingatkan janji temu di {branch} pada {date} jam {time}. Ada apa-apa kabari kami ya. Sampai jumpa!",
+    english: "Hi {name}, this is a reminder for your appointment at {branch} on {date} at {time}. See you soon!"
+  },
+  followUp: {
+    bahasa: "Halo {name}, harap Anda baik-baik saja setelah kunjungan di {branch}. Jika ada ketidaknyamanan, segera hubungi kami.",
+    english: "Hi {name}, hope you are doing well after your visit to {branch}. Let us know if you have any discomfort."
+  },
+  requestReview: {
+    bahasa: "Halo {name}, terima kasih telah mempercayai kami di {branch}. Boleh minta ulasan kunjungan Anda? Link Google Review: {google_review_link}",
+    english: "Hi {name}, thank you for choosing us at {branch}. Could you spare a moment to review us? Google Review Link: {google_review_link}"
+  }
 };
 
 const MARKETING_PLACEHOLDERS = [
@@ -262,7 +271,7 @@ function queueSilentPatientProfileUpdates(rows) {
     Array.from(byIc.values()).map((payload) => {
       return window.api.clinicEditPatient(payload);
     })
-  ).catch(() => {});
+  ).catch(() => { });
 }
 
 function templateSnippet(text) {
@@ -1170,7 +1179,7 @@ function stopWaOutgoingTyping(options = {}) {
   state.waTypingChatJid = "";
 
   if (opts.sendPaused !== false && wasActive) {
-    sendWaChatPresence("paused", chatJid).catch(() => {});
+    sendWaChatPresence("paused", chatJid).catch(() => { });
   }
 }
 
@@ -1193,12 +1202,12 @@ function startWaOutgoingTyping(chatJid) {
   state.waTypingChatJid = jid;
   if (!state.waTypingActive) {
     state.waTypingActive = true;
-    sendWaChatPresence("composing", jid).catch(() => {});
+    sendWaChatPresence("composing", jid).catch(() => { });
     clearWaTypingHeartbeatTimer();
     state.waTypingHeartbeatTimer = setInterval(() => {
       if (!state.waTypingActive) return;
       if (!state.waTypingChatJid) return;
-      sendWaChatPresence("composing", state.waTypingChatJid).catch(() => {});
+      sendWaChatPresence("composing", state.waTypingChatJid).catch(() => { });
     }, 7000);
   }
   scheduleWaOutgoingTypingPause(jid);
@@ -1400,9 +1409,8 @@ function renderWaAttachmentRow() {
 
   const totalSize = list.reduce((sum, item) => sum + Math.max(0, Number(item?.size || 0) || 0), 0);
   const sizeText = formatWaBytes(totalSize);
-  label.textContent = sizeText ? `${list.length} file${list.length > 1 ? "s" : ""} | ${sizeText}` : `${list.length} file${
-    list.length > 1 ? "s" : ""
-  }`;
+  label.textContent = sizeText ? `${list.length} file${list.length > 1 ? "s" : ""} | ${sizeText}` : `${list.length} file${list.length > 1 ? "s" : ""
+    }`;
 
   listWrap.innerHTML = "";
   for (let i = 0; i < list.length; i++) {
@@ -1624,10 +1632,9 @@ function renderWaChatList() {
     meta.className = "waChatMeta";
     meta.innerHTML = `
       <div class="waChatTime">${escapeHtml(formatWaChatTime(chat.lastMessageTimestampMs))}</div>
-      ${
-        Number(chat.unreadCount || 0) > 0
-          ? `<div class="waUnreadBadge">${escapeHtml(String(Math.min(99, Number(chat.unreadCount || 0))))}</div>`
-          : ""
+      ${Number(chat.unreadCount || 0) > 0
+        ? `<div class="waUnreadBadge">${escapeHtml(String(Math.min(99, Number(chat.unreadCount || 0))))}</div>`
+        : ""
       }
     `;
 
@@ -1895,9 +1902,9 @@ async function refreshWaMessages(options = {}) {
       state.waChats = state.waChats.map((chat) =>
         chat.jid === activeChatJid
           ? {
-              ...chat,
-              unreadCount: 0
-            }
+            ...chat,
+            unreadCount: 0
+          }
           : chat
       );
       renderWaChatList();
@@ -1994,7 +2001,7 @@ function scheduleWaSyncRefresh(options = {}) {
       minMinutesBetweenPhotoChecks: Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
         ? Number(opts.minMinutesBetweenPhotoChecks)
         : 90
-    }).catch(() => {});
+    }).catch(() => { });
   }, 160);
 }
 
@@ -2135,12 +2142,12 @@ async function sendWaComposerMessage() {
       setWaPendingAttachments(queued);
     }
     renderWaMessages({ forceBottom: true });
-    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => {});
-    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => {});
+    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => { });
+    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => { });
     throw e;
   } finally {
-    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => {});
-    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => {});
+    await refreshWaMessages({ markRead: false, forceBottom: true, showLoading: false }).catch(() => { });
+    await refreshWaChats({ refreshMessages: false, markRead: false }).catch(() => { });
     setWaComposerSending(false);
     focusWaComposerInput();
   }
@@ -2363,8 +2370,8 @@ async function openAppointmentPatientWaChat(appt) {
   const patientName = String(src.nickname || src.Patient_Name || src.name || "").trim();
   setActiveTab("whatsapp");
   upsertLocalWaChatStub(chatJid, patientName);
+  // openWaChat handles the message fetch and UI refresh internally.
   await openWaChat(chatJid);
-  refreshWaChats({ refreshMessages: false, markRead: false, includePhotos: true }).catch(() => {});
 }
 
 function renderAppointmentTable() {
@@ -3546,9 +3553,8 @@ async function loadPastPatients() {
   state.marketingLoadedPage = 1;
   renderMarketingLoadedPatients();
 
-  el("pastPatientRangeText").textContent = `Loaded ${state.marketingLoadedPatients.length} unique patients from ${
-    range.label
-  } (${formatDateForMessage(range.startTs, "english")} - ${formatDateForMessage(range.endTs, "english")})`;
+  el("pastPatientRangeText").textContent = `Loaded ${state.marketingLoadedPatients.length} unique patients from ${range.label
+    } (${formatDateForMessage(range.startTs, "english")} - ${formatDateForMessage(range.endTs, "english")})`;
 }
 
 async function sendMarketing() {
@@ -3620,9 +3626,8 @@ async function sendMarketing() {
 
   const confirmed = await openConfirmModal({
     title: "Confirm Send",
-    subtitle: `${editableRecipients.length} messages will be sent one-by-one${
-      skipAlreadySent ? "\nNote: numbers that already received this template will be skipped." : ""
-    }`,
+    subtitle: `${editableRecipients.length} messages will be sent one-by-one${skipAlreadySent ? "\nNote: numbers that already received this template will be skipped." : ""
+      }`,
     recipientsText: `${confirmRecipients}${suffix}`,
     sampleText,
     recipientsEditable: editableRecipients,
@@ -4835,7 +4840,7 @@ function bindEvents() {
     try {
       await window.api.terminateProfileSession(id);
       await refreshProfiles();
-      await syncConnectionStateFromBackend().catch(() => {});
+      await syncConnectionStateFromBackend().catch(() => { });
       toast("Profile", `Session terminated for ${name}`);
     } catch (e) {
       toast("Profile", String(e?.message || e));
@@ -4851,7 +4856,7 @@ function bindEvents() {
     try {
       await window.api.deleteProfile(id);
       await refreshProfiles();
-      await syncConnectionStateFromBackend().catch(() => {});
+      await syncConnectionStateFromBackend().catch(() => { });
       toast("Profile", `Deleted ${name}`);
     } catch (e) {
       toast("Profile", String(e?.message || e));
@@ -4953,6 +4958,7 @@ function bindEvents() {
     if (status?.profileId && state.activeProfileId && status.profileId !== state.activeProfileId) return;
     const prevConnected = state.waConnected;
     const connected = !!status?.connected;
+    state.waConnected = connected;
     const statusText = status?.text || "Not connected";
     const connecting = isConnectionStatusConnecting(statusText, status?.connecting);
     setConnectionBadge(connected, statusText, connecting);
@@ -4977,7 +4983,7 @@ function bindEvents() {
 
     if (!prevConnected && connected && state.waForceHistoryRefreshOnConnected) {
       state.waForceHistoryRefreshOnConnected = false;
-      refreshWaChatsWithHistoryWarmup().catch(() => {});
+      refreshWaChatsWithHistoryWarmup().catch(() => { });
       return;
     }
 

@@ -1,4 +1,4 @@
-const electron = require("electron");
+﻿const electron = require("electron");
 const { spawn } = require("child_process");
 
 if ((!electron || typeof electron !== "object" || !electron.app) && process.env.ELECTRON_RUN_AS_NODE) {
@@ -25,42 +25,23 @@ if (!app) {
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
-const qrcode = require("qrcode");
 const Store = require("electron-store");
-const pino = require("pino");
 
-// Baileys is ESM-only in newer versions; load it via dynamic import from CommonJS
-let _baileys = null;
-async function getBaileys() {
-  if (_baileys) return _baileys;
-  const mod = await import("@whiskeysockets/baileys");
-  const makeWASocket = mod.makeWASocket || mod.default;
-  if (typeof makeWASocket !== "function") {
-    throw new Error("Baileys makeWASocket export not found");
-  }
-  _baileys = {
-    makeWASocket,
-    useMultiFileAuthState: mod.useMultiFileAuthState,
-    DisconnectReason: mod.DisconnectReason,
-    Browsers: mod.Browsers,
-    fetchLatestBaileysVersion: mod.fetchLatestBaileysVersion,
-    downloadMediaMessage: mod.downloadMediaMessage
-  };
-  return _baileys;
-}
+const log = {
+  info: console.log,
+  warn: console.warn,
+  error: console.error
+};
 
-const log = pino({ level: "info" });
+
+// Removed pino init
 
 let win = null;
-let sock = null;
 let isConnecting = false;
 let isConnected = false;
-let connectSetupPromise = null;
 let waContactsByProfileMem = {};
 const invalidSessionProfiles = new Set();
 const restartRecoveryDoneByAttempt = new Set();
-let lastFetchedWaVersion = null;
-let lastFetchedWaVersionAt = 0;
 const contactNameSyncByProfile = new Map();
 const lastContactNameSyncAtByProfile = new Map();
 const appStateResyncInFlightByProfile = new Map();
@@ -85,6 +66,96 @@ const waHistoryWarmupInFlightByProfile = new Map();
 const waAliasReconcileTimers = new Map();
 const waImageAutoSaveInFlight = new Set();
 const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recording"]);
+
+// --- Go Backend Sidecar ---
+let goBackendProcess = null;
+
+function startGoBackend() {
+  if (goBackendProcess) return;
+  // In a packaged Electron app, __dirname points inside app.asar which is read-only.
+  // Executables must live in app.asar.unpacked instead.
+  const backendDir = app.isPackaged
+    ? path.join(process.resourcesPath, "app.asar.unpacked", "go-backend")
+    : path.join(__dirname, "go-backend");
+  console.log("Starting Go Backend...");
+  const isWin = process.platform === "win32";
+  const exeName = isWin ? "go-backend.exe" : "go-backend";
+  goBackendProcess = spawn(path.join(backendDir, exeName), [], {
+    cwd: backendDir,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  goBackendProcess.stdout.on("data", (data) => {
+    const output = data.toString();
+    const lines = output.split("\n");
+    for (let line of lines) {
+      line = line.trim();
+      if (!line) continue;
+      try {
+        const payload = JSON.parse(line);
+        if (payload && payload.type) {
+          if (payload.type === "chatSync") {
+            const profileId = getActiveProfileId();
+            if (profileId && Array.isArray(payload.data)) {
+              upsertMessagesForProfile(profileId, payload.data);
+            }
+            win?.webContents.send("wa:chatSync", { profileId });
+          } else if (payload.type === "historySync") {
+            const profileId = getActiveProfileId();
+            if (profileId && payload.data?.file) {
+              try {
+                const fs = require("fs");
+                const jStr = fs.readFileSync(payload.data.file, "utf8");
+                const msgs = JSON.parse(jStr);
+                if (Array.isArray(msgs)) upsertMessagesForProfile(profileId, msgs);
+                fs.unlinkSync(payload.data.file);
+              } catch (e) {
+                console.error("History sync file error:", e);
+              }
+            }
+            win?.webContents.send("wa:chatSync", { profileId });
+          } else if (payload.type === "presence") {
+            win?.webContents.send("wa:presence", payload.data);
+          } else if (payload.type === "status") {
+            isConnected = (payload.data === "connected");
+            win?.webContents.send("wa:status", {
+              isConnected,
+              connected: isConnected,
+              text: isConnected ? "Connected" : (payload.data === "logged_out" ? "Logged Out" : "Not connected"),
+              profileId: getActiveProfileId()
+            });
+          }
+        } else {
+          console.log("[Go]", line);
+        }
+      } catch (e) {
+        // Not JSON, just standard log
+        console.log("[Go]", line);
+      }
+    }
+  });
+
+  goBackendProcess.stderr.on("data", (data) => {
+    console.error("[Go Error]", data.toString().trim());
+  });
+
+  goBackendProcess.on("error", (err) => {
+    console.error("Failed to start Go sidecar:", err);
+  });
+  goBackendProcess.on("close", (code) => {
+    console.log(`Go sidecar exited with code ${code}`);
+    goBackendProcess = null;
+  });
+}
+
+function killGoBackend() {
+  if (goBackendProcess) {
+    console.log("Killing Go backend process...");
+    goBackendProcess.kill("SIGTERM");
+    goBackendProcess = null;
+  }
+}
+// --------------------------
 const WA_ALLOWED_INCOMING_CHAT_PRESENCE = new Set(["composing", "recording", "paused", "available", "unavailable"]);
 const WA_CHAT_PERSIST_DEBOUNCE_MS = 2200;
 const WA_PERSISTED_THUMB_MAX_CHARS = 18 * 1024;
@@ -596,33 +667,6 @@ async function clinicEditPatient(authToken, payload) {
   });
 }
 
-async function getLatestWaVersionSafe(fetchLatestBaileysVersion) {
-  const now = Date.now();
-  // Reuse last known good version for 6 hours.
-  if (lastFetchedWaVersion && now - lastFetchedWaVersionAt < 6 * 60 * 60 * 1000) {
-    return lastFetchedWaVersion;
-  }
-  if (typeof fetchLatestBaileysVersion !== "function") return null;
-
-  const timeoutMs = 4000;
-  try {
-    const timed = Promise.race([
-      fetchLatestBaileysVersion(),
-      new Promise((_, reject) => setTimeout(() => reject(new Error("version_fetch_timeout")), timeoutMs))
-    ]);
-    const latest = await timed;
-    const version = Array.isArray(latest?.version) && latest.version.length === 3 ? latest.version : null;
-    if (version) {
-      lastFetchedWaVersion = version;
-      lastFetchedWaVersionAt = now;
-      return version;
-    }
-  } catch (e) {
-    log.warn({ err: e }, "Failed to fetch latest WA Web version, using library default");
-  }
-  return null;
-}
-
 function clearPersistedContactsCache() {
   try {
     if (typeof store.delete === "function") store.delete("waContactsByProfile");
@@ -808,8 +852,8 @@ function getPreferredPnJidForLidFromContacts(profileId, lidInput) {
 
   const byPhone =
     waContactsByProfileMem &&
-    waContactsByProfileMem[key] &&
-    typeof waContactsByProfileMem[key] === "object"
+      waContactsByProfileMem[key] &&
+      typeof waContactsByProfileMem[key] === "object"
       ? waContactsByProfileMem[key]
       : {};
 
@@ -1158,13 +1202,13 @@ function normalizeTemplateMessagesList(input, legacyBody = "") {
     rows.length > 0
       ? rows
       : [
-          {
-            id: "tm_1",
-            type: "text",
-            text: String(legacyBody || ""),
-            attachment: null
-          }
-        ];
+        {
+          id: "tm_1",
+          type: "text",
+          text: String(legacyBody || ""),
+          attachment: null
+        }
+      ];
   if (out.length === 0) {
     out.push({
       id: "tm_1",
@@ -1782,8 +1826,7 @@ function loadProfiles() {
     const renamed = normalized.map((p) => {
       if (p?.id !== "p_default") return p;
       if (p?.customName === true) return p;
-      const currentName = String(p?.name || "").trim();
-      if (currentName && currentName !== "Default WhatsApp" && currentName !== "WhatsApp Profile") return p;
+      // Rename any non-user-customized default profile to the current brand name
       migrated = true;
       return {
         ...p,
@@ -1862,8 +1905,8 @@ async function deleteProfile(profileId) {
   if (isActive) {
     handshakeAttemptId++;
     handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
-    await waitForConnectSetupIdle();
-    await stopSocket();
+    // waitForConnectSetupIdle removed (WhatsMeow: no idle wait needed)
+    await disconnectActiveProfileSocket();
     isConnecting = false;
   }
 
@@ -1922,8 +1965,8 @@ async function terminateProfileSession(profileId) {
   if (isActive) {
     handshakeAttemptId++;
     handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
-    await waitForConnectSetupIdle();
-    await stopSocket();
+    // waitForConnectSetupIdle removed (WhatsMeow: no idle wait needed)
+    await disconnectActiveProfileSocket();
     isConnecting = false;
   }
 
@@ -2125,8 +2168,8 @@ function findContactByJidForProfile(profileId, jidOrAddress) {
 
   const byPhone =
     waContactsByProfileMem &&
-    waContactsByProfileMem[profileId] &&
-    typeof waContactsByProfileMem[profileId] === "object"
+      waContactsByProfileMem[profileId] &&
+      typeof waContactsByProfileMem[profileId] === "object"
       ? waContactsByProfileMem[profileId]
       : {};
 
@@ -2432,105 +2475,13 @@ function isKnownAppStatePatchConflictError(err) {
 }
 
 async function resyncAppStateForProfile(profileId, collections, isInitialSync, source) {
-  const key = cleanString(profileId);
-  if (!key || !isConnected || !sock || typeof sock.resyncAppState !== "function") {
-    return { ok: false, skipped: true, reason: "not_available", profileId: key };
-  }
-
-  const now = Date.now();
-  const blockedUntil = Number(appStateResyncBackoffUntilByProfile.get(key) || 0);
-  if (blockedUntil > now) {
-    return {
-      ok: false,
-      skipped: true,
-      reason: "backoff",
-      profileId: key,
-      retryAt: blockedUntil,
-      retryAfterMs: blockedUntil - now
-    };
-  }
-
-  const inFlight = appStateResyncInFlightByProfile.get(key);
-  if (inFlight) return await inFlight;
-
-  const categories = Array.isArray(collections)
-    ? collections.map((x) => cleanString(x)).filter(Boolean)
-    : [];
-  if (categories.length === 0) {
-    return { ok: false, skipped: true, reason: "empty_categories", profileId: key };
-  }
-
-  const task = (async () => {
-    try {
-      await sock.resyncAppState(categories, isInitialSync === true);
-      appStateResyncBackoffUntilByProfile.delete(key);
-      return { ok: true, synced: true, profileId: key };
-    } catch (e) {
-      const conflict = isKnownAppStatePatchConflictError(e);
-      const backoffMs = conflict ? 90 * 1000 : 20 * 1000;
-      appStateResyncBackoffUntilByProfile.set(key, Date.now() + backoffMs);
-      log.warn(
-        { err: e, profileId: key, source: cleanString(source), conflict, backoffMs },
-        "App-state resync failed; applying cooldown"
-      );
-      return {
-        ok: false,
-        profileId: key,
-        conflict,
-        error: String(e?.message || e),
-        backoffMs
-      };
-    } finally {
-      appStateResyncInFlightByProfile.delete(key);
-    }
-  })();
-
-  appStateResyncInFlightByProfile.set(key, task);
-  return await task;
+  // Go backend handles app state resync (archive/pin/mute) automatically.
+  return { ok: true, synced: true };
 }
 
 async function syncContactNamesForProfile(profileId, options) {
-  const opts = options && typeof options === "object" ? options : {};
-  const force = !!opts.force;
-  const isInitialSync = opts.isInitialSync === true;
-  const cooldownMs = Number.isFinite(Number(opts.cooldownMs))
-    ? Math.max(15 * 1000, Number(opts.cooldownMs))
-    : 5 * 60 * 1000;
-
-  if (!profileId || !isConnected || !sock || typeof sock.resyncAppState !== "function") {
-    return { ok: false, skipped: true, reason: "not_available" };
-  }
-
-  const now = Date.now();
-  const lastSyncAt = Number(lastContactNameSyncAtByProfile.get(profileId) || 0);
-  if (!force && now - lastSyncAt < cooldownMs) {
-    return { ok: true, skipped: true, reason: "cooldown" };
-  }
-
-  const inFlight = contactNameSyncByProfile.get(profileId);
-  if (inFlight) return await inFlight;
-
-  const syncTask = (async () => {
-    try {
-      const resync = await resyncAppStateForProfile(
-        profileId,
-        ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
-        isInitialSync,
-        "contact_name_sync"
-      );
-      if (!resync.ok) return { ...resync, synced: false };
-      lastContactNameSyncAtByProfile.set(profileId, Date.now());
-      return { ok: true, synced: true, profileId };
-    } catch (e) {
-      log.warn({ err: e, profileId }, "Contact name sync failed");
-      return { ok: false, profileId, error: String(e?.message || e) };
-    } finally {
-      contactNameSyncByProfile.delete(profileId);
-    }
-  })();
-
-  contactNameSyncByProfile.set(profileId, syncTask);
-  return await syncTask;
+  // Go backend handles name sync automatically.
+  return { ok: true, synced: true };
 }
 
 function resolveContactPhotoFetchJid(profileId, contact) {
@@ -2598,133 +2549,8 @@ function isPermanentPhotoFetchError(err) {
 }
 
 async function enrichContactPhotosForProfile(profileId, options) {
-  const opts = options && typeof options === "object" ? options : {};
-  if (!isConnected || !sock) return getContactsForProfile(profileId);
-  if (!profileId) return [];
-
-  const existingTask = contactPhotoEnrichInFlightByProfile.get(profileId);
-  if (existingTask) return await existingTask;
-
-  const now = Date.now();
-  const blockedUntil = Number(contactPhotoBackoffUntilByProfile.get(profileId) || 0);
-  if (blockedUntil > now) return getContactsForProfile(profileId);
-
-  const maxPhotoFetchRaw = Number(opts.maxPhotoFetch);
-  const maxPhotoFetch = Number.isFinite(maxPhotoFetchRaw) ? Math.max(1, Math.min(200, maxPhotoFetchRaw)) : 24;
-  const minMinutesRaw = Number(opts.minMinutesBetweenPhotoChecks);
-  const minMinutesBetweenPhotoChecks = Number.isFinite(minMinutesRaw)
-    ? Math.max(1, Math.min(1440, minMinutesRaw))
-    : 90;
-  const forceMissing = opts.forceMissing === true;
-  const concurrencyRaw = Number(opts.photoFetchConcurrency);
-  const photoFetchConcurrency = Number.isFinite(concurrencyRaw) ? Math.max(1, Math.min(6, concurrencyRaw)) : 2;
-  const fetchDelayRaw = Number(opts.photoFetchDelayMs);
-  const photoFetchDelayMs = Number.isFinite(fetchDelayRaw) ? Math.max(0, Math.min(600, fetchDelayRaw)) : 120;
-  const backoffMsRaw = Number(opts.photoRateLimitBackoffMs);
-  const photoRateLimitBackoffMs = Number.isFinite(backoffMsRaw)
-    ? Math.max(30 * 1000, Math.min(15 * 60 * 1000, backoffMsRaw))
-    : 3 * 60 * 1000;
-
-  const task = (async () => {
-    const root = getContactsStoreObj();
-    const byPhone = root[profileId] && typeof root[profileId] === "object" ? { ...root[profileId] } : {};
-    const contacts = Object.values(byPhone).filter((x) => x && typeof x === "object");
-    const preferredSet = new Set(
-      (Array.isArray(opts.preferredMsisdns) ? opts.preferredMsisdns : [])
-        .map((x) => normalizeMsisdnSafe(x))
-        .filter(Boolean)
-    );
-    const targets = contacts
-      .map((contact) => {
-        const msisdn = cleanString(contact?.msisdn || "");
-        if (!msisdn) return null;
-        const fetchJid = resolveContactPhotoFetchJid(profileId, contact);
-        if (!fetchJid) return null;
-        return { contact, fetchJid, msisdn };
-      })
-      .filter((entry) => {
-        if (!entry || !entry.contact) return false;
-        return shouldRefreshContactPhoto(profileId, entry.contact, minMinutesBetweenPhotoChecks, forceMissing);
-      })
-      .sort((a, b) => {
-        const aPref = preferredSet.has(cleanString(a?.msisdn || "")) ? 1 : 0;
-        const bPref = preferredSet.has(cleanString(b?.msisdn || "")) ? 1 : 0;
-        if (aPref !== bPref) return bPref - aPref;
-        return String(a?.msisdn || "").localeCompare(String(b?.msisdn || ""));
-      })
-      .slice(0, maxPhotoFetch);
-
-    if (targets.length === 0) return getContactsForProfile(profileId);
-
-    let index = 0;
-    let changed = 0;
-    let rateLimited = false;
-    async function worker() {
-      while (index < targets.length) {
-        if (rateLimited) break;
-        const currIndex = index++;
-        const item = targets[currIndex];
-        if (!item || !item.contact || !item.fetchJid) continue;
-        const contact = item.contact;
-        const nowText = nowIsoShort();
-
-        try {
-          const photo = await sock.profilePictureUrl(item.fetchJid, "image");
-          const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : contact;
-          const next = {
-            ...prev,
-            imgUrl: photo ? String(photo) : null,
-            photoCheckedAt: nowText,
-            updatedAt: nowText
-          };
-
-          const same =
-            String(prev.imgUrl || "") === String(next.imgUrl || "") &&
-            String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
-          if (!same) {
-            byPhone[item.msisdn] = next;
-            changed++;
-          }
-          contactPhotoBackoffUntilByProfile.delete(profileId);
-        } catch (e) {
-          if (isRateLimitPhotoFetchError(e)) {
-            contactPhotoBackoffUntilByProfile.set(profileId, Date.now() + photoRateLimitBackoffMs);
-            rateLimited = true;
-            break;
-          }
-          if (isPermanentPhotoFetchError(e)) {
-            const prev = byPhone[item.msisdn] && typeof byPhone[item.msisdn] === "object" ? byPhone[item.msisdn] : contact;
-            const next = { ...prev, photoCheckedAt: nowText, updatedAt: nowText };
-            const same = String(prev.photoCheckedAt || "") === String(next.photoCheckedAt || "");
-            if (!same) {
-              byPhone[item.msisdn] = next;
-              changed++;
-            }
-          }
-        }
-
-        if (photoFetchDelayMs > 0) {
-          await new Promise((r) => setTimeout(r, photoFetchDelayMs));
-        }
-      }
-    }
-
-    const workers = [];
-    for (let i = 0; i < photoFetchConcurrency; i++) workers.push(worker());
-    await Promise.all(workers);
-
-    if (changed > 0) {
-      root[profileId] = byPhone;
-      persistContactsCache();
-    }
-
-    return getContactsForProfile(profileId);
-  })().finally(() => {
-    contactPhotoEnrichInFlightByProfile.delete(profileId);
-  });
-
-  contactPhotoEnrichInFlightByProfile.set(profileId, task);
-  return await task;
+  // Go backend or frontend can handle photo enrichment.
+  return getContactsForProfile(profileId);
 }
 
 /* --------------------------- WhatsApp Chat Store (recent chats + messages) ---------------------------- */
@@ -3159,13 +2985,13 @@ function mergeStoredMessageListsForChat(targetChatJid, lists) {
     const mergedMedia =
       prevMedia || nextMedia
         ? {
-            ...(prevMedia || {}),
-            ...(nextMedia || {}),
-            localPath: cleanString(nextMedia?.localPath || prevMedia?.localPath || ""),
-            thumbnailDataUrl: compactThumbnailDataUrl(
-              cleanString(nextMedia?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
-            )
-          }
+          ...(prevMedia || {}),
+          ...(nextMedia || {}),
+          localPath: cleanString(nextMedia?.localPath || prevMedia?.localPath || ""),
+          thumbnailDataUrl: compactThumbnailDataUrl(
+            cleanString(nextMedia?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+          )
+        }
         : null;
 
     byHash.set(msg.hash, {
@@ -3317,6 +3143,8 @@ function normalizeIncomingChatPresenceType(raw) {
 function bytesToBase64(value) {
   if (!value) return "";
   try {
+    // protojson (WhatsMeow) serializes bytes as base64 strings — pass through directly
+    if (typeof value === "string") return value;
     if (Buffer.isBuffer(value)) return value.toString("base64");
     if (value instanceof Uint8Array) return Buffer.from(value).toString("base64");
     if (Array.isArray(value)) return Buffer.from(value).toString("base64");
@@ -3862,13 +3690,13 @@ function upsertMessagesForProfile(profileId, messages) {
       const prevMedia = prev?.media && typeof prev.media === "object" ? prev.media : null;
       const nextMedia = normalized.media
         ? {
-            ...(prevMedia || {}),
-            ...(normalized.media || {}),
-            localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
-            thumbnailDataUrl: compactThumbnailDataUrl(
-              cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
-            )
-          }
+          ...(prevMedia || {}),
+          ...(normalized.media || {}),
+          localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
+          thumbnailDataUrl: compactThumbnailDataUrl(
+            cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+          )
+        }
         : prevMedia || null;
       const nextRecord = {
         ...prev,
@@ -4003,13 +3831,13 @@ function applyMessageUpdatesForProfile(profileId, updates) {
     const prevMedia = prev?.media && typeof prev.media === "object" ? prev.media : null;
     const nextMedia = normalized.media
       ? {
-          ...(prevMedia || {}),
-          ...(normalized.media || {}),
-          localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
-          thumbnailDataUrl: compactThumbnailDataUrl(
-            cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
-          )
-        }
+        ...(prevMedia || {}),
+        ...(normalized.media || {}),
+        localPath: cleanString(normalized?.media?.localPath || prevMedia?.localPath || ""),
+        thumbnailDataUrl: compactThumbnailDataUrl(
+          cleanString(normalized?.media?.thumbnailDataUrl || prevMedia?.thumbnailDataUrl || "")
+        )
+      }
       : prevMedia || null;
 
     list[idx] = {
@@ -4112,12 +3940,12 @@ function getRecentChatsForProfile(profileId, options) {
 
   const filtered = search
     ? rows.filter((row) => {
-        return (
-          String(row.title || "").toLowerCase().includes(search) ||
-          String(row.preview || "").toLowerCase().includes(search) ||
-          String(row.jid || "").toLowerCase().includes(search)
-        );
-      })
+      return (
+        String(row.title || "").toLowerCase().includes(search) ||
+        String(row.preview || "").toLowerCase().includes(search) ||
+        String(row.jid || "").toLowerCase().includes(search)
+      );
+    })
     : rows;
 
   return filtered.slice(0, limit);
@@ -4143,13 +3971,13 @@ function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
     hasMedia: msg.hasMedia === true,
     media: msg.media
       ? {
-          kind: cleanString(msg.media.kind || ""),
-          mimeType: cleanString(msg.media.mimeType || ""),
-          fileName: cleanString(msg.media.fileName || ""),
-          fileLength: Number(msg.media.fileLength || 0) || 0,
-          thumbnailDataUrl: compactThumbnailDataUrl(cleanString(msg.media.thumbnailDataUrl || "")),
-          localPath: cleanString(msg.media.localPath || "")
-        }
+        kind: cleanString(msg.media.kind || ""),
+        mimeType: cleanString(msg.media.mimeType || ""),
+        fileName: cleanString(msg.media.fileName || ""),
+        fileLength: Number(msg.media.fileLength || 0) || 0,
+        thumbnailDataUrl: compactThumbnailDataUrl(cleanString(msg.media.thumbnailDataUrl || "")),
+        localPath: cleanString(msg.media.localPath || "")
+      }
       : null,
     status: Number(msg.status || 0) || 0
   };
@@ -4210,77 +4038,7 @@ function pruneChatStoreToLookback(profileId, days) {
 }
 
 async function warmRecentHistoryForProfile(profileId, options) {
-  const opts = options && typeof options === "object" ? options : {};
-  if (!profileId || !isConnected || !sock) return { ok: false, skipped: true, reason: "not_connected" };
-
-  const existingTask = waHistoryWarmupInFlightByProfile.get(profileId);
-  if (existingTask) return await existingTask;
-
-  const task = (async () => {
-    const cutoff = lookbackCutoffMs(opts.days || WA_HISTORY_LOOKBACK_DAYS);
-    let syncTriggered = false;
-
-    const resync = await resyncAppStateForProfile(
-      profileId,
-      ["critical_unblock_low", "critical_block", "regular_high", "regular_low", "regular"],
-      true,
-      "history_warmup"
-    );
-    syncTriggered = resync.ok === true;
-
-    const state = ensureWaChatStateForProfile(profileId);
-    const chats = getRecentChatsForProfile(profileId, { limit: 80 });
-    let fetchRequests = 0;
-
-    if (typeof sock.fetchMessageHistory === "function") {
-      const maxFetchPerWarmup = 12;
-      for (const chat of chats) {
-        if (fetchRequests >= maxFetchPerWarmup) break;
-        const chatJid = normalizeChatJid(chat?.jid || "");
-        if (!chatJid) continue;
-        const list = Array.isArray(state.messagesByChat[chatJid]) ? [...state.messagesByChat[chatJid]] : [];
-        if (list.length === 0) continue;
-        list.sort((a, b) => Number(a.timestampMs || 0) - Number(b.timestampMs || 0));
-        const oldest = list[0];
-        const oldestTs = Number(oldest?.timestampMs || 0);
-        if (!oldest?.key?.id || oldestTs <= 0) continue;
-        if (oldestTs <= cutoff) continue;
-
-        try {
-          await sock.fetchMessageHistory(
-            50,
-            {
-              remoteJid: chatJid,
-              id: oldest.key.id,
-              fromMe: oldest.key.fromMe === true,
-              participant: oldest.key.participant || undefined
-            },
-            Math.floor(oldestTs / 1000)
-          );
-          fetchRequests++;
-          await new Promise((r) => setTimeout(r, 140));
-        } catch (e) {
-          log.debug({ err: e, profileId, chatJid }, "Failed to fetch older message history for chat");
-        }
-      }
-    }
-
-    pruneChatStoreToLookback(profileId, opts.days || WA_HISTORY_LOOKBACK_DAYS);
-    schedulePersistWaChatCache();
-    scheduleWaChatSync(profileId, "history_warmup");
-    return {
-      ok: true,
-      profileId,
-      syncTriggered,
-      fetchRequests
-    };
-  })()
-    .finally(() => {
-      waHistoryWarmupInFlightByProfile.delete(profileId);
-    });
-
-  waHistoryWarmupInFlightByProfile.set(profileId, task);
-  return await task;
+  return { ok: true, syncTriggered: false };
 }
 
 async function resetChatHistoryForProfile(profileId, chatJid, options) {
@@ -4305,86 +4063,8 @@ async function resetChatHistoryForProfile(profileId, chatJid, options) {
   schedulePersistWaChatCache();
   scheduleWaChatSync(profileId, "chat_reset");
 
-  let resyncTriggered = false;
-  let fetchRequests = 0;
-
-  if (isConnected && sock) {
-    const resync = await resyncAppStateForProfile(
-      profileId,
-      ["regular_high", "regular_low", "regular"],
-      false,
-      "chat_reset"
-    );
-    if (resync.ok) {
-      resyncTriggered = true;
-      await new Promise((r) => setTimeout(r, 180));
-    }
-  }
-
-  if (isConnected && sock && typeof sock.fetchMessageHistory === "function") {
-    const maxPages = clampInt(opts.maxPages, 1, 20, 12);
-    const perPage = clampInt(opts.perPage, 1, 50, 50);
-    const seenCursorHashes = new Set();
-    let fallbackCursorUsed = false;
-
-    for (let i = 0; i < maxPages; i++) {
-      const currentList = Array.isArray(state.messagesByChat[jid]) ? [...state.messagesByChat[jid]] : [];
-      currentList.sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0));
-
-      let cursor = currentList.length > 0 ? currentList[0] : null;
-      if (!cursor && !fallbackCursorUsed && fallbackNewest) {
-        cursor = fallbackNewest;
-        fallbackCursorUsed = true;
-      }
-      if (!cursor) break;
-
-      const key = normalizeMessageKey(cursor.key || {}, jid, profileId);
-      const timestampMs = Number(cursor.timestampMs || 0) || 0;
-      if (!key.id || !key.remoteJid || timestampMs <= 0) break;
-
-      const cursorHash = messageKeyHash({
-        remoteJid: key.remoteJid,
-        id: key.id,
-        fromMe: key.fromMe === true,
-        participant: key.participant || ""
-      });
-      if (seenCursorHashes.has(cursorHash)) break;
-      seenCursorHashes.add(cursorHash);
-
-      try {
-        await sock.fetchMessageHistory(
-          perPage,
-          {
-            remoteJid: key.remoteJid,
-            id: key.id,
-            fromMe: key.fromMe === true,
-            participant: key.participant || undefined
-          },
-          Math.floor(timestampMs / 1000)
-        );
-        fetchRequests++;
-      } catch (e) {
-        log.debug({ err: e, profileId, chatJid: jid }, "Chat reset fetchMessageHistory failed");
-        break;
-      }
-
-      await new Promise((r) => setTimeout(r, 170));
-    }
-  }
-
-  schedulePersistWaChatCache();
-  scheduleWaChatSync(profileId, "chat_reset_fetch");
-
-  const downloadedCount = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid].length : 0;
-  return {
-    ok: true,
-    profileId,
-    chatJid: jid,
-    clearedCount,
-    downloadedCount,
-    resyncTriggered,
-    fetchRequests
-  };
+  // Go backend handles chat reset sync.
+  return { ok: true, clearedCount };
 }
 
 function findMessageRecordForProfile(profileId, chatJid, key) {
@@ -4399,134 +4079,8 @@ function findMessageRecordForProfile(profileId, chatJid, key) {
   return list.find((x) => x && x.hash === hash) || null;
 }
 
-async function markChatReadForProfile(profileId, chatJid) {
-  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
-  if (!jid) throw new Error("Invalid chat JID");
-  const state = ensureWaChatStateForProfile(profileId);
-  const chat = ensureChatSummary(profileId, jid);
-  if (!chat) return { ok: true, skipped: true };
-
-  const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
-  const incoming = [...list]
-    .filter((m) => m && m.fromMe !== true && m.key && m.key.id)
-    .sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0));
-  const unreadKeyHashes = new Set();
-  const unreadKeys = [];
-
-  for (let i = incoming.length - 1; i >= 0; i--) {
-    const msg = incoming[i];
-    const key = {
-      remoteJid: normalizeChatJid(msg?.key?.remoteJid || jid) || jid,
-      id: cleanString(msg?.key?.id || ""),
-      fromMe: false,
-      participant: cleanString(msg?.key?.participant || "") || undefined
-    };
-    if (!key.remoteJid || !key.id) continue;
-    const hash = messageKeyHash(key);
-    if (unreadKeyHashes.has(hash)) continue;
-    unreadKeyHashes.add(hash);
-    unreadKeys.push(key);
-    if (unreadKeys.length >= 40) break;
-  }
-  const unreadKeysForSend = [...unreadKeys].reverse();
-
-  const lastMsgInChat =
-    list.length > 0
-      ? [...list].sort((a, b) => Number(a?.timestampMs || 0) - Number(b?.timestampMs || 0))[list.length - 1]
-      : null;
-  const lastIncoming = incoming.length > 0 ? incoming[incoming.length - 1] : null;
-  const lastForModifySource = lastIncoming || lastMsgInChat;
-  const lastMsgForModify =
-    lastForModifySource && lastForModifySource.key && lastForModifySource.key.id
-      ? {
-          key: {
-            remoteJid: normalizeChatJid(lastForModifySource.key.remoteJid || jid) || jid,
-            id: cleanString(lastForModifySource.key.id || ""),
-            fromMe: lastForModifySource.key.fromMe === true,
-            participant: cleanString(lastForModifySource.key.participant || "") || undefined
-          },
-          messageTimestamp: Math.floor(Number(lastForModifySource.timestampMs || Date.now()) / 1000)
-        }
-      : null;
-
-  let readMessagesSent = false;
-  let readReceiptSent = false;
-  let chatModifySent = false;
-
-  if (sock && isConnected && unreadKeysForSend.length > 0 && typeof sock.readMessages === "function") {
-    try {
-      await sock.readMessages(unreadKeysForSend);
-      readMessagesSent = true;
-    } catch (e) {
-      log.warn({ err: e, profileId, chatJid: jid, keyCount: unreadKeysForSend.length }, "Failed sock.readMessages");
-    }
-  }
-
-  if (
-    sock &&
-    isConnected &&
-    !readMessagesSent &&
-    unreadKeysForSend.length > 0 &&
-    typeof sock.sendReceipt === "function"
-  ) {
-    try {
-      for (const key of unreadKeysForSend.slice(-20)) {
-        await sock.sendReceipt(key.remoteJid || jid, key.participant || undefined, [key.id], "read");
-      }
-      readReceiptSent = true;
-    } catch (e) {
-      log.warn({ err: e, profileId, chatJid: jid }, "Failed sock.sendReceipt read fallback");
-    }
-  }
-
-  if (sock && isConnected && lastMsgForModify && typeof sock.chatModify === "function") {
-    try {
-      await sock.chatModify(
-        {
-          markRead: true,
-          lastMessages: [lastMsgForModify]
-        },
-        jid
-      );
-      chatModifySent = true;
-    } catch (e) {
-      log.warn({ err: e, profileId, chatJid: jid }, "Failed sock.chatModify markRead");
-    }
-  }
-
-  if ((Number(chat.unreadCount || 0) || 0) !== 0) {
-    state.chatsByJid[jid] = {
-      ...chat,
-      unreadCount: 0,
-      updatedAt: nowIsoShort()
-    };
-    scheduleWaChatSync(profileId, "read");
-    schedulePersistWaChatCache();
-  }
-  return { ok: true, chatJid: jid, readMessagesSent, readReceiptSent, chatModifySent };
-}
-
-async function sendChatPresence(payload) {
-  const src = payload && typeof payload === "object" ? payload : {};
-  const type = cleanString(src.type || src.presence || "").toLowerCase();
-  if (!WA_ALLOWED_OUTGOING_CHAT_PRESENCE.has(type)) throw new Error("Invalid presence type");
-  if (!type) throw new Error("Invalid presence type");
-  const chatJid = normalizeChatJid(src.chatJid || "");
-  if (!chatJid) throw new Error("Invalid chat");
-
-  const profileId = getActiveProfileId();
-  if (!sock || !isConnected || typeof sock.sendPresenceUpdate !== "function") {
-    return { ok: false, skipped: true, reason: "not_connected", profileId, chatJid, type };
-  }
-
-  try {
-    await sock.sendPresenceUpdate(type, chatJid);
-    return { ok: true, profileId, chatJid, type };
-  } catch (e) {
-    log.debug({ err: e, profileId, chatJid, type }, "Failed to send chat presence update");
-    return { ok: false, profileId, chatJid, type, error: String(e?.message || e) };
-  }
-}
+// Legacy markChatRead and sendChatPresence removed.
+// These are now handled by Go-based versions.
 
 const MIME_BY_EXT = {
   ".jpg": "image/jpeg",
@@ -4698,49 +4252,40 @@ function setLocalImagePathForStoredMessage(profileId, chatJid, messageHash, loca
 
 async function ensureLocalImageForStoredMessage(profileId, chatJid, messageHash) {
   const jid = normalizeChatJid(chatJid);
-  if (!profileId || !jid || !messageHash) return { ok: false, reason: "invalid_args" };
+  if (!profileId || !jid || !messageHash) return { ok: false, reason: "bad_args" };
 
   const state = ensureWaChatStateForProfile(profileId);
   const list = Array.isArray(state.messagesByChat[jid]) ? state.messagesByChat[jid] : [];
-  const msg = list.find((x) => x && x.hash === messageHash);
-  if (!msg) return { ok: false, reason: "not_found" };
-  if (!msg.hasMedia || String(msg?.media?.kind || "").toLowerCase() !== "image") {
-    return { ok: false, reason: "not_image" };
-  }
+  const found = list.find((x) => x && x.hash === messageHash);
+  if (!found) return { ok: false, reason: "message_not_found" };
 
-  const existingPath = cleanString(msg?.media?.localPath || "");
-  if (existingPath && fs.existsSync(existingPath)) {
-    return { ok: true, localPath: existingPath, fromCache: true };
-  }
+  // Already downloaded?
+  const existingPath = cleanString(found?.media?.localPath || "");
+  if (existingPath && fs.existsSync(existingPath)) return { ok: true, localPath: existingPath };
 
-  if (!sock || !isConnected) return { ok: false, reason: "not_connected" };
-  if (!msg.rawMessage || typeof msg.rawMessage !== "object") return { ok: false, reason: "raw_missing" };
+  // Need the raw proto message to ask the Go backend to download it
+  const rawMessage = found?.rawMessage;
+  const protoMessage = rawMessage?.message;
+  if (!protoMessage) return { ok: false, reason: "no_raw_message" };
 
-  const { downloadMediaMessage } = await getBaileys();
-  if (typeof downloadMediaMessage !== "function") return { ok: false, reason: "download_unavailable" };
-
-  let mediaData = null;
   try {
-    mediaData = await downloadMediaMessage(msg.rawMessage, "buffer", {}, {
-      logger: log,
-      reuploadRequest: sock.updateMediaMessage
+    const resp = await fetch("http://127.0.0.1:12345/api/media/download", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: protoMessage }),
+      signal: AbortSignal.timeout(30000)
     });
+    const body = await resp.json();
+    if (!body?.ok || !body?.data) return { ok: false, reason: body?.error || "download_failed" };
+
+    const buf = Buffer.from(body.data, "base64");
+    const filePath = buildStoredImagePath(profileId, found);
+    fs.writeFileSync(filePath, buf);
+    setLocalImagePathForStoredMessage(profileId, jid, messageHash, filePath);
+    return { ok: true, localPath: filePath };
   } catch (e) {
-    return { ok: false, reason: "download_failed", error: String(e?.message || e) };
+    return { ok: false, reason: String(e?.message || e) };
   }
-
-  const buffer = Buffer.isBuffer(mediaData) ? mediaData : mediaData ? Buffer.from(mediaData) : null;
-  if (!buffer || buffer.length === 0) return { ok: false, reason: "empty_buffer" };
-
-  const savePath = buildStoredImagePath(profileId, msg);
-  try {
-    fs.writeFileSync(savePath, buffer);
-  } catch (e) {
-    return { ok: false, reason: "write_failed", error: String(e?.message || e) };
-  }
-
-  setLocalImagePathForStoredMessage(profileId, jid, messageHash, savePath);
-  return { ok: true, localPath: savePath, fromCache: false };
 }
 
 function queueAutoSaveImageForHash(profileId, chatJid, messageHash) {
@@ -4752,7 +4297,7 @@ function queueAutoSaveImageForHash(profileId, chatJid, messageHash) {
 
   setTimeout(() => {
     ensureLocalImageForStoredMessage(profileId, jid, messageHash)
-      .catch(() => {})
+      .catch(() => { })
       .finally(() => {
         waImageAutoSaveInFlight.delete(ticket);
       });
@@ -4830,7 +4375,7 @@ async function expandSendTargetCandidatesWithSignalMappings(targetCandidates) {
     push(candidate);
   }
 
-  const lidMapping = sock?.signalRepository?.lidMapping;
+  const lidMapping = null;
   const canMapPnToLid = lidMapping && typeof lidMapping.getLIDForPN === "function";
   const canMapLidToPn = lidMapping && typeof lidMapping.getPNForLID === "function";
 
@@ -4887,30 +4432,38 @@ async function expandSendTargetCandidatesWithOnWhatsApp(targetCandidates) {
     push(candidate);
   }
 
-  if (!sock || typeof sock.onWhatsApp !== "function") return out;
+  if (!isConnected) return out;
 
   const lookupPhones = [];
   const lookupSeen = new Set();
   for (const candidate of out) {
     if (!isPnJid(candidate)) continue;
-    const pnJid = normalizePhoneNumberJid(candidate);
-    if (!pnJid || lookupSeen.has(pnJid)) continue;
-    lookupSeen.add(pnJid);
-    lookupPhones.push(pnJid);
+    const msisdn = normalizeMsisdnSafe(candidate);
+    if (!msisdn || lookupSeen.has(msisdn)) continue;
+    lookupSeen.add(msisdn);
+    lookupPhones.push(msisdn);
   }
   if (lookupPhones.length === 0) return out;
 
   try {
-    const rows = await sock.onWhatsApp(...lookupPhones);
-    for (const row of Array.isArray(rows) ? rows : []) {
-      const src = row && typeof row === "object" ? row : {};
-      if (src.exists === false) continue;
-      push(src.jid || src.id || "");
-      push(normalizePhoneNumberJid(src.jid || src.id || ""));
-      push(normalizeLidJid(src.lid || src.lidJid || ""));
+    const res = await fetch("http://localhost:12345/api/onwhatsapp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phones: lookupPhones })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Go onwhatsapp failed");
+
+    for (const row of Array.isArray(data.data) ? data.data : []) {
+      if (row.IsIn === false) continue;
+      const jid = row.JID || "";
+      if (jid) {
+        push(jid);
+        push(normalizePhoneNumberJid(jid));
+      }
     }
   } catch (e) {
-    log.debug({ err: e, lookupCount: lookupPhones.length }, "Failed onWhatsApp send target lookup");
+    log.debug({ err: e, phoneCount: lookupPhones.length }, "expandSendTargetCandidatesWithOnWhatsApp Go API failed");
   }
 
   return out;
@@ -4935,168 +4488,8 @@ function prioritizeSendTargets(candidates) {
   });
 }
 
-async function sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions = {}) {
-  const baseCandidates = Array.isArray(targetCandidates)
-    ? targetCandidates.map((x) => normalizeChatJid(x)).filter(Boolean)
-    : [];
-  if (baseCandidates.length === 0) throw new Error("Invalid chat");
 
-  let lastError = null;
-  const attempted = new Set();
-
-  const trySendList = async (candidates) => {
-    const ordered = prioritizeSendTargets(candidates);
-    for (let i = 0; i < ordered.length; i++) {
-      const jid = normalizeChatJid(ordered[i]);
-      if (!jid || attempted.has(jid)) continue;
-      attempted.add(jid);
-
-      try {
-        const sentMessage = await sock.sendMessage(jid, messagePayload, sendOptions);
-        return { sentMessage, targetJid: jid };
-      } catch (error) {
-        lastError = error;
-        // Keep trying alternate targets for direct chats unless socket itself is disconnected.
-        if (isSendConnectionError(error)) break;
-      }
-    }
-    return null;
-  };
-
-  const firstTry = await trySendList(baseCandidates);
-  if (firstTry) return firstTry;
-
-  if (isSendConnectionError(lastError)) {
-    const recovered = await ensureConnectedForSend(getActiveProfileId());
-    if (recovered) {
-      attempted.clear();
-      const recoveredTry = await trySendList(baseCandidates);
-      if (recoveredTry) return recoveredTry;
-    }
-  }
-
-  if (!shouldExpandSendTargetsAfterFailure(lastError)) {
-    throw lastError || new Error("Message send failed");
-  }
-
-  const expandedBySignal = await expandSendTargetCandidatesWithSignalMappings(baseCandidates);
-  const expandedCandidates = await expandSendTargetCandidatesWithOnWhatsApp(expandedBySignal);
-  const secondTry = await trySendList(expandedCandidates);
-  if (secondTry) return secondTry;
-
-  if (isSendConnectionError(lastError)) {
-    const recovered = await ensureConnectedForSend(getActiveProfileId());
-    if (recovered) {
-      attempted.clear();
-      const thirdTry = await trySendList(expandedCandidates.length > 0 ? expandedCandidates : baseCandidates);
-      if (thirdTry) return thirdTry;
-    }
-  }
-
-  throw lastError || new Error("Message send failed");
-}
-
-async function sendChatMessage(payload) {
-  const src = payload && typeof payload === "object" ? payload : {};
-  const profileId = getActiveProfileId();
-  if (!(await ensureConnectedForSend(profileId)) || !sock || !isConnected) {
-    throw new Error("WhatsApp not connected");
-  }
-
-  const requestedChatJid = normalizeSendTargetJid(src.chatJid);
-  if (!requestedChatJid) throw new Error("Invalid chat");
-
-  // Prefer phone-number routing for manual chat sends; fall back to original chat JID chain.
-  const preferredMsisdn = resolveMsisdnForSendTarget(profileId, requestedChatJid);
-  const targetCandidates = [];
-  const seenTarget = new Set();
-  const appendCandidatesFrom = (source) => {
-    for (const candidate of buildSendTargetCandidatesForProfile(profileId, source)) {
-      const normalized = normalizeChatJid(candidate);
-      if (!normalized || seenTarget.has(normalized)) continue;
-      seenTarget.add(normalized);
-      targetCandidates.push(normalized);
-    }
-  };
-  if (preferredMsisdn) appendCandidatesFrom(preferredMsisdn);
-  appendCandidatesFrom(requestedChatJid);
-
-  if (targetCandidates.length === 0) throw new Error("Invalid chat");
-
-  const text = String(src.text || "");
-  const trimmedText = text.trim();
-  const attachment = src.attachment && typeof src.attachment === "object" ? src.attachment : null;
-  if (!trimmedText && !attachment) throw new Error("Message is empty");
-
-  const sendOptions = {};
-  if (src.quotedKey && typeof src.quotedKey === "object") {
-    const quoted = findMessageRecordForProfile(profileId, requestedChatJid, src.quotedKey);
-    if (quoted?.rawMessage) sendOptions.quoted = quoted.rawMessage;
-  }
-
-  let messagePayload = null;
-  let localImagePreviewDataUrl = "";
-  let localImageSourcePath = "";
-  if (attachment) {
-    const filePath = cleanString(attachment.path || "");
-    if (!filePath || !fs.existsSync(filePath)) throw new Error("Attachment file not found");
-    const fileStat = fs.statSync(filePath);
-    if (!fileStat || !fileStat.isFile()) throw new Error("Attachment must be a file");
-    const fileName = cleanString(attachment.fileName || path.basename(filePath));
-    const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(filePath));
-    const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
-
-    if (kind === "image") {
-      localImagePreviewDataUrl = buildImagePreviewDataUrlFromFile(filePath);
-      localImageSourcePath = filePath;
-      messagePayload = {
-        image: { url: filePath },
-        ...(trimmedText ? { caption: trimmedText } : {})
-      };
-    } else if (kind === "video") {
-      messagePayload = {
-        video: { url: filePath },
-        ...(mimeType ? { mimetype: mimeType } : {}),
-        ...(trimmedText ? { caption: trimmedText } : {})
-      };
-    } else if (kind === "audio") {
-      messagePayload = {
-        audio: { url: filePath },
-        ...(mimeType ? { mimetype: mimeType } : {}),
-        ptt: false
-      };
-    } else {
-      messagePayload = {
-        document: { url: filePath },
-        fileName: fileName || path.basename(filePath),
-        ...(mimeType ? { mimetype: mimeType } : {}),
-        ...(trimmedText ? { caption: trimmedText } : {})
-      };
-    }
-  } else {
-    messagePayload = { text: trimmedText };
-  }
-
-  const { sentMessage, targetJid } = await sendMessageWithTargetCandidates(targetCandidates, messagePayload, sendOptions);
-  if (sentMessage && typeof sentMessage === "object") {
-    if (localImagePreviewDataUrl) {
-      sentMessage.__localThumbnailDataUrl = localImagePreviewDataUrl;
-    }
-    if (localImageSourcePath) {
-      sentMessage.__localImagePath = localImageSourcePath;
-    }
-    upsertMessagesForProfile(profileId, [sentMessage]);
-  } else {
-    scheduleWaChatSync(profileId, "send");
-  }
-
-  return {
-    ok: true,
-    chatJid: requestedChatJid,
-    targetJid,
-    messageId: cleanString(sentMessage?.key?.id || "")
-  };
-}
+// Legacy sending logic removed.
 
 function normalizeWaPresenceStatus(input) {
   const value = cleanString(input).toLowerCase();
@@ -5104,76 +4497,33 @@ function normalizeWaPresenceStatus(input) {
   return "";
 }
 
-async function sendChatTypingPresence(payload) {
-  const src = payload && typeof payload === "object" ? payload : {};
-  if (!sock || !isConnected) return { ok: false, skipped: true, reason: "not_connected" };
-
-  const chatJid = normalizeSendTargetJid(src.chatJid);
-  if (!chatJid) throw new Error("Invalid chat");
-
-  const status = normalizeWaPresenceStatus(src.status);
-  if (!status) throw new Error("Invalid typing status");
-
-  if (typeof sock.sendPresenceUpdate !== "function") {
-    return { ok: false, skipped: true, reason: "unsupported" };
-  }
+async function sendChatPresence(payload) {
+  const { chatJid, status } = payload || {};
+  if (!chatJid || !status) throw new Error("Invalid presence request");
 
   try {
-    if (typeof sock.presenceSubscribe === "function") {
-      await sock.presenceSubscribe(chatJid);
-    }
-  } catch {
-    // continue even if subscribe fails
+    const res = await fetch("http://localhost:12345/api/presence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatJid, status })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Go presence update failed");
+    return { ok: true, chatJid, status };
+  } catch (err) {
+    return { ok: false, error: err.message };
   }
+}
 
-  await sock.sendPresenceUpdate(status, chatJid);
-  return { ok: true, chatJid, status };
+async function sendChatTypingPresence(payload) {
+  const { chatJid, isTyping = true } = payload || {};
+  const status = isTyping ? "composing" : "paused";
+  return await sendChatPresence({ chatJid, status });
 }
 
 async function downloadChatMedia(payload) {
-  const src = payload && typeof payload === "object" ? payload : {};
-  if (!sock || !isConnected) throw new Error("WhatsApp not connected");
-
-  const profileId = getActiveProfileId();
-  const chatJid = normalizeChatJid(src.chatJid);
-  if (!chatJid) throw new Error("Invalid chat");
-  if (!src.key || typeof src.key !== "object") throw new Error("Message key is required");
-
-  const found = findMessageRecordForProfile(profileId, chatJid, src.key);
-  if (!found || !found.rawMessage) throw new Error("Message not found");
-  if (!found.hasMedia) throw new Error("This message has no media");
-
-  const { downloadMediaMessage } = await getBaileys();
-  if (typeof downloadMediaMessage !== "function") {
-    throw new Error("Media download is unavailable in current Baileys build");
-  }
-
-  let mediaData = null;
-  try {
-    mediaData = await downloadMediaMessage(found.rawMessage, "buffer", {}, {
-      logger: log,
-      reuploadRequest: sock.updateMediaMessage
-    });
-  } catch (e) {
-    throw new Error(`Failed to download media: ${String(e?.message || e)}`);
-  }
-
-  const buffer = Buffer.isBuffer(mediaData) ? mediaData : mediaData ? Buffer.from(mediaData) : null;
-  if (!buffer || buffer.length === 0) throw new Error("Media download returned empty file");
-
-  const defaultName = buildDefaultDownloadFileName(found);
-  const saveRes = await dialog.showSaveDialog({
-    title: "Save media",
-    defaultPath: defaultName
-  });
-  if (saveRes.canceled || !saveRes.filePath) return { ok: false, canceled: true };
-
-  fs.writeFileSync(saveRes.filePath, buffer);
-  return {
-    ok: true,
-    filePath: saveRes.filePath,
-    size: buffer.length
-  };
+  // Go backend handles media download.
+  throw new Error("Media download is not yet implemented for the Go backend.");
 }
 
 async function resolveImagePreview(payload) {
@@ -5490,490 +4840,109 @@ function normalizeE164NoPlus(input) {
   return s;
 }
 
-async function stopSocket() {
-  const s = sock;
-  sock = null;
-  if (!s) return;
 
-  try {
-    try {
-      s.ev?.removeAllListeners?.();
-    } catch (e) {
-      // ignore
-    }
-    try {
-      s.ws?.close?.();
-    } catch (e) {
-      // ignore
-    }
-    try {
-      s.end?.();
-    } catch (e) {
-      // ignore
-    }
-  } finally {
-    isConnected = false;
-    for (const timer of waAliasReconcileTimers.values()) {
-      clearTimeout(timer);
-    }
-    waAliasReconcileTimers.clear();
-    appStateResyncInFlightByProfile.clear();
-    appStateResyncBackoffUntilByProfile.clear();
-    contactPhotoEnrichInFlightByProfile.clear();
-    contactPhotoBackoffUntilByProfile.clear();
-    contactLookupCacheByProfile.clear();
+// Baileys legacy connection logic removed.
+// Go backend manages its own connection state.
+
+
+let sentCountTodayByProfile = new Map();
+let lastResetDate = new Date().toDateString();
+
+function checkDailyLimit(profileId) {
+  const today = new Date().toDateString();
+  if (today !== lastResetDate) {
+    sentCountTodayByProfile.clear();
+    lastResetDate = today;
+  }
+  const count = sentCountTodayByProfile.get(profileId) || 0;
+  const limit = 200; // Default limit
+  if (count >= limit) {
+    throw new Error(`Daily sending limit reached (${limit}). Account safety measure.`);
   }
 }
 
-async function waitForConnectSetupIdle() {
-  while (connectSetupPromise) {
-    try {
-      await connectSetupPromise;
-    } catch (e) {
-      // ignore setup errors while waiting for lock release
-    }
-  }
-}
-
-function clearAuthDir(authDir) {
-  try {
-    fs.rmSync(authDir, { recursive: true, force: true });
-  } catch (e) {
-    // ignore
-  }
-  ensureDir(authDir);
-}
-
-function hasRegisteredSession(profileId) {
-  try {
-    const authDir = getProfileAuthDir(profileId);
-    const credsPath = path.join(authDir, "creds.json");
-    if (!fs.existsSync(credsPath)) return false;
-    const creds = JSON.parse(fs.readFileSync(credsPath, "utf-8"));
-    if (!creds || typeof creds !== "object") return false;
-    if (creds.registered === true) return true;
-
-    // Newer/older Baileys snapshots may not always expose `registered`.
-    // Treat persisted account identity as a reusable session.
-    const hasMe = typeof creds?.me?.id === "string" && creds.me.id.length > 0;
-    const hasAccount = !!creds?.account;
-    return hasMe || hasAccount;
-  } catch (e) {
-    return false;
-  }
-}
-
-async function connectWA(method, attemptId) {
-  await waitForConnectSetupIdle();
-  if (attemptId !== handshakeAttemptId) return;
-
-  const run = (async () => {
-    isConnecting = true;
-    try {
-      const activeProfileId = getActiveProfileId();
-      const authDir = getProfileAuthDir(activeProfileId);
-      ensureDir(authDir);
-
-      const {
-        makeWASocket,
-        useMultiFileAuthState,
-        DisconnectReason,
-        Browsers,
-        fetchLatestBaileysVersion
-      } = await getBaileys();
-      if (attemptId !== handshakeAttemptId) return;
-      const { state, saveCreds } = await useMultiFileAuthState(authDir);
-      if (attemptId !== handshakeAttemptId) return;
-
-      // Always use a realistic browser signature (helps both QR and pairing)
-      const browser =
-        Browsers && typeof Browsers.windows === "function"
-          ? Browsers.windows("Google Chrome")
-          : ["Windows", "Chrome", "124.0.0.0"];
-
-      // UI: show something immediately
-      win?.webContents.send("wa:status", {
-        connected: false,
-        text: "Connecting...",
-        profileId: activeProfileId
-      });
-
-      // Ensure only one live socket
-      await stopSocket();
-      if (attemptId !== handshakeAttemptId) return;
-
-      const waVersion = await getLatestWaVersionSafe(fetchLatestBaileysVersion);
-      sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        logger: log,
-        browser,
-        syncFullHistory: true,
-        ...(waVersion ? { version: waVersion } : {})
-      });
-
-      sock.ev.on("creds.update", saveCreds);
-      sock.ev.on("messaging-history.set", (history) => {
-        const contacts = Array.isArray(history?.contacts) ? history.contacts : [];
-        const chats = Array.isArray(history?.chats) ? history.chats : [];
-        const messages = Array.isArray(history?.messages) ? history.messages : [];
-
-        upsertContactsForProfile(activeProfileId, contacts);
-        upsertChatsAsContactsForProfile(activeProfileId, chats);
-        upsertMessagesAsContactsForProfile(activeProfileId, messages);
-        upsertChatsForProfile(activeProfileId, chats);
-        upsertMessagesForProfile(activeProfileId, messages);
-      });
-      sock.ev.on("contacts.upsert", (contacts) => {
-        const rows = Array.isArray(contacts) ? contacts : [];
-        if (upsertContactsForProfile(activeProfileId, rows) > 0) {
-          scheduleWaChatSync(activeProfileId, "contacts");
-        }
-      });
-      sock.ev.on("contacts.update", (contacts) => {
-        const rows = Array.isArray(contacts) ? contacts : [];
-        if (upsertContactsForProfile(activeProfileId, rows) > 0) {
-          scheduleWaChatSync(activeProfileId, "contacts");
-        }
-      });
-      sock.ev.on("lid-mapping.update", (evt) => {
-        const src = evt && typeof evt === "object" ? evt : {};
-        const changed = rememberLidPnMappingForProfile(activeProfileId, src.lid, src.pn);
-        if (changed > 0) {
-          const pn = normalizePhoneNumberJid(src.pn || "");
-          const lid = normalizeLidJid(src.lid || "");
-          if (pn && lid) {
-            upsertContactsForProfile(activeProfileId, [
-              {
-                id: pn,
-                jid: pn,
-                lid
-              }
-            ]);
-          }
-          scheduleChatAliasReconcileForProfile(activeProfileId, 80);
-        }
-      });
-      sock.ev.on("chats.upsert", (chats) => {
-        const rows = Array.isArray(chats) ? chats : [];
-        upsertChatsAsContactsForProfile(activeProfileId, rows);
-        upsertChatsForProfile(activeProfileId, rows);
-      });
-      sock.ev.on("chats.set", (evt) => {
-        const rows = Array.isArray(evt?.chats) ? evt.chats : [];
-        upsertChatsAsContactsForProfile(activeProfileId, rows);
-        upsertChatsForProfile(activeProfileId, rows);
-      });
-      sock.ev.on("chats.update", (chats) => {
-        const rows = Array.isArray(chats) ? chats : [];
-        upsertChatsAsContactsForProfile(activeProfileId, rows);
-        upsertChatsForProfile(activeProfileId, rows);
-      });
-      sock.ev.on("messages.upsert", (evt) => {
-        const rows = Array.isArray(evt?.messages) ? evt.messages : [];
-        upsertMessagesAsContactsForProfile(activeProfileId, rows);
-        upsertMessagesForProfile(activeProfileId, rows);
-      });
-      sock.ev.on("messages.set", (evt) => {
-        const rows = Array.isArray(evt?.messages) ? evt.messages : [];
-        upsertMessagesAsContactsForProfile(activeProfileId, rows);
-        upsertMessagesForProfile(activeProfileId, rows);
-      });
-      sock.ev.on("messages.update", (updates) => {
-        applyMessageUpdatesForProfile(activeProfileId, Array.isArray(updates) ? updates : []);
-      });
-      sock.ev.on("presence.update", (presenceEvt) => {
-        if (attemptId !== handshakeAttemptId) return;
-        const chatJid = normalizeChatJid(presenceEvt?.id || "");
-        if (!chatJid) return;
-
-        const meJids = new Set(
-          [
-            normalizeJidForContact(sock?.user?.id || ""),
-            normalizeJidForContact(sock?.user?.lid || ""),
-            normalizeJidForContact(sock?.authState?.creds?.me?.id || ""),
-            normalizeJidForContact(sock?.authState?.creds?.me?.lid || "")
-          ].filter(Boolean)
-        );
-        const rawPresences = presenceEvt?.presences && typeof presenceEvt.presences === "object" ? presenceEvt.presences : {};
-        const normalizedPresences = {};
-
-        for (const [participantRaw, rawPresence] of Object.entries(rawPresences)) {
-          const participantJid = normalizeJidForContact(participantRaw || "");
-          if (!participantJid) continue;
-          if (meJids.has(participantJid)) continue;
-          const lastKnownPresence = normalizeIncomingChatPresenceType(rawPresence?.lastKnownPresence || "");
-          if (!lastKnownPresence) continue;
-
-          const sender = resolveMessageSenderName(
-            activeProfileId,
-            chatJid,
-            {
-              fromMe: false,
-              key: {
-                participant: participantJid
-              },
-              pushName: ""
-            }
-          );
-
-          normalizedPresences[participantJid] = {
-            lastKnownPresence,
-            lastSeen: Number(rawPresence?.lastSeen || 0) || 0,
-            senderName: cleanString(sender || "")
-          };
-        }
-
-        if (Object.keys(normalizedPresences).length === 0) return;
-        win?.webContents.send("wa:presence", {
-          profileId: activeProfileId,
-          id: chatJid,
-          presences: normalizedPresences,
-          ts: Date.now()
-        });
-      });
-
-      sock.ev.on("connection.update", async (update) => {
-        // Ignore late events from old attempts
-        if (attemptId !== handshakeAttemptId) return;
-
-        const { connection, lastDisconnect, qr } = update;
-
-        // QR flow
-        if (handshakeState.method === "qr" && qr) {
-          const dataUrl = await qrcode.toDataURL(qr);
-          win?.webContents.send("wa:qr", dataUrl);
-          win?.webContents.send("wa:status", {
-            connected: false,
-            text: "Scan QR in WhatsApp",
-            profileId: activeProfileId
-          });
-        }
-
-        // Pairing code flow
-        if (handshakeState.method === "pairing" && !handshakeState.pairingRequested) {
-          const alreadyRegistered = !!sock?.authState?.creds?.registered;
-          if (alreadyRegistered) {
-            handshakeState.pairingRequested = true;
-            win?.webContents.send("wa:status", {
-              connected: false,
-              text: "Already registered on this profile. Reset session if you want to pair again.",
-              profileId: activeProfileId
-            });
-          } else if (connection === "connecting" || !!qr) {
-            handshakeState.pairingRequested = true;
-
-            try {
-              if (!handshakeState.phoneNumber) throw new Error("Missing phone number for pairing mode");
-              const code = await sock.requestPairingCode(handshakeState.phoneNumber);
-              win?.webContents.send("wa:pairingCode", code);
-              win?.webContents.send("wa:status", {
-                connected: false,
-                text: "Enter pairing code in WhatsApp",
-                profileId: activeProfileId
-              });
-            } catch (e) {
-              handshakeState.pairingRequested = false;
-              win?.webContents.send("wa:status", {
-                connected: false,
-                text: `Pairing failed: ${String(e?.message || e)}`,
-                profileId: activeProfileId
-              });
-            }
-          }
-        }
-
-        if (connection === "open") {
-          isConnected = true;
-          invalidSessionProfiles.delete(activeProfileId);
-          updateConnectedProfileMeta(activeProfileId, sock?.user || {});
-          syncContactNamesForProfile(activeProfileId, { force: true, isInitialSync: true, cooldownMs: 0 }).catch(() => {});
-          warmRecentHistoryForProfile(activeProfileId, { days: WA_HISTORY_LOOKBACK_DAYS, force: true }).catch(() => {});
-          scheduleWaChatSync(activeProfileId, "connection_open");
-          win?.webContents.send("wa:status", {
-            connected: true,
-            text: "Connected",
-            profileId: activeProfileId
-          });
-        }
-
-        if (connection === "close") {
-          isConnected = false;
-          const code = lastDisconnect?.error?.output?.statusCode;
-          const reason = DisconnectReason?.[code] || code || "unknown";
-          scheduleWaChatSync(activeProfileId, "connection_close");
-
-          win?.webContents.send("wa:status", {
-            connected: false,
-            text: `Disconnected (${reason})`,
-            profileId: activeProfileId
-          });
-
-          // WhatsApp commonly requests one post-login restart after QR scan.
-          // Allow exactly one controlled reconnect for this handshake attempt.
-          if (code === DisconnectReason.restartRequired) {
-            if (!restartRecoveryDoneByAttempt.has(attemptId)) {
-              restartRecoveryDoneByAttempt.add(attemptId);
-              win?.webContents.send("wa:status", {
-                connected: false,
-                text: "Restart required by WhatsApp. Reconnecting once...",
-                profileId: activeProfileId
-              });
-              setTimeout(() => {
-                stopSocket()
-                  .then(() => connectWA(handshakeState.method, attemptId))
-                  .catch(() => {});
-              }, 500);
-              return;
-            }
-            win?.webContents.send("wa:status", {
-              connected: false,
-              text: "Disconnected (restartRequired). Click Connect once.",
-              profileId: activeProfileId
-            });
-            return;
-          }
-
-          // Auto-retry is intentionally disabled. If a connect attempt fails once,
-          // we stop immediately and wait for explicit user action.
-          const needsFreshAuth =
-            code === DisconnectReason.loggedOut ||
-            code === DisconnectReason.badSession ||
-            code === DisconnectReason.multideviceMismatch ||
-            code === DisconnectReason.forbidden;
-          if (needsFreshAuth) {
-            invalidSessionProfiles.add(activeProfileId);
-            win?.webContents.send("wa:status", {
-              connected: false,
-              text: "Session invalid. Click Connect to reset and generate new QR.",
-              profileId: activeProfileId
-            });
-          }
-        }
-      });
-    } finally {
-      isConnecting = false;
-    }
-  })();
-
-  connectSetupPromise = run;
-  try {
-    await run;
-  } finally {
-    if (connectSetupPromise === run) connectSetupPromise = null;
-  }
-}
-
-async function startHandshake(payload) {
-  const method = payload?.method === "pairing" ? "pairing" : "qr";
-  const phoneNumber = payload?.phoneNumber ? normalizeE164NoPlus(payload.phoneNumber) : "";
-  const activeProfileId = getActiveProfileId();
-  const authDir = getProfileAuthDir(activeProfileId);
-
-  // One-shot recovery for invalid creds, without background retry loops.
-  if (invalidSessionProfiles.has(activeProfileId)) {
-    clearAuthDir(authDir);
-    invalidSessionProfiles.delete(activeProfileId);
-    clearWaChatStateForProfile(activeProfileId);
-  }
-
-  // If profile is not fully registered yet, clear partial auth files first
-  // to force a clean QR/pairing handshake.
-  if (!hasRegisteredSession(activeProfileId)) {
-    clearAuthDir(authDir);
-    clearWaChatStateForProfile(activeProfileId);
-  }
-
-  handshakeAttemptId++;
-  handshakeState = { method, phoneNumber, pairingRequested: false };
-
-  // Close any existing socket cleanly
-  await stopSocket();
-
-  await connectWA(method, handshakeAttemptId);
-  return { ok: true, method };
+function incrementSentCount(profileId) {
+  const count = sentCountTodayByProfile.get(profileId) || 0;
+  sentCountTodayByProfile.set(profileId, count + 1);
 }
 
 async function autoReconnectActiveProfile() {
-  const activeProfileId = getActiveProfileId();
-  if (!hasRegisteredSession(activeProfileId)) {
-    win?.webContents.send("wa:status", {
-      connected: false,
-      text: "No saved session. Click Connect to connect.",
-      profileId: activeProfileId
-    });
-    return { ok: false, skipped: true, profileId: activeProfileId };
+  const profileId = getActiveProfileId();
+  if (!profileId) return { ok: false, error: "No active profile" };
+
+  log.info({ profileId }, "Auto reconnecting profile...");
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 4000);
+    const res = await fetch("http://localhost:12345/api/status", { signal: controller.signal });
+    clearTimeout(t);
+    const data = await res.json();
+    if (data.ok && data.data) {
+      isConnected = data.data.connected;
+      const statusText = isConnected ? "Connected" : "Not connected";
+      win?.webContents.send("wa:status", {
+        isConnected,
+        connected: isConnected,
+        text: statusText,
+        pushName: data.data.pushName || "",
+        profileId
+      });
+      return { ok: true, isConnected };
+    }
+    return { ok: false, error: "Backend status check failed" };
+  } catch (err) {
+    log.warn({ err: err.message }, "Failed to auto reconnect profile check");
+    return { ok: false, error: err.message };
   }
-  handshakeAttemptId++;
-  handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
-  await stopSocket();
-  await connectWA("qr", handshakeAttemptId);
-  return { ok: true, started: true, profileId: activeProfileId };
-}
-
-async function disconnectActiveProfileSocket(statusText = "Disconnected") {
-  const activeProfileId = getActiveProfileId();
-  handshakeAttemptId++;
-  handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
-  await stopSocket();
-  isConnecting = false;
-  win?.webContents.send("wa:status", {
-    connected: false,
-    text: String(statusText || "Disconnected"),
-    profileId: activeProfileId
-  });
-  return { ok: true, profileId: activeProfileId, disconnected: true };
-}
-
-function getConnectionState() {
-  const activeProfileId = getActiveProfileId();
-  return {
-    ok: true,
-    connected: !!isConnected,
-    connecting: !!isConnecting,
-    profileId: activeProfileId,
-    text: isConnected ? "Connected" : isConnecting ? "Connecting..." : "Not connected"
-  };
-}
-
-async function waitForConnectedState(timeoutMs = 15000) {
-  const timeout = Math.max(1000, Number(timeoutMs || 15000));
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeout) {
-    if (sock && isConnected) return true;
-    await new Promise((r) => setTimeout(r, 180));
-  }
-  return !!(sock && isConnected);
 }
 
 async function ensureConnectedForSend(profileId) {
-  if (sock && isConnected) return true;
-  if (isConnecting) {
-    return await waitForConnectedState(16000);
-  }
-
-  const targetProfileId = cleanString(profileId) || getActiveProfileId();
-  if (!hasRegisteredSession(targetProfileId)) return false;
-
-  try {
-    await autoReconnectActiveProfile();
-  } catch (e) {
-    log.debug({ err: e, profileId: targetProfileId }, "Auto reconnect before send failed");
-  }
-
-  return await waitForConnectedState(16000);
+  if (isConnected) return true;
+  const res = await autoReconnectActiveProfile().catch(() => ({ isConnected: false }));
+  return res.isConnected || false;
 }
 
 async function sendPayloadToMsisdn(msisdn, messagePayload, sendOptions = {}) {
   const profileId = getActiveProfileId();
-  const candidates = buildSendTargetCandidatesForProfile(profileId, msisdn);
-  if (candidates.length === 0) throw new Error("Invalid phone number");
-  await sendMessageWithTargetCandidates(candidates, messagePayload, sendOptions || {});
+  if (profileId) {
+    checkDailyLimit(profileId);
+  }
+
+  const chatJid = `${msisdn}@s.whatsapp.net`;
+  // ... rest of function remains the same ...
+
+  let text = "";
+  let attachment = null;
+
+  if (messagePayload.text) {
+    text = messagePayload.text;
+  } else if (messagePayload.caption) {
+    text = messagePayload.caption;
+  }
+
+  const mediaKinds = ["image", "video", "audio", "document"];
+  for (const kind of mediaKinds) {
+    if (messagePayload[kind]) {
+      const media = messagePayload[kind];
+      attachment = {
+        path: media.url || media.path,
+        fileName: messagePayload.fileName || path.basename(media.url || media.path || "file"),
+        mimeType: messagePayload.mimetype || getMimeTypeForPath(media.url || media.path || ""),
+        kind: kind
+      };
+      break;
+    }
+  }
+
+  const res = await sendChatMessage({ chatJid, text, attachment });
+  if (!res.ok) throw new Error(res.error || "Failed to send message via Go");
+  if (profileId) {
+    incrementSentCount(profileId);
+  }
 }
 
 async function sendText(msisdn, text) {
-  const profileId = getActiveProfileId();
-  if (!(await ensureConnectedForSend(profileId)) || !sock || !isConnected) {
+  if (!(await ensureConnectedForSend()) || !isConnected) {
     throw new Error("WhatsApp not connected");
   }
   await sendPayloadToMsisdn(msisdn, { text: String(text || "") });
@@ -6087,6 +5056,28 @@ function summarizeTemplateMessagesForAudit(messages) {
     else out.push(mediaHead);
   }
   return out.join("\n\n").trim();
+}
+
+async function disconnectActiveProfileSocket(statusText = "Disconnected") {
+  const activeProfileId = getActiveProfileId();
+  try {
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(), 5000); // 5s timeout
+    const res = await fetch("http://localhost:12345/api/logout", { signal: controller.signal });
+    clearTimeout(t);
+    const data = await res.json();
+    if (!data.ok) log.warn({ data }, "Go logout returned error");
+  } catch (err) {
+    log.warn({ err: err.message }, "Failed to call Go logout");
+  }
+
+  win?.webContents.send("wa:status", {
+    connected: false,
+    isConnected: false,
+    text: String(statusText || "Disconnected"),
+    profileId: activeProfileId
+  });
+  return { ok: true, profileId: activeProfileId, disconnected: true };
 }
 
 /* --------------------------- IPC ---------------------------- */
@@ -6278,7 +5269,33 @@ ipcMain.handle("app:setActiveProfile", async (_evt, profileId) => {
 });
 
 ipcMain.handle("wa:handshake", async (_evt, payload) => {
-  return await startHandshake(payload);
+  const method = payload?.method === "pairing" ? "pairing" : "qr";
+  win?.webContents.send("wa:status", { text: "Connecting to Go Backend...", reason: "connecting" });
+
+  try {
+    if (method === "qr") {
+      const resp = await fetch("http://localhost:12345/api/login/qr");
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || "Cannot fetch QR code");
+      const qrcode = require("qrcode");
+      const dataUrl = await qrcode.toDataURL(data.data, { margin: 2, scale: 6 });
+      win?.webContents.send("wa:qr", dataUrl); // Signal ready
+      win?.webContents.send("wa:status", { text: "Scan QR in WhatsApp", reason: "connecting" });
+      return { ok: true, data: dataUrl };
+    } else {
+      const phone = cleanString(payload?.phone || "");
+      if (!phone) throw new Error("Phone number required");
+      const resp = await fetch(`http://localhost:12345/api/login/pair?phone=${phone}`);
+      const data = await resp.json();
+      if (!data.ok) throw new Error(data.error || "Cannot fetch pairing code");
+      win?.webContents.send("wa:pairingCode", { code: data.data });
+      win?.webContents.send("wa:status", { text: "Enter pairing code in WhatsApp", reason: "connecting" });
+      return { ok: true, data: data.data };
+    }
+  } catch (err) {
+    win?.webContents.send("wa:status", { text: err.message || "Failed to connect", isError: true, isConnected: false });
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle("wa:autoReconnect", async () => {
@@ -6290,111 +5307,80 @@ ipcMain.handle("wa:disconnect", async () => {
 });
 
 ipcMain.handle("wa:getConnectionState", async () => {
-  return getConnectionState();
+  try {
+    const res = await fetch("http://localhost:12345/api/status");
+    const data = await res.json();
+    const isConn = !!data.data?.connected;
+    return {
+      ok: true,
+      connected: isConn,
+      isConnected: isConn,
+      text: isConn ? "Connected" : "Not connected",
+      profileId: getActiveProfileId(),
+      waVersion: "Go-WhatsMeow",
+      pushName: data.data?.pushName || ""
+    };
+  } catch (err) {
+    return { connected: false, isConnected: false, text: "Not connected", profileId: getActiveProfileId() };
+  }
 });
 
 ipcMain.handle("wa:getContacts", async (_evt, options) => {
   const profileId = getActiveProfileId();
   const opts = options && typeof options === "object" ? options : {};
-  let contacts = getContactsForProfile(profileId);
+  try {
+    const resp = await fetch("http://localhost:12345/api/contacts");
+    const json = await resp.json();
+    if (!json.ok) throw new Error(json.error || "Failed to fetch contacts");
 
-  if (isConnected && sock) {
-    if (opts.forceNameSync) {
-      await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
-      contacts = getContactsForProfile(profileId);
-    } else if (contacts.length > 0 && contacts.some((c) => !contactHasAnyName(c, profileId))) {
-      syncContactNamesForProfile(profileId, { force: false, isInitialSync: false }).catch(() => {});
+    // Go returns map[string]ContactInfo
+    const rawContacts = json.data || {};
+    const contacts = [];
+    for (const [jid, info] of Object.entries(rawContacts)) {
+      contacts.push({
+        jid,
+        msisdn: msisdnFromUserJid(jid),
+        name: info.FullName || info.PushName || "",
+        pushName: info.PushName || "",
+        isBusiness: info.IsBusiness || false,
+        profilePictureUrl: "" // Can be enriched later
+      });
     }
-  }
 
-  if (opts.includePhotos && isConnected && sock) {
-    contacts = await enrichContactPhotosForProfile(profileId, opts);
+    return {
+      ok: true,
+      connected: !!isConnected,
+      profileId,
+      contacts,
+      count: contacts.length
+    };
+  } catch (err) {
+    console.error("Failed to fetch contacts from Go:", err);
+    return { ok: false, error: err.message, contacts: [], count: 0 };
   }
-  return {
-    ok: true,
-    connected: !!isConnected,
-    profileId,
-    contacts,
-    count: contacts.length
-  };
 });
 
 ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
   const profileId = getActiveProfileId();
   const opts = options && typeof options === "object" ? options : {};
-  let seedChats = [];
 
-  if (isConnected && sock) {
-    if (opts.ensureHistory === true) {
-      await warmRecentHistoryForProfile(profileId, {
-        days: WA_HISTORY_LOOKBACK_DAYS,
-        force: opts.forceHistory === true
-      });
-    }
-
-    if (opts.forceNameSync === true) {
-      await syncContactNamesForProfile(profileId, { force: true, isInitialSync: false, cooldownMs: 0 });
-    } else {
-      seedChats = getRecentChatsForProfile(profileId, { limit: 60 });
-      const fallbackRows = seedChats.filter((row) => {
-        const title = cleanString(row?.title || "");
-        if (!title) return true;
-        if (isLidJid(title)) return true;
-        return isLikelyFallbackIdentityLabel(title);
-      });
-      if (seedChats.length > 0 && fallbackRows.length >= Math.ceil(seedChats.length * 0.45)) {
-        syncContactNamesForProfile(profileId, { force: false, isInitialSync: false, cooldownMs: 45 * 1000 }).catch(() => {});
+  try {
+    const resp = await fetch("http://localhost:12345/api/chats");
+    const json = await resp.json();
+    if (json.ok && json.data) {
+      const state = ensureWaChatStateForProfile(profileId);
+      for (const [jid, settings] of Object.entries(json.data)) {
+        const chat = ensureChatSummary(profileId, jid);
+        if (chat) {
+          chat.archived = settings.Archived || false;
+          chat.pinned = settings.Pinned || false;
+          chat.unreadCount = settings.UnreadCount || chat.unreadCount || 0;
+          chat.muteUntil = settings.MutedUntil || 0;
+        }
       }
     }
-
-    const includePhotos = opts.includePhotos !== false;
-    if (includePhotos) {
-      const startupBackfillPending = !startupPhotoBackfillDoneByProfile.has(profileId);
-      const forceMissingPhotoRefresh = opts.forceMissingPhotoRefresh === true || startupBackfillPending;
-      if (forceMissingPhotoRefresh) {
-        startupPhotoBackfillDoneByProfile.add(profileId);
-      }
-      ensureContactsFromChatsForProfile(profileId);
-      const preferredMsisdns = new Set();
-      if (seedChats.length === 0) seedChats = getRecentChatsForProfile(profileId, { limit: 80 });
-      for (const chat of seedChats) {
-        const chatJid = normalizeChatJid(chat?.jid || "");
-        if (!chatJid) continue;
-        const byContact = getContactByChatJid(profileId, chatJid);
-        const msisdn = cleanString(byContact?.msisdn || msisdnFromContactAddress(chatJid));
-        const normalized = normalizeMsisdnSafe(msisdn);
-        if (normalized) preferredMsisdns.add(normalized);
-      }
-      const requestedMaxPhotoFetch = Number.isFinite(Number(opts.maxPhotoFetch)) ? Number(opts.maxPhotoFetch) : 24;
-      const safeMaxPhotoFetch = forceMissingPhotoRefresh
-        ? Math.max(1, Math.min(18, requestedMaxPhotoFetch))
-        : Math.max(1, Math.min(200, requestedMaxPhotoFetch));
-      const requestedMinMinutes = Number.isFinite(Number(opts.minMinutesBetweenPhotoChecks))
-        ? Number(opts.minMinutesBetweenPhotoChecks)
-        : 90;
-      const requestedConcurrency = Number.isFinite(Number(opts.photoFetchConcurrency))
-        ? Number(opts.photoFetchConcurrency)
-        : forceMissingPhotoRefresh
-          ? 1
-          : 2;
-      const requestedDelayMs = Number.isFinite(Number(opts.photoFetchDelayMs))
-        ? Number(opts.photoFetchDelayMs)
-        : forceMissingPhotoRefresh
-          ? 180
-          : 120;
-      enrichContactPhotosForProfile(profileId, {
-        maxPhotoFetch: safeMaxPhotoFetch,
-        minMinutesBetweenPhotoChecks: requestedMinMinutes,
-        photoFetchConcurrency: requestedConcurrency,
-        photoFetchDelayMs: requestedDelayMs,
-        forceMissing: forceMissingPhotoRefresh,
-        preferredMsisdns: Array.from(preferredMsisdns)
-      })
-        .then(() => {
-          scheduleWaChatSync(profileId, "photos");
-        })
-        .catch(() => {});
-    }
+  } catch (err) {
+    log.debug({ err }, "Failed to bridge wa:getRecentChats to Go API");
   }
 
   promoteChatNamesFromContactsForProfile(profileId);
@@ -6413,6 +5399,15 @@ ipcMain.handle("wa:getChatMessages", async (_evt, payload) => {
   const profileId = getActiveProfileId();
   const chatJid = normalizeChatJid(src.chatJid || "");
   if (!chatJid) throw new Error("Invalid chat");
+
+  // Bridge call to Go (allows Go to trigger on-demand sync if needed)
+  try {
+    const limit = src.limit || 50;
+    await fetch(`http://localhost:12345/api/messages?chatJid=${encodeURIComponent(chatJid)}&limit=${limit}`);
+  } catch (err) {
+    // Ignore errors for now as we have local cache
+  }
+
   const messages = getChatMessagesForProfile(profileId, chatJid, src || {});
   return {
     ok: true,
@@ -6423,6 +5418,22 @@ ipcMain.handle("wa:getChatMessages", async (_evt, payload) => {
     count: messages.length
   };
 });
+
+async function markChatReadForProfile(profileId, chatJid) {
+  try {
+    const lastMsgJid = chatJid; // Simplified
+    const res = await fetch("http://localhost:12345/api/read", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatJid: lastMsgJid, messageId: "" }) // Go backend will need more logic if we want specific msg
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Go mark read failed");
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
 
 ipcMain.handle("wa:markChatRead", async (_evt, payload) => {
   const src = payload && typeof payload === "object" ? payload : {};
@@ -6439,6 +5450,24 @@ ipcMain.handle("wa:resetChatHistory", async (_evt, payload) => {
   if (!chatJid) throw new Error("Invalid chat");
   return await resetChatHistoryForProfile(profileId, chatJid, src || {});
 });
+
+async function sendChatMessage(payload) {
+  const { chatJid, text, attachment } = payload || {};
+  if (!chatJid) throw new Error("Invalid message request: missing chatJid");
+
+  try {
+    const res = await fetch("http://localhost:12345/api/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chatJid, text, attachment })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error || "Go send failed");
+    return { ok: true, data: data.data };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
 
 ipcMain.handle("wa:sendPresence", async (_evt, payload) => {
   return await sendChatPresence(payload || {});
@@ -6578,7 +5607,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   validateTemplateMessagesForSend(normalizedBatchMessages);
 
   const activeProfileIdForBatch = getActiveProfileId();
-  if (!(await ensureConnectedForSend(activeProfileIdForBatch)) || !isConnected || !sock) {
+  if (!(await ensureConnectedForSend(activeProfileIdForBatch))) {
     throw new Error("WhatsApp not connected");
   }
 
@@ -6842,7 +5871,7 @@ ipcMain.handle("wa:sendPreparedBatch", async (_evt, payload) => {
   const items = Array.isArray(src.items) ? src.items : [];
   if (items.length === 0) throw new Error("No messages to send");
   const activeProfileIdForPreparedBatch = getActiveProfileId();
-  if (!(await ensureConnectedForSend(activeProfileIdForPreparedBatch)) || !isConnected || !sock) {
+  if (!(await ensureConnectedForSend(activeProfileIdForPreparedBatch))) {
     throw new Error("WhatsApp not connected");
   }
 
@@ -7055,6 +6084,9 @@ app.whenReady().then(() => {
   loadPersistedContactsCache();
   loadPersistedWaChatCache();
   schedulePersistWaChatCache();
+
+  startGoBackend(); // START GO SIDECAR
+
   createWindow();
 });
 
@@ -7068,8 +6100,13 @@ app.on("before-quit", () => {
   } catch (e) {
     // ignore
   }
+
+  killGoBackend(); // KILL GO SIDECAR
 });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
+
+
+
