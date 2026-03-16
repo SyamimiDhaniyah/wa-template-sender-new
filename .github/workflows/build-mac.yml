@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Optional app version override (for example 1.1.1)"
+        required: false
+        type: string
 
 jobs:
   build-macos:
@@ -26,15 +31,16 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
-      - name: Build go-backend for macOS (Apple Silicon)
-        run: |
-          cd go-backend
-          GOOS=darwin GOARCH=arm64 go build -o go-backend-mac-arm64 main.go
+      - name: Override package version for release build
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.release_version != '' }}
+        run: npm version "${{ github.event.inputs.release_version }}" --no-git-tag-version --allow-same-version
 
-      - name: Build go-backend for macOS (Intel)
+      - name: Prepare clean macOS backend workspace
+        shell: bash
         run: |
-          cd go-backend
-          GOOS=darwin GOARCH=amd64 go build -o go-backend-mac-amd64 main.go
+          set -euo pipefail
+          rm -f go-backend/go-backend go-backend/go-backend-mac-arm64 go-backend/go-backend-mac-amd64
+          rm -f go-backend/go-backend.exe
 
       - name: Generate icns from logo
         shell: bash
@@ -60,11 +66,71 @@ jobs:
 
           iconutil -c icns "$ICONSET" -o "$OUT"
 
+      - name: Stage go-backend for macOS app build (Apple Silicon)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd go-backend
+          GOOS=darwin GOARCH=arm64 go build -o go-backend main.go
+          chmod +x go-backend
+
       - name: Build macOS app (Apple Silicon)
         run: npx electron-builder --mac dmg zip --arm64 --config.mac.icon=assets/icon.icns --publish never
 
+      - name: Verify macOS app bundle (Apple Silicon)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/mac-arm64/WhatsConect.app"
+          BACKEND_DIR="$APP/Contents/Resources/app.asar.unpacked/go-backend"
+
+          test -f "$BACKEND_DIR/go-backend"
+          test -x "$BACKEND_DIR/go-backend"
+
+          for unexpected in go-backend.exe go-backend-mac-arm64 go-backend-mac-amd64 go.mod go.sum main.go; do
+            if [ -e "$BACKEND_DIR/$unexpected" ]; then
+              echo "Unexpected file in Apple Silicon mac bundle: $unexpected"
+              exit 1
+            fi
+          done
+
+      - name: Stage go-backend for macOS app build (Intel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd go-backend
+          rm -f go-backend
+          GOOS=darwin GOARCH=amd64 go build -o go-backend main.go
+          chmod +x go-backend
+
       - name: Build macOS app (Intel)
         run: npx electron-builder --mac dmg zip --x64 --config.mac.icon=assets/icon.icns --publish never
+
+      - name: Verify macOS app bundle (Intel)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="dist/mac/WhatsConect.app"
+          BACKEND_DIR="$APP/Contents/Resources/app.asar.unpacked/go-backend"
+
+          test -f "$BACKEND_DIR/go-backend"
+          test -x "$BACKEND_DIR/go-backend"
+
+          for unexpected in go-backend.exe go-backend-mac-arm64 go-backend-mac-amd64 go.mod go.sum main.go; do
+            if [ -e "$BACKEND_DIR/$unexpected" ]; then
+              echo "Unexpected file in Intel mac bundle: $unexpected"
+              exit 1
+            fi
+          done
+
+      - name: Build standalone go-backend Mac binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd go-backend
+          rm -f go-backend
+          GOOS=darwin GOARCH=arm64 go build -o go-backend-mac-arm64 main.go
+          GOOS=darwin GOARCH=amd64 go build -o go-backend-mac-amd64 main.go
 
       - name: Upload macOS app artifacts
         uses: actions/upload-artifact@v4

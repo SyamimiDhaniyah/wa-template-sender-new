@@ -2,7 +2,6 @@
 
 const fs = require("fs");
 const path = require("path");
-const { Arch } = require("builder-util");
 
 function ensureExecutable(filePath) {
   try {
@@ -29,35 +28,27 @@ exports.default = async function afterPack(context) {
     return;
   }
 
-  const arm64Backend = path.join(backendDir, "go-backend-mac-arm64");
-  const amd64Backend = path.join(backendDir, "go-backend-mac-amd64");
   const packagedBackend = path.join(backendDir, "go-backend");
-  const windowsBackend = path.join(backendDir, "go-backend.exe");
-  const windowsLauncher = path.join(backendDir, "WhatsConect Launcher.cmd");
-
-  const selectedBackend = context.arch === Arch.arm64 ? arm64Backend : amd64Backend;
-  const otherBackend = context.arch === Arch.arm64 ? amd64Backend : arm64Backend;
-
-  if (!fs.existsSync(selectedBackend)) {
-    throw new Error(`Expected backend binary missing for arch ${context.arch}: ${selectedBackend}`);
+  if (!fs.existsSync(packagedBackend)) {
+    throw new Error(`Expected packaged backend missing for mac build: ${packagedBackend}`);
   }
 
-  if (fs.existsSync(packagedBackend)) {
-    fs.rmSync(packagedBackend, { force: true });
-  }
-
-  fs.renameSync(selectedBackend, packagedBackend);
   ensureExecutable(packagedBackend);
 
-  if (fs.existsSync(otherBackend)) {
-    fs.rmSync(otherBackend, { force: true });
-  }
+  const unexpectedFiles = [
+    "go-backend.exe",
+    "go-backend-mac-arm64",
+    "go-backend-mac-amd64",
+    "go.mod",
+    "go.sum",
+    "main.go",
+    "WhatsConect Launcher.cmd"
+  ];
 
-  if (fs.existsSync(windowsBackend)) {
-    fs.rmSync(windowsBackend, { force: true });
-  }
-
-  if (fs.existsSync(windowsLauncher)) {
-    fs.rmSync(windowsLauncher, { force: true });
+  for (const fileName of unexpectedFiles) {
+    const filePath = path.join(backendDir, fileName);
+    if (fs.existsSync(filePath)) {
+      fs.rmSync(filePath, { force: true, recursive: true });
+    }
   }
 };

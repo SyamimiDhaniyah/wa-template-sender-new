@@ -69,11 +69,25 @@ const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recor
 
 // --- Go Backend Sidecar ---
 let goBackendProcess = null;
+let goBackendStartupFailed = false;
+
+function showStartupError(message, error) {
+  if (goBackendStartupFailed) return;
+  goBackendStartupFailed = true;
+
+  const detail = error instanceof Error ? error.message : String(error || "");
+  const body = detail ? `${message}\n\n${detail}` : message;
+
+  console.error(message, error);
+  dialog.showErrorBox("WhatsConect Startup Failed", body);
+}
 
 function resolveGoBackendExecutable(backendDir) {
   const candidates = [];
 
-  if (process.platform === "win32") {
+  if (app.isPackaged && process.platform === "darwin") {
+    candidates.push("go-backend");
+  } else if (process.platform === "win32") {
     candidates.push("go-backend.exe");
   } else if (process.platform === "darwin") {
     candidates.push(process.arch === "arm64" ? "go-backend-mac-arm64" : "go-backend-mac-amd64");
@@ -171,6 +185,8 @@ function startGoBackend() {
 
   goBackendProcess.on("error", (err) => {
     console.error("Failed to start Go sidecar:", err);
+    showStartupError("The bundled Go backend could not be started.", err);
+    app.quit();
   });
   goBackendProcess.on("close", (code) => {
     console.log(`Go sidecar exited with code ${code}`);
@@ -6115,7 +6131,13 @@ app.whenReady().then(() => {
   loadPersistedWaChatCache();
   schedulePersistWaChatCache();
 
-  startGoBackend(); // START GO SIDECAR
+  try {
+    startGoBackend(); // START GO SIDECAR
+  } catch (error) {
+    showStartupError("The bundled Go backend could not be found. Please reinstall WhatsConect.", error);
+    app.quit();
+    return;
+  }
 
   createWindow();
 });
