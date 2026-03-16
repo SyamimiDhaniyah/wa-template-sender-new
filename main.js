@@ -161,12 +161,18 @@ function startGoBackend() {
           } else if (payload.type === "presence") {
             win?.webContents.send("wa:presence", payload.data);
           } else if (payload.type === "status") {
-            isConnected = (payload.data === "connected");
+            const statusValue = cleanString(payload.data).toLowerCase();
+            isConnected = statusValue === "connected";
+            const activeProfileId = getActiveProfileId();
+            if (!isConnected) {
+              clearWaChatStateForProfile(activeProfileId);
+            }
             win?.webContents.send("wa:status", {
               isConnected,
               connected: isConnected,
-              text: isConnected ? "Connected" : (payload.data === "logged_out" ? "Logged Out" : "Not connected"),
-              profileId: getActiveProfileId()
+              text: isConnected ? "Connected" : (statusValue === "logged_out" ? "Logged Out" : "Not connected"),
+              reason: isConnected ? "connected" : (statusValue === "logged_out" ? "logged_out" : "disconnected"),
+              profileId: activeProfileId
             });
           }
         } else {
@@ -2605,11 +2611,26 @@ function getWaChatStoreObj() {
 }
 
 function clearWaChatStateForProfile(profileId) {
-  if (!profileId) return;
+  const key = cleanString(profileId);
+  if (!key) return false;
   const root = getWaChatStoreObj();
-  if (!Object.prototype.hasOwnProperty.call(root, profileId)) return;
-  delete root[profileId];
-  schedulePersistWaChatCache();
+  const existed = Object.prototype.hasOwnProperty.call(root, key);
+  if (existed) {
+    delete root[key];
+  }
+  clearWaChatSyncTimer(key);
+  if (waChatPersistTimer) {
+    clearTimeout(waChatPersistTimer);
+    waChatPersistTimer = null;
+  }
+  persistWaChatCache();
+  win?.webContents.send("wa:chatSync", {
+    profileId: key,
+    reason: "reset",
+    cleared: true,
+    ts: Date.now()
+  });
+  return existed;
 }
 
 function ensureWaChatStateForProfile(profileId) {
@@ -5117,10 +5138,12 @@ async function disconnectActiveProfileSocket(statusText = "Disconnected") {
     log.warn({ err: err.message }, "Failed to call Go logout");
   }
 
+  clearWaChatStateForProfile(activeProfileId);
   win?.webContents.send("wa:status", {
     connected: false,
     isConnected: false,
     text: String(statusText || "Disconnected"),
+    reason: "disconnected",
     profileId: activeProfileId
   });
   return { ok: true, profileId: activeProfileId, disconnected: true };
@@ -5410,6 +5433,16 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
   const profileId = getActiveProfileId();
   const opts = options && typeof options === "object" ? options : {};
 
+  if (!isConnected) {
+    return {
+      ok: true,
+      connected: false,
+      profileId,
+      chats: [],
+      count: 0
+    };
+  }
+
   try {
     const resp = await fetch("http://localhost:12345/api/chats");
     const json = await resp.json();
@@ -5445,6 +5478,17 @@ ipcMain.handle("wa:getChatMessages", async (_evt, payload) => {
   const profileId = getActiveProfileId();
   const chatJid = normalizeChatJid(src.chatJid || "");
   if (!chatJid) throw new Error("Invalid chat");
+
+  if (!isConnected) {
+    return {
+      ok: true,
+      connected: false,
+      profileId,
+      chatJid,
+      messages: [],
+      count: 0
+    };
+  }
 
   // Bridge call to Go (allows Go to trigger on-demand sync if needed)
   try {

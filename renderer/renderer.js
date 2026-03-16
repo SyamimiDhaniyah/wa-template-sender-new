@@ -2005,6 +2005,31 @@ function scheduleWaSyncRefresh(options = {}) {
   }, 160);
 }
 
+function resetWaChatUiState(options = {}) {
+  const opts = options && typeof options === "object" ? options : {};
+  if (state.waSyncTimer) {
+    clearTimeout(state.waSyncTimer);
+    state.waSyncTimer = null;
+  }
+  stopWaOutgoingTyping({ sendPaused: false });
+  clearAllWaPresenceState({ render: false });
+  state.waActiveChatJid = "";
+  state.waExplicitOpenChatJid = "";
+  state.waMessages = [];
+  state.waChats = [];
+  state.waLoadingChats = false;
+  state.waLoadingMessages = false;
+  state.waRefreshQueued = false;
+  state.waForceHistoryRefreshOnConnected = true;
+  state.waChatsReqSeq += 1;
+  state.waMessagesReqSeq += 1;
+  if (opts.render !== false) {
+    renderWaChatList();
+    renderWaConversationHead();
+    renderWaMessages({ forceBottom: false });
+  }
+}
+
 async function pickWaAttachment() {
   const res = await window.api.waPickAttachment();
   if (!res?.ok && res?.canceled) return;
@@ -4977,8 +5002,12 @@ function bindEvents() {
     }
 
     if (!connected) {
-      stopWaOutgoingTyping({ sendPaused: false });
-      clearAllWaPresenceState({ render: true });
+      if (connecting) {
+        stopWaOutgoingTyping({ sendPaused: false });
+        clearAllWaPresenceState({ render: true });
+      } else {
+        resetWaChatUiState({ render: true });
+      }
     }
 
     if (!prevConnected && connected && state.waForceHistoryRefreshOnConnected) {
@@ -4993,6 +5022,10 @@ function bindEvents() {
         maxPhotoFetch: 24,
         minMinutesBetweenPhotoChecks: 45
       });
+      return;
+    }
+
+    if (!connected && !connecting) {
       return;
     }
 
