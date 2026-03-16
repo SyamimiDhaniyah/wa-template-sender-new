@@ -1,4 +1,4 @@
-name: Build macOS (DMG/ZIP per arch + Go backend)
+name: Build macOS (DMG per arch + Go backend)
 
 on:
   push:
@@ -75,7 +75,7 @@ jobs:
           chmod +x go-backend
 
       - name: Build macOS app (Apple Silicon)
-        run: npx electron-builder --mac dmg zip --arm64 --config.mac.icon=assets/icon.icns --publish never
+        run: npx electron-builder --mac dmg --arm64 --config.mac.icon=assets/icon.icns --publish never
 
       - name: Verify macOS app bundle (Apple Silicon)
         shell: bash
@@ -104,7 +104,7 @@ jobs:
           chmod +x go-backend
 
       - name: Build macOS app (Intel)
-        run: npx electron-builder --mac dmg zip --x64 --config.mac.icon=assets/icon.icns --publish never
+        run: npx electron-builder --mac dmg --x64 --config.mac.icon=assets/icon.icns --publish never
 
       - name: Verify macOS app bundle (Intel)
         shell: bash
@@ -132,13 +132,29 @@ jobs:
           GOOS=darwin GOARCH=arm64 go build -o go-backend-mac-arm64 main.go
           GOOS=darwin GOARCH=amd64 go build -o go-backend-mac-amd64 main.go
 
-      - name: Upload macOS app artifacts
+      - name: Prepare Mac helper launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "assets/Open WhatsConect.command" "dist/Open WhatsConect.command"
+          chmod +x "dist/Open WhatsConect.command"
+
+      - name: Upload macOS Apple Silicon DMG
         uses: actions/upload-artifact@v4
         with:
-          name: WhatsConect-macos-app
+          name: WhatsConect-macos-arm64-dmg
+          path: |
+            dist/*-arm64.dmg
+            dist/Open WhatsConect.command
+
+      - name: Upload macOS Intel DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: WhatsConect-macos-x64-dmg
           path: |
             dist/*.dmg
-            dist/*.zip
+            !dist/*-arm64.dmg
+            dist/Open WhatsConect.command
 
       - name: Upload go-backend Mac binaries
         uses: actions/upload-artifact@v4
