@@ -1,4 +1,4 @@
-﻿package main
+package main
 
 import (
 	"context"
@@ -448,16 +448,25 @@ func handleMediaDownload(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	var err error
-	appDataPath = filepath.Join(os.Getenv("APPDATA"), "whatsconect", "wa_profiles", profileId)
-	os.MkdirAll(appDataPath, os.ModePerm)
+	configDir, err := os.UserConfigDir()
+	if err != nil || configDir == "" {
+		log.Fatalf("Failed to resolve user config directory: %v", err)
+	}
+	appDataPath = filepath.Join(configDir, "whatsconect", "wa_profiles", profileId)
+	if err := os.MkdirAll(appDataPath, os.ModePerm); err != nil {
+		log.Fatalf("Failed to create app data directory: %v", err)
+	}
 
 	dbPath := filepath.Join(appDataPath, "store.db")
 	dbLog := waLog.Stdout("Database", "WARN", true)
 
 	// Open raw pure-go SQLite driver using glebarez/sqlite
-	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(0)")
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?_pragma=foreign_keys(1)")
 	if err != nil {
 		log.Fatal(err)
+	}
+	if _, err = db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		log.Fatalf("Failed to enable SQLite foreign keys: %v", err)
 	}
 
 	// Use specific SQLite dialect for WhatsMeow to prevent pragma strict check panics
@@ -466,7 +475,7 @@ func main() {
 	// Initialize database schema (Creates whatsmeow_device, etc.)
 	err = container.Upgrade(context.Background())
 	if err != nil {
-		log.Printf("Failed to upgrade database: %v", err)
+		log.Fatalf("Failed to upgrade database: %v", err)
 	}
 
 	deviceStore, err := container.GetFirstDevice(context.Background())

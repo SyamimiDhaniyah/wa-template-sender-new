@@ -28,6 +28,7 @@ const crypto = require("crypto");
 const Store = require("electron-store");
 
 const log = {
+  debug: console.log,
   info: console.log,
   warn: console.warn,
   error: console.error
