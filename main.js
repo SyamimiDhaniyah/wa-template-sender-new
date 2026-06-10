@@ -26,6 +26,7 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const Store = require("electron-store");
+const QRCode = require("qrcode");
 
 const log = {
   debug: console.log,
@@ -66,11 +67,34 @@ const waChatSyncTimers = new Map();
 const waHistoryWarmupInFlightByProfile = new Map();
 const waAliasReconcileTimers = new Map();
 const waImageAutoSaveInFlight = new Set();
+const waIncomingMessageQueueByProfile = new Map();
+const waIncomingMessageProcessorByProfile = new Map();
 const WA_ALLOWED_OUTGOING_CHAT_PRESENCE = new Set(["composing", "paused", "recording"]);
+const WA_INCOMING_MESSAGE_CHUNK_SIZE = 120;
+const GO_BACKEND_STDOUT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 
 // --- Go Backend Sidecar ---
 let goBackendProcess = null;
 let goBackendStartupFailed = false;
+let goBackendProfileId = "";
+let goBackendStdoutBuffer = "";
+
+function sendToRenderer(channel, payload) {
+  try {
+    if (!win || win.isDestroyed?.()) return false;
+    const contents = win.webContents;
+    if (!contents || contents.isDestroyed?.()) return false;
+    contents.send(channel, payload);
+    return true;
+  } catch (err) {
+    log.warn({ err, channel }, "Failed to send renderer event");
+    return false;
+  }
+}
+
+function delayTick(ms = 0) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function showStartupError(message, error) {
   if (goBackendStartupFailed) return;
@@ -115,8 +139,15 @@ function resolveGoBackendExecutable(backendDir) {
   throw new Error(`Go backend executable not found in ${backendDir}`);
 }
 
-function startGoBackend() {
-  if (goBackendProcess) return;
+function startGoBackend(profileId = "default") {
+  // Keep the WhatsApp session store on the legacy default profile. Older installs
+  // populated this DB, and switching the Go backend to app profile IDs makes the
+  // WhatsApp tab look empty even though the linked device is still valid.
+  const targetProfileId = "default";
+  if (goBackendProcess) {
+    if (goBackendProfileId === targetProfileId) return;
+    throw new Error(`Go backend already running for profile ${goBackendProfileId || "unknown"}`);
+  }
   // In a packaged Electron app, __dirname points inside app.asar which is read-only.
   // Executables must live in app.asar.unpacked instead.
   const backendDir = app.isPackaged
@@ -125,42 +156,109 @@ function startGoBackend() {
   const backendPath = resolveGoBackendExecutable(backendDir);
   console.log("Starting Go Backend...");
   console.log("Using Go backend executable:", backendPath);
+  console.log("Using Go backend profile:", targetProfileId);
+  goBackendProfileId = targetProfileId;
   goBackendProcess = spawn(backendPath, [], {
     cwd: backendDir,
-    stdio: ["ignore", "pipe", "pipe"]
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env }
   });
 
-  goBackendProcess.stdout.on("data", (data) => {
-    const output = data.toString();
-    const lines = output.split("\n");
-    for (let line of lines) {
-      line = line.trim();
-      if (!line) continue;
+  const processGoBackendStdoutLine = (rawLine) => {
+    const line = String(rawLine || "").trim();
+    if (!line) return;
+    const parseEventPayload = (text) => {
       try {
-        const payload = JSON.parse(line);
-        if (payload && payload.type) {
+        return JSON.parse(text);
+      } catch {
+        const start = text.indexOf('{"type":');
+        const end = text.lastIndexOf("}");
+        if (start >= 0 && end > start) {
+          return JSON.parse(text.slice(start, end + 1));
+        }
+        throw new Error("not json");
+      }
+    };
+    try {
+      const payload = parseEventPayload(line);
+      if (payload && payload.type) {
           if (payload.type === "chatSync") {
             const profileId = getActiveProfileId();
             if (profileId && Array.isArray(payload.data)) {
-              upsertMessagesForProfile(profileId, payload.data);
+              enqueueIncomingMessages(profileId, payload.data, "messages");
             }
-            win?.webContents.send("wa:chatSync", { profileId });
+          } else if (payload.type === "qr") {
+            const qrText = cleanString(payload.data || "");
+            const profileId = getActiveProfileId();
+            if (qrText) {
+              QRCode.toDataURL(qrText, { margin: 2, scale: 6 })
+                .then((dataUrl) => {
+                  sendToRenderer("wa:qr", dataUrl);
+                  sendToRenderer("wa:status", {
+                    text: "Scan QR in WhatsApp",
+                    reason: "connecting",
+                    profileId
+                  });
+                })
+                .catch((error) => {
+                  log.warn({ err: error?.message || error }, "Failed to render QR update");
+                });
+            }
+          } else if (payload.type === "qrStatus") {
+            const statusValue = cleanString(payload.data).toLowerCase();
+            const profileId = getActiveProfileId();
+            if (statusValue === "timeout") {
+              sendToRenderer("wa:qr", "");
+              sendToRenderer("wa:status", {
+                text: "QR expired. Click Connect to refresh.",
+                isConnected: false,
+                connected: false,
+                profileId
+              });
+            }
           } else if (payload.type === "historySync") {
             const profileId = getActiveProfileId();
-            if (profileId && payload.data?.file) {
-              try {
-                const fs = require("fs");
-                const jStr = fs.readFileSync(payload.data.file, "utf8");
-                const msgs = JSON.parse(jStr);
-                if (Array.isArray(msgs)) upsertMessagesForProfile(profileId, msgs);
-                fs.unlinkSync(payload.data.file);
-              } catch (e) {
-                console.error("History sync file error:", e);
+            if (profileId) {
+              const chatsFile = cleanString(payload.data?.chatsFile || "");
+              const messagesFile = cleanString(payload.data?.file || payload.data?.messagesFile || "");
+              if (chatsFile) {
+                fs.promises.readFile(chatsFile, "utf8")
+                  .then((jStr) => {
+                    const chats = JSON.parse(jStr);
+                    if (Array.isArray(chats) && chats.length > 0) {
+                      const changed = upsertChatsForProfile(profileId, chats);
+                      if (changed > 0) {
+                        sendToRenderer("wa:chatSync", {
+                          profileId,
+                          reason: "history_chats",
+                          ts: Date.now()
+                        });
+                      }
+                    }
+                  })
+                  .catch((e) => {
+                    console.error("History sync chat file error:", e);
+                  })
+                  .finally(() => {
+                    fs.promises.unlink(chatsFile).catch(() => { });
+                  });
+              }
+              if (messagesFile) {
+                fs.promises.readFile(messagesFile, "utf8")
+                  .then((jStr) => {
+                    const msgs = JSON.parse(jStr);
+                    if (Array.isArray(msgs)) enqueueIncomingMessages(profileId, msgs, "history_sync");
+                  })
+                  .catch((e) => {
+                    console.error("History sync message file error:", e);
+                  })
+                  .finally(() => {
+                    fs.promises.unlink(messagesFile).catch(() => { });
+                  });
               }
             }
-            win?.webContents.send("wa:chatSync", { profileId });
           } else if (payload.type === "presence") {
-            win?.webContents.send("wa:presence", payload.data);
+            sendToRenderer("wa:presence", payload.data);
           } else if (payload.type === "status") {
             const statusValue = cleanString(payload.data).toLowerCase();
             isConnected = statusValue === "connected";
@@ -168,7 +266,7 @@ function startGoBackend() {
             if (!isConnected) {
               clearWaChatStateForProfile(activeProfileId);
             }
-            win?.webContents.send("wa:status", {
+            sendToRenderer("wa:status", {
               isConnected,
               connected: isConnected,
               text: isConnected ? "Connected" : (statusValue === "logged_out" ? "Logged Out" : "Not connected"),
@@ -176,13 +274,31 @@ function startGoBackend() {
               profileId: activeProfileId
             });
           }
-        } else {
-          console.log("[Go]", line);
-        }
-      } catch (e) {
-        // Not JSON, just standard log
-        console.log("[Go]", line);
       }
+    } catch (e) {
+      // Not JSON, just standard log
+      const preview = line.length > 1200 ? `${line.slice(0, 1200)}... [${line.length} chars]` : line;
+      console.log("[Go]", preview);
+    }
+  };
+
+  goBackendProcess.stdout.on("data", (data) => {
+    goBackendStdoutBuffer += data.toString();
+    const lines = goBackendStdoutBuffer.split(/\r?\n/);
+    goBackendStdoutBuffer = lines.pop() || "";
+    if (goBackendStdoutBuffer.length > GO_BACKEND_STDOUT_MAX_BUFFER_BYTES) {
+      console.log("[Go] Dropping oversized stdout buffer", goBackendStdoutBuffer.slice(0, 1200));
+      goBackendStdoutBuffer = "";
+    }
+    for (const line of lines) {
+      processGoBackendStdoutLine(line);
+    }
+  });
+
+  goBackendProcess.on("exit", () => {
+    if (goBackendStdoutBuffer.trim()) {
+      processGoBackendStdoutLine(goBackendStdoutBuffer);
+      goBackendStdoutBuffer = "";
     }
   });
 
@@ -198,15 +314,57 @@ function startGoBackend() {
   goBackendProcess.on("close", (code) => {
     console.log(`Go sidecar exited with code ${code}`);
     goBackendProcess = null;
+    goBackendProfileId = "";
   });
 }
 
-function killGoBackend() {
-  if (goBackendProcess) {
-    console.log("Killing Go backend process...");
-    goBackendProcess.kill("SIGTERM");
-    goBackendProcess = null;
+async function killGoBackend() {
+  const proc = goBackendProcess;
+  if (!proc) {
+    goBackendProfileId = "";
+    return;
   }
+
+  console.log("Killing Go backend process...");
+  goBackendProcess = null;
+
+  await new Promise((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      goBackendProfileId = "";
+      resolve();
+    };
+
+    proc.once("close", finish);
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+      finish();
+      return;
+    }
+
+    setTimeout(() => {
+      try {
+        if (!proc.killed) proc.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+      finish();
+    }, 3000);
+  });
+}
+
+async function restartGoBackendForProfile(profileId = getActiveProfileId()) {
+  await killGoBackend();
+  goBackendStartupFailed = false;
+  startGoBackend("default");
+  await delayTick(250);
+  return await autoReconnectActiveProfile().catch((err) => ({
+    ok: false,
+    error: String(err?.message || err || "Failed to reconnect backend")
+  }));
 }
 // --------------------------
 const WA_ALLOWED_INCOMING_CHAT_PRESENCE = new Set(["composing", "recording", "paused", "available", "unavailable"]);
@@ -232,7 +390,28 @@ const CLINIC_SETTINGS_KEY = "clinicSettings";
 const CLINIC_APPOINTMENT_TEMPLATES_KEY = "clinicAppointmentTemplates";
 const CLINIC_API_KEY_AUTH = "api:s4bMNy03";
 const CLINIC_API_KEY_DATA = "api:lY50ALPv";
+const XANO_DATA_BASE_URL = `${CLINIC_API_BASE}/${CLINIC_API_KEY_DATA}`;
+const MARKETING_API = {
+  saveTemplateAsset: `${XANO_DATA_BASE_URL}/marketing_template_assets_save`,
+  uploadTemplateAsset: `${XANO_DATA_BASE_URL}/marketing_template_asset_upload`,
+  getTemplates: `${XANO_DATA_BASE_URL}/marketing_templates_get`,
+  saveMasterTemplate: `${XANO_DATA_BASE_URL}/marketing_templates_save_master`,
+  saveBranchTemplate: `${XANO_DATA_BASE_URL}/marketing_templates_branch_save`,
+  getCampaigns: `${XANO_DATA_BASE_URL}/marketing_campaigns_get`,
+  saveCampaign: `${XANO_DATA_BASE_URL}/marketing_campaigns_save`,
+  getResolvedCampaign: `${XANO_DATA_BASE_URL}/marketing_campaigns_resolved_get`,
+  checkMarketingStatus: `${XANO_DATA_BASE_URL}/marketing_status_check`,
+  recordSendLog: `${XANO_DATA_BASE_URL}/marketing_send_log`,
+  getBlastHistory: `${XANO_DATA_BASE_URL}/marketing_blast_history_get`,
+  getDueFollowups: `${XANO_DATA_BASE_URL}/marketing_followups_due`,
+  importLegacyLogs: `${XANO_DATA_BASE_URL}/marketing_legacy_import`
+};
 const DEFAULT_WA_PROFILE_NAME = "Dentabay";
+const MARKETING_BLAST_LIMIT = 35;
+const MARKETING_BLAST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const MARKETING_BLAST_GUARD_KEY = "marketingBlastGuardByProfile";
+const MARKETING_BLAST_HISTORY_KEY = "marketingBlastHistory";
+const MARKETING_BLAST_HISTORY_MAX_ROWS = 500;
 
 const DEFAULT_CLINIC_SETTINGS = {
   timezone: CLINIC_TZ,
@@ -241,7 +420,7 @@ const DEFAULT_CLINIC_SETTINGS = {
   templateGapMinSec: 2,
   templateGapMaxSec: 4,
   marketingMonthsAgoDefault: 6,
-  marketingPageSizeDefault: 50
+  marketingPageSizeDefault: 35
 };
 
 const DEFAULT_APPOINTMENT_TEMPLATES = {
@@ -385,6 +564,9 @@ function normalizeAuthUser(raw) {
     else if (val === null || val === undefined) out[key] = "";
     else out[key] = cleanString(val);
   }
+  out.id = src.id ?? "";
+  out.active = src.active === true;
+  out.permissions = src.permissions && typeof src.permissions === "object" ? src.permissions : {};
   return out;
 }
 
@@ -692,10 +874,24 @@ async function clinicGetPastPatients(authToken, payload) {
     end_day: String(Math.round(endDay))
   });
   const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/past_patient?${qs.toString()}`;
-  const data = await clinicFetchJson(endpoint, {
-    method: "GET",
-    headers: clinicAuthHeaders(authToken, false)
-  });
+  const controller = new AbortController();
+  const timeoutMs = 15000;
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  let data;
+  try {
+    data = await clinicFetchJson(endpoint, {
+      method: "GET",
+      headers: clinicAuthHeaders(authToken, false),
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error("Load patients timed out. Please try again.");
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
 
   return Array.isArray(data) ? data.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No) : [];
 }
@@ -717,6 +913,361 @@ async function clinicEditPatient(authToken, payload) {
       nickname,
       gender
     })
+  });
+}
+
+function userCanManageMarketingTemplates(user) {
+  const src = user && typeof user === "object" ? user : {};
+  if (src?.permissions?.can_manage_marketing_templates === true) return true;
+  return userHasDeveloperOrMarketingAccess(src);
+}
+
+function userHasDeveloperOrMarketingAccess(user) {
+  const src = user && typeof user === "object" ? user : {};
+  const role = cleanString(src.Role || src.role).toLowerCase();
+  const dept = cleanString(src.dept).toLowerCase();
+  const access = cleanString(src.Access || src.access).toLowerCase();
+  return src.active === true && (dept === "marketing" || role === "developer" || access.includes("developer"));
+}
+
+function userCanManageMarketingCampaigns(user) {
+  const src = user && typeof user === "object" ? user : {};
+  if (src?.permissions?.can_manage_marketing_campaigns === true) return true;
+  return userHasDeveloperOrMarketingAccess(src);
+}
+
+function userCanImportMarketingLegacyLogs(user) {
+  const src = user && typeof user === "object" ? user : {};
+  if (src?.permissions?.can_import_marketing_legacy_logs === true) return true;
+  return userHasDeveloperOrMarketingAccess(src);
+}
+
+function userCanEditBranchMarketingTemplates(user) {
+  const src = user && typeof user === "object" ? user : {};
+  if (src?.permissions?.can_edit_branch_marketing_templates === true) return true;
+  return src.active === true && !!cleanString(src.Branch);
+}
+
+function buildMarketingTemplatePayload(templateRaw) {
+  const template = normalizeTemplateRecord(templateRaw || {}, 0);
+  return {
+    ...(template.id && !String(template.id).startsWith("t_") ? { id: Number(template.id) || template.id } : {}),
+    name: template.name,
+    body: template.body,
+    messages: normalizeTemplateMessagesList(template.messages, template.body || "").map((msg, idx) => ({
+      id: cleanString(msg.id || `tm_${idx + 1}`),
+      order: Math.max(1, Number(msg.order || idx + 1) || idx + 1),
+      type: normalizeTemplateMessageType(msg.type),
+      text: String(msg.text || ""),
+      attachment: msg.attachment ? normalizeTemplateAttachmentRecord(msg.attachment, msg.type) : null
+    })),
+    variables: Array.isArray(template.variables) ? template.variables : [],
+    send_policy: template.sendPolicy === "multiple" ? "multiple" : "once",
+    active: template.active !== false
+  };
+}
+
+async function marketingFetchJson(authToken, endpoint, options = {}) {
+  return await clinicFetchJson(endpoint, {
+    ...options,
+    headers: {
+      ...clinicAuthHeaders(authToken, true),
+      ...(options.headers || {})
+    }
+  });
+}
+
+async function marketingSaveTemplateAsset(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  return await marketingFetchJson(authToken, MARKETING_API.saveTemplateAsset, {
+    method: "POST",
+    body: JSON.stringify(src)
+  });
+}
+
+function normalizeMarketingAssetResponse(raw, fallback = {}) {
+  const src = raw && typeof raw === "object" ? raw : {};
+  const asset = src.asset && typeof src.asset === "object" ? src.asset : src;
+  const xanoFile = asset.xano_file && typeof asset.xano_file === "object" ? asset.xano_file : {};
+  const fileName = cleanString(asset.fileName || asset.name || xanoFile.name || fallback.fileName);
+  const mimeType = cleanString(asset.mimeType || asset.type || xanoFile.type || fallback.mimeType);
+  const url = cleanString(asset.url || xanoFile.url || fallback.url);
+  const kind = cleanString(asset.kind || fallback.kind || attachmentKindFromMimeOrPath(mimeType, fileName));
+  const size = Math.max(0, Number(asset.size || xanoFile.size || fallback.size || 0) || 0);
+  return {
+    id: asset.id ?? asset.asset_id ?? "",
+    fileName,
+    mimeType,
+    kind,
+    size,
+    url,
+    ...(asset.xano_file ? { xano_file: asset.xano_file } : {})
+  };
+}
+
+async function marketingUploadTemplateAsset(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const filePath = cleanString(src.path || src.filePath);
+  if (!filePath) throw new Error("File path is required");
+  if (!fs.existsSync(filePath)) throw new Error("Template media file not found");
+  const stat = fs.statSync(filePath);
+  if (!stat || !stat.isFile()) throw new Error("Template media must be a file");
+
+  const fileName = cleanString(src.fileName || path.basename(filePath));
+  const mimeType = cleanString(src.mimeType || getMimeTypeForPath(filePath));
+  const kind = cleanString(src.kind || attachmentKindFromMimeOrPath(mimeType, filePath));
+  const bytes = await fs.promises.readFile(filePath);
+  if (kind === "image" && !isValidRasterImageBuffer(bytes, mimeType, filePath)) {
+    const sizeLabel = `${Number(stat.size || bytes.length || 0)} bytes`;
+    throw new Error(
+      `Selected image file is not a valid image (${sizeLabel}). Please open the image first or re-save/download it, then choose the real PNG/JPG file.`
+    );
+  }
+  const form = new FormData();
+  const fileType = mimeType || "application/octet-stream";
+  const filePart = typeof File === "function"
+    ? new File([bytes], fileName, { type: fileType })
+    : new Blob([bytes], { type: fileType });
+  form.append("file", filePart, fileName);
+  form.append("kind", kind);
+
+  let data;
+  try {
+    data = await clinicFetchJson(MARKETING_API.uploadTemplateAsset, {
+      method: "POST",
+      headers: clinicAuthHeaders(authToken, false),
+      body: form
+    });
+  } catch (e) {
+    const msg = cleanString(e?.message || e);
+    if (msg.includes("stored_file.url")) {
+      throw new Error(
+        "Xano upload endpoint received the file, but its function stack still references stored_file.url. In Xano, remove direct stored_file.url/xano_file.url references and map the asset URL from $stored_url."
+      );
+    }
+    if (msg.includes("xano_file.url")) {
+      throw new Error(
+        "Xano upload endpoint received the file, but its function stack still references xano_file.url. In Xano, remove direct stored_file.url/xano_file.url references and map the asset URL from $stored_url."
+      );
+    }
+    throw e;
+  }
+  const asset = normalizeMarketingAssetResponse(data, {
+    fileName,
+    mimeType,
+    kind,
+    size: Number(stat.size || 0) || 0
+  });
+  if (!asset.url) throw new Error("Xano upload did not return asset url");
+  return { ok: true, asset };
+}
+
+async function marketingGetTemplates(authToken, activeOnly = true) {
+  const qs = activeOnly ? "?active_only=true" : "";
+  const data = await marketingFetchJson(authToken, `${MARKETING_API.getTemplates}${qs}`, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  const templates = Array.isArray(data?.templates) ? data.templates : Array.isArray(data) ? data : [];
+  return {
+    ok: true,
+    branch: cleanString(data?.branch),
+    templates: normalizeTemplatesList(templates)
+  };
+}
+
+async function marketingSaveTemplates(authToken, user, templatesInput) {
+  const rows = normalizeTemplatesList(Array.isArray(templatesInput) ? templatesInput : []);
+  const canManageMaster = userCanManageMarketingTemplates(user);
+  const canEditBranch = userCanEditBranchMarketingTemplates(user);
+  if (!canManageMaster && !canEditBranch) {
+    throw new Error("You do not have permission to save marketing templates");
+  }
+
+  const saved = [];
+  for (const template of rows) {
+    const basePayload = buildMarketingTemplatePayload(template);
+    let data;
+    if (canManageMaster && template.scope !== "branch") {
+      data = await marketingFetchJson(authToken, MARKETING_API.saveMasterTemplate, {
+        method: "POST",
+        body: JSON.stringify(basePayload)
+      });
+    } else {
+      const sourceId = template.root_template_id || template.parent_template_id || template.id;
+      data = await marketingFetchJson(authToken, MARKETING_API.saveBranchTemplate, {
+        method: "POST",
+        body: JSON.stringify({
+          source_template_id: Number(sourceId) || sourceId,
+          name: basePayload.name,
+          body: basePayload.body,
+          messages: basePayload.messages,
+          variables: basePayload.variables,
+          send_policy: basePayload.send_policy
+        })
+      });
+    }
+    if (data?.template) saved.push(normalizeTemplateRecord(data.template, saved.length));
+  }
+  return { ok: true, templates: saved };
+}
+
+async function marketingGetCampaigns(authToken, activeOnly = true) {
+  const qs = activeOnly ? "?active_only=true" : "";
+  const data = await marketingFetchJson(authToken, `${MARKETING_API.getCampaigns}${qs}`, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  if (!data || typeof data !== "object") {
+    throw new Error(`Campaign API returned invalid response: ${cleanString(data) || "empty response"}`);
+  }
+  return {
+    ok: true,
+    campaigns: Array.isArray(data?.campaigns) ? data.campaigns : []
+  };
+}
+
+async function marketingSaveCampaign(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const body = {
+    ...(cleanString(src.id) ? { id: Number(src.id) || cleanString(src.id) } : {}),
+    ...(cleanString(src.campaign_key) ? { campaign_key: cleanString(src.campaign_key) } : {}),
+    name: cleanString(src.name),
+    template_1_id: cleanString(src.template_1_id),
+    template_2_id: cleanString(src.template_2_id),
+    active: src.active !== false
+  };
+  if (!body.name) throw new Error("Campaign name is required");
+  if (!body.template_1_id || !body.template_2_id) throw new Error("Campaign requires Template 1 and Template 2");
+  if (body.template_1_id === body.template_2_id) throw new Error("Template 1 and Template 2 must be different");
+  return await marketingFetchJson(authToken, MARKETING_API.saveCampaign, {
+    method: "POST",
+    body: JSON.stringify(body)
+  });
+}
+
+async function marketingGetResolvedCampaign(authToken, campaignId) {
+  const id = cleanString(campaignId);
+  if (!id) throw new Error("campaign_id is required");
+  const data = await marketingFetchJson(authToken, `${MARKETING_API.getResolvedCampaign}?campaign_id=${encodeURIComponent(id)}`, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  if (!data || typeof data !== "object") {
+    throw new Error(`Resolved campaign API returned invalid response: ${cleanString(data) || "empty response"}`);
+  }
+  return {
+    ok: true,
+    campaign: data?.campaign || null,
+    template_1: data?.template_1 ? normalizeTemplateRecord(data.template_1, 0) : null,
+    template_2: data?.template_2 ? normalizeTemplateRecord(data.template_2, 1) : null,
+    master_template_1_id: data?.master_template_1_id,
+    master_template_2_id: data?.master_template_2_id
+  };
+}
+
+async function marketingCheckStatus(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const templateId = cleanString(src.template_id ?? src.templateId);
+  const rootTemplateId = cleanString(src.root_template_id ?? src.rootTemplateId ?? templateId);
+  if (!templateId) throw new Error("template_id is required");
+  if (!rootTemplateId) throw new Error("root_template_id is required");
+  const data = await marketingFetchJson(authToken, MARKETING_API.checkMarketingStatus, {
+    method: "POST",
+    body: JSON.stringify({
+      template_id: Number(templateId) || templateId,
+      root_template_id: Number(rootTemplateId) || rootTemplateId,
+      branch: cleanString(src.branch),
+      profile: cleanString(src.profile) || DEFAULT_WA_PROFILE_NAME,
+      phones: Array.isArray(src.phones) ? src.phones : []
+    })
+  });
+  const dailyLimit = data?.daily_limit && typeof data.daily_limit === "object" ? data.daily_limit : {};
+  const limit = Math.max(0, Number(dailyLimit.limit ?? MARKETING_BLAST_LIMIT) || 0);
+  const sentLast24h = Math.max(0, Number(dailyLimit.sent_last_24h ?? dailyLimit.sentLast24h ?? 0) || 0);
+  const remaining = Math.max(0, Number(dailyLimit.remaining ?? Math.max(0, limit - sentLast24h)) || 0);
+  return {
+    ok: true,
+    template_id: data?.template_id ?? (Number(templateId) || templateId),
+    root_template_id: data?.root_template_id ?? (Number(rootTemplateId) || rootTemplateId),
+    daily_limit: {
+      limit,
+      sent_last_24h: sentLast24h,
+      remaining,
+      limit_reached: dailyLimit.limit_reached === true || dailyLimit.limitReached === true || remaining <= 0
+    },
+    statuses: Array.isArray(data?.statuses) ? data.statuses : []
+  };
+}
+
+async function marketingRecordSendLog(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  return await marketingFetchJson(authToken, MARKETING_API.recordSendLog, {
+    method: "POST",
+    body: JSON.stringify(src)
+  });
+}
+
+function buildQueryString(params = {}) {
+  const qs = new URLSearchParams();
+  for (const [key, value] of Object.entries(params && typeof params === "object" ? params : {})) {
+    const clean = cleanString(value);
+    if (clean) qs.set(key, clean);
+  }
+  const text = qs.toString();
+  return text ? `?${text}` : "";
+}
+
+async function marketingGetBlastHistory(authToken, payload = {}) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const qs = buildQueryString({
+    limit: src.limit || 100,
+    campaign_id: src.campaign_id,
+    branch: src.branch,
+    profile: src.profile,
+    template_step: src.template_step,
+    status: src.status
+  });
+  const data = await marketingFetchJson(authToken, `${MARKETING_API.getBlastHistory}${qs}`, {
+    method: "GET",
+    headers: clinicAuthHeaders(authToken, false)
+  });
+  return {
+    ok: true,
+    can_view_all_branches: data?.can_view_all_branches === true,
+    branch: cleanString(data?.branch),
+    rows: Array.isArray(data?.rows) ? data.rows : []
+  };
+}
+
+async function marketingGetDueFollowups(authToken, campaignId) {
+  const id = cleanString(campaignId);
+  if (!id) throw new Error("campaign_id is required");
+  try {
+    return await marketingFetchJson(authToken, `${MARKETING_API.getDueFollowups}?campaign_id=${encodeURIComponent(id)}`, {
+      method: "GET",
+      headers: clinicAuthHeaders(authToken, false)
+    });
+  } catch (e) {
+    const msg = cleanString(e?.message || e);
+    if (msg.toLowerCase().includes("root_template_id")) {
+      throw new Error(
+        "Xano due follow-ups endpoint is referencing root_template_id as an unsupported parameter. WhatsConect only sends campaign_id here; Xano should derive template root IDs from the selected campaign/templates inside marketing_followups_due."
+      );
+    }
+    if (msg.toLowerCase().includes("marketing_templates.id")) {
+      throw new Error(
+        "This campaign points to an invalid template ID in Xano. Edit the campaign and re-select Template 1 and Template 2 from saved Xano master templates, then save the campaign again."
+      );
+    }
+    throw e;
+  }
+}
+
+async function marketingImportLegacyLogs(authToken, rows) {
+  return await marketingFetchJson(authToken, MARKETING_API.importLegacyLogs, {
+    method: "POST",
+    body: JSON.stringify({ rows: Array.isArray(rows) ? rows : [] })
   });
 }
 
@@ -982,14 +1533,16 @@ function normalizePersistedChatMedia(raw) {
   const fileLength = Math.max(0, Number(src.fileLength || 0) || 0);
   const thumbnailDataUrl = compactThumbnailDataUrl(cleanString(src.thumbnailDataUrl || ""));
   const localPath = cleanString(src.localPath || "");
-  if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl && !localPath) return null;
+  const url = cleanString(src.url || "");
+  if (!kind && !mimeType && !fileName && !fileLength && !thumbnailDataUrl && !localPath && !url) return null;
   return {
     kind,
     mimeType,
     fileName,
     fileLength,
     thumbnailDataUrl,
-    localPath
+    localPath,
+    url
   };
 }
 
@@ -1217,21 +1770,24 @@ function normalizeTemplateMessageType(typeRaw) {
 function normalizeTemplateAttachmentRecord(raw, forcedType = "") {
   const src = raw && typeof raw === "object" ? raw : {};
   const filePath = cleanString(src.path || src.filePath || "");
+  const url = cleanString(src.url || src.fileUrl || "");
   const fileName = cleanString(src.fileName || src.name || path.basename(filePath || ""));
   const mimeType = cleanString(src.mimeType || src.type || (filePath ? getMimeTypeForPath(filePath) : ""));
   const inferredKind = normalizeTemplateMessageType(src.kind || attachmentKindFromMimeOrPath(mimeType, filePath));
   const forcedKind = normalizeTemplateMessageType(forcedType);
   const kind = forcedKind === "text" ? inferredKind : forcedKind;
   const size = Math.max(0, Number(src.size || 0) || 0);
-  const assetId = cleanString(src.assetId || src.mediaAssetId || "");
-  if (!filePath && !fileName && !assetId) return null;
+  const assetIdRaw = src.asset_id ?? src.assetId ?? src.mediaAssetId ?? "";
+  const assetId = typeof assetIdRaw === "number" ? assetIdRaw : cleanString(assetIdRaw);
+  if (!filePath && !url && !fileName && !assetId) return null;
   return {
     path: filePath,
+    url,
     fileName: fileName || "Attachment",
     mimeType,
     kind,
     size,
-    ...(assetId ? { assetId } : {})
+    ...(assetId ? { assetId, asset_id: assetId } : {})
   };
 }
 
@@ -1313,8 +1869,10 @@ function normalizeTemplateRecord(raw, idx) {
   for (const v of extractTemplateVarsFromMessages(messages)) vars.add(v);
   for (const v of extractTemplateVars(body)) vars.add(v);
 
-  const sendPolicy = t.sendPolicy === "multiple" ? "multiple" : "once";
+  const sendPolicy = t.sendPolicy === "multiple" || t.send_policy === "multiple" ? "multiple" : "once";
   const fallbackId = "t_" + String(idx + 1);
+  const rootTemplateId = t.root_template_id ?? t.rootTemplateId ?? null;
+  const parentTemplateId = t.parent_template_id ?? t.parentTemplateId ?? null;
 
   return {
     id: String(t.id || fallbackId),
@@ -1322,7 +1880,15 @@ function normalizeTemplateRecord(raw, idx) {
     body,
     messages,
     variables: Array.from(vars),
-    sendPolicy
+    sendPolicy,
+    send_policy: sendPolicy,
+    active: t.active !== false,
+    scope: cleanString(t.scope || "global"),
+    branch: cleanString(t.branch),
+    root_template_id: rootTemplateId === null || rootTemplateId === undefined || rootTemplateId === "" ? String(t.id || fallbackId) : rootTemplateId,
+    parent_template_id: parentTemplateId === undefined ? null : parentTemplateId,
+    version: Math.max(1, Number(t.version || 1) || 1),
+    is_branch_override: t.is_branch_override === true
   };
 }
 
@@ -1927,7 +2493,7 @@ function createProfile(name) {
   });
   profiles.push(profile);
   saveProfiles(profiles);
-  ensureDir(getProfileAuthDir(id));
+  ensureDir(path.join(profilesRootDir, id));
   return profile;
 }
 
@@ -1959,7 +2525,7 @@ async function deleteProfile(profileId) {
     handshakeAttemptId++;
     handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
     // waitForConnectSetupIdle removed (WhatsMeow: no idle wait needed)
-    await disconnectActiveProfileSocket();
+    await disconnectActiveProfileSocket("Disconnected", { logout: true });
     isConnecting = false;
   }
 
@@ -1985,9 +2551,10 @@ async function deleteProfile(profileId) {
     });
     saveProfiles([fallback]);
     store.set("activeProfileId", fallback.id);
-    ensureDir(getProfileAuthDir(fallback.id));
+    ensureDir(path.join(profilesRootDir, fallback.id));
+    await restartGoBackendForProfile(fallback.id);
 
-    win?.webContents.send("wa:status", {
+    sendToRenderer("wa:status", {
       connected: false,
       text: "Not connected",
       profileId: fallback.id
@@ -1999,7 +2566,7 @@ async function deleteProfile(profileId) {
   if (isActive) {
     const nextActiveId = nextProfiles[0].id;
     store.set("activeProfileId", nextActiveId);
-    await autoReconnectActiveProfile();
+    await restartGoBackendForProfile(nextActiveId);
     return { ok: true, activeProfileId: nextActiveId, replaced: false };
   }
 
@@ -2013,17 +2580,22 @@ async function terminateProfileSession(profileId) {
 
   const activeProfileId = getActiveProfileId();
   const isActive = activeProfileId === profileId;
-  const authDir = getProfileAuthDir(profileId);
+  const profileDir = path.join(profilesRootDir, profileId);
 
   if (isActive) {
     handshakeAttemptId++;
     handshakeState = { method: "qr", phoneNumber: "", pairingRequested: false };
     // waitForConnectSetupIdle removed (WhatsMeow: no idle wait needed)
-    await disconnectActiveProfileSocket();
+    await disconnectActiveProfileSocket("Disconnected", { logout: true });
     isConnecting = false;
   }
 
-  clearAuthDir(authDir);
+  try {
+    fs.rmSync(profileDir, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+  ensureDir(profileDir);
   invalidSessionProfiles.delete(profileId);
   clearContactsCacheForProfile(profileId);
   clearWaChatStateForProfile(profileId);
@@ -2042,7 +2614,8 @@ async function terminateProfileSession(profileId) {
   saveProfiles(profiles);
 
   if (isActive) {
-    win?.webContents.send("wa:status", {
+    await restartGoBackendForProfile(profileId);
+    sendToRenderer("wa:status", {
       connected: false,
       text: "Session terminated. Connect required.",
       profileId
@@ -2117,6 +2690,142 @@ function clearSentForTemplate(templateId) {
   }
   store.set("sentLog", logObj);
   return true;
+}
+
+function getSentStatusMapForTemplate(templateId, phones = []) {
+  const targetTemplateId = cleanString(templateId);
+  if (!targetTemplateId) return {};
+  const phoneSet = new Set();
+  for (const phone of Array.isArray(phones) ? phones : []) {
+    try {
+      const normalized = normalizeMsisdn(phone);
+      if (normalized) phoneSet.add(normalized);
+    } catch {
+      // ignore invalid phone hints
+    }
+  }
+  const logObj = getSentLog();
+  const prefix = `${targetTemplateId}|`;
+  const out = {};
+  for (const [key, value] of Object.entries(logObj)) {
+    if (!key.startsWith(prefix)) continue;
+    const msisdn = key.slice(prefix.length);
+    if (phoneSet.size > 0 && !phoneSet.has(msisdn)) continue;
+    out[msisdn] = typeof value === "string" ? value : cleanString(value?.sentAt || "");
+  }
+  return out;
+}
+
+function getLatestMarketingSentAtByPhone(phones = []) {
+  const phoneSet = new Set();
+  for (const phone of Array.isArray(phones) ? phones : []) {
+    try {
+      const normalized = normalizeMsisdn(phone);
+      if (normalized) phoneSet.add(normalized);
+    } catch {
+      // ignore invalid phone hints
+    }
+  }
+
+  const out = {};
+  const logObj = getSentLog();
+  for (const [key, value] of Object.entries(logObj)) {
+    const sepIdx = key.indexOf("|");
+    if (sepIdx < 0) continue;
+    const templateId = key.slice(0, sepIdx);
+    if (!templateId.startsWith("marketing_")) continue;
+    const msisdn = key.slice(sepIdx + 1);
+    if (phoneSet.size > 0 && !phoneSet.has(msisdn)) continue;
+    const sentAt = typeof value === "string" ? value : cleanString(value?.sentAt || "");
+    if (!sentAt) continue;
+    if (!out[msisdn] || sentAt > out[msisdn]) out[msisdn] = sentAt;
+  }
+  return out;
+}
+
+function getMarketingBlastGuardStore() {
+  const raw = store.get(MARKETING_BLAST_GUARD_KEY);
+  if (raw && typeof raw === "object") return raw;
+  store.set(MARKETING_BLAST_GUARD_KEY, {});
+  return {};
+}
+
+function normalizeMarketingBlastGuard(rawGuard, profileId) {
+  const src = rawGuard && typeof rawGuard === "object" ? rawGuard : {};
+  const cooldownUntil = Math.max(0, Number(src.cooldownUntil || 0));
+  const lastBlastAt = Math.max(0, Number(src.lastBlastAt || 0));
+  const lastBlastCount = Math.max(0, Number(src.lastBlastCount || 0));
+  const remainingMsRaw = Math.max(0, cooldownUntil - Date.now());
+  const shouldLock = lastBlastCount >= MARKETING_BLAST_LIMIT && remainingMsRaw > 0;
+  return {
+    profileId: cleanString(profileId || ""),
+    limit: MARKETING_BLAST_LIMIT,
+    cooldownMs: MARKETING_BLAST_COOLDOWN_MS,
+    cooldownUntil: shouldLock ? cooldownUntil : 0,
+    lastBlastAt,
+    lastBlastCount,
+    remainingMs: shouldLock ? remainingMsRaw : 0,
+    isLocked: shouldLock
+  };
+}
+
+function getMarketingBlastGuard(profileId) {
+  const safeProfileId = cleanString(profileId || getActiveProfileId());
+  const guardStore = getMarketingBlastGuardStore();
+  const normalized = normalizeMarketingBlastGuard(guardStore[safeProfileId], safeProfileId);
+
+  if (!normalized.isLocked && guardStore[safeProfileId] && normalized.cooldownUntil > 0) {
+    delete guardStore[safeProfileId];
+    store.set(MARKETING_BLAST_GUARD_KEY, guardStore);
+    return normalizeMarketingBlastGuard(null, safeProfileId);
+  }
+
+  return normalized;
+}
+
+function setMarketingBlastCooldown(profileId, recipientCount) {
+  const safeProfileId = cleanString(profileId || getActiveProfileId());
+  const guardStore = getMarketingBlastGuardStore();
+  const count = Math.max(0, Number(recipientCount || 0));
+  if (count < MARKETING_BLAST_LIMIT) {
+    delete guardStore[safeProfileId];
+    store.set(MARKETING_BLAST_GUARD_KEY, guardStore);
+    return getMarketingBlastGuard(safeProfileId);
+  }
+  const now = Date.now();
+  guardStore[safeProfileId] = {
+    cooldownUntil: now + MARKETING_BLAST_COOLDOWN_MS,
+    lastBlastAt: now,
+    lastBlastCount: count
+  };
+  store.set(MARKETING_BLAST_GUARD_KEY, guardStore);
+  return getMarketingBlastGuard(safeProfileId);
+}
+
+function getMarketingBlastHistory() {
+  const raw = store.get(MARKETING_BLAST_HISTORY_KEY);
+  return Array.isArray(raw) ? raw : [];
+}
+
+function appendMarketingBlastHistory(entry) {
+  const src = entry && typeof entry === "object" ? entry : {};
+  const nextEntry = {
+    id: cleanString(src.id) || `mbh_${Date.now().toString(16)}_${Math.random().toString(16).slice(2, 8)}`,
+    ts: cleanString(src.ts) || nowIsoShort(),
+    profileId: cleanString(src.profileId),
+    branch: cleanString(src.branch),
+    templateId: cleanString(src.templateId),
+    total: Math.max(0, Number(src.total || 0)),
+    sent: Math.max(0, Number(src.sent || 0)),
+    failed: Math.max(0, Number(src.failed || 0)),
+    skipped: Math.max(0, Number(src.skipped || 0)),
+    stopped: src.stopped === true
+  };
+  const current = getMarketingBlastHistory();
+  current.unshift(nextEntry);
+  const clipped = current.slice(0, MARKETING_BLAST_HISTORY_MAX_ROWS);
+  store.set(MARKETING_BLAST_HISTORY_KEY, clipped);
+  return nextEntry;
 }
 
 /* --------------------------- WhatsApp Contacts (persisted cache + live sync) ---------------------------- */
@@ -2703,13 +3412,62 @@ function scheduleWaChatSync(profileId, reason) {
   if (oldTimer) clearTimeout(oldTimer);
   const timer = setTimeout(() => {
     waChatSyncTimers.delete(key);
-    win?.webContents.send("wa:chatSync", {
+    sendToRenderer("wa:chatSync", {
       profileId: key,
       reason: cleanString(reason || "update") || "update",
       ts: Date.now()
     });
   }, 120);
   waChatSyncTimers.set(key, timer);
+}
+
+function enqueueIncomingMessages(profileId, messages, reason = "messages") {
+  const key = cleanString(profileId);
+  if (!key || !Array.isArray(messages) || messages.length === 0) return;
+
+  let queue = waIncomingMessageQueueByProfile.get(key);
+  if (!queue) {
+    queue = [];
+    waIncomingMessageQueueByProfile.set(key, queue);
+  }
+  queue.push(...messages);
+
+  if (waIncomingMessageProcessorByProfile.has(key)) return;
+
+  const job = (async () => {
+    let changedAny = false;
+    try {
+      while (true) {
+        const currentQueue = waIncomingMessageQueueByProfile.get(key);
+        if (!currentQueue || currentQueue.length === 0) break;
+        const chunk = currentQueue.splice(0, WA_INCOMING_MESSAGE_CHUNK_SIZE);
+        if (currentQueue.length === 0) waIncomingMessageQueueByProfile.delete(key);
+        if (chunk.length === 0) break;
+
+        try {
+          const changed = upsertMessagesForProfile(key, chunk);
+          if (changed > 0) changedAny = true;
+        } catch (err) {
+          log.warn({ err, profileId: key, size: chunk.length }, "Failed to process incoming WhatsApp messages");
+        }
+
+        if (waIncomingMessageQueueByProfile.has(key)) {
+          await delayTick(0);
+        }
+      }
+    } finally {
+      waIncomingMessageProcessorByProfile.delete(key);
+      if (changedAny) {
+        sendToRenderer("wa:chatSync", {
+          profileId: key,
+          reason: cleanString(reason || "messages") || "messages",
+          ts: Date.now()
+        });
+      }
+    }
+  })();
+
+  waIncomingMessageProcessorByProfile.set(key, job);
 }
 
 function clearWaChatSyncTimer(profileId) {
@@ -2739,7 +3497,9 @@ function normalizeEpochMs(raw, fallback = 0) {
     const s = raw.trim();
     if (!s) return fallback;
     const n = Number(s);
-    return Number.isFinite(n) ? normalizeEpochMs(n, fallback) : fallback;
+    if (Number.isFinite(n)) return normalizeEpochMs(n, fallback);
+    const parsed = Date.parse(s);
+    return Number.isFinite(parsed) ? parsed : fallback;
   }
 
   if (raw && typeof raw === "object") {
@@ -3312,6 +4072,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.imageMessage.mimetype) || "image/jpeg",
         fileName: textOrEmpty(content.imageMessage.fileName),
         fileLength: Number(content.imageMessage.fileLength || 0) || 0,
+        url: textOrEmpty(messageNode.__mediaUrl),
         thumbnailDataUrl: thumbDataUrl,
         localPath
       },
@@ -3332,6 +4093,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.videoMessage.mimetype) || "video/mp4",
         fileName: textOrEmpty(content.videoMessage.fileName),
         fileLength: Number(content.videoMessage.fileLength || 0) || 0,
+        url: textOrEmpty(messageNode.__mediaUrl),
         thumbnailDataUrl: compactThumbnailDataUrl(thumb ? `data:image/jpeg;base64,${thumb}` : "")
       },
       skip: false
@@ -3351,6 +4113,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.documentMessage.mimetype) || "application/octet-stream",
         fileName,
         fileLength: Number(content.documentMessage.fileLength || 0) || 0,
+        url: textOrEmpty(messageNode.__mediaUrl),
         thumbnailDataUrl: ""
       },
       skip: false
@@ -3368,6 +4131,7 @@ function summarizeMessagePayload(rawMessage) {
         mimeType: textOrEmpty(content.audioMessage.mimetype) || "audio/ogg",
         fileName: "",
         fileLength: Number(content.audioMessage.fileLength || 0) || 0,
+        url: textOrEmpty(messageNode.__mediaUrl),
         thumbnailDataUrl: ""
       },
       skip: false
@@ -3777,6 +4541,7 @@ function upsertMessagesForProfile(profileId, messages) {
         String(prevMedia?.mimeType || "") === String(nextMedia?.mimeType || "") &&
         String(prevMedia?.fileName || "") === String(nextMedia?.fileName || "") &&
         Number(prevMedia?.fileLength || 0) === Number(nextMedia?.fileLength || 0) &&
+        String(prevMedia?.url || "") === String(nextMedia?.url || "") &&
         String(prevMedia?.thumbnailDataUrl || "") === String(nextMedia?.thumbnailDataUrl || "") &&
         String(prevMedia?.localPath || "") === String(nextMedia?.localPath || "");
       const same =
@@ -3974,6 +4739,8 @@ function getRecentChatsForProfile(profileId, options) {
   for (const rawChat of Object.values(state.chatsByJid)) {
     const row = serializeChatSummary(profileId, rawChat);
     if (!row) continue;
+    const cachedMessages = Array.isArray(state.messagesByChat?.[row.jid]) ? state.messagesByChat[row.jid] : [];
+    if (cachedMessages.length === 0) continue;
 
     const existing = rowsByJid.get(row.jid);
     if (!existing) {
@@ -4044,7 +4811,8 @@ function serializeMessageForRenderer(profileId, chatJid, messageRecord) {
         fileName: cleanString(msg.media.fileName || ""),
         fileLength: Number(msg.media.fileLength || 0) || 0,
         thumbnailDataUrl: compactThumbnailDataUrl(cleanString(msg.media.thumbnailDataUrl || "")),
-        localPath: cleanString(msg.media.localPath || "")
+        localPath: cleanString(msg.media.localPath || ""),
+        url: cleanString(msg.media.url || "")
       }
       : null,
     status: Number(msg.status || 0) || 0
@@ -4106,7 +4874,30 @@ function pruneChatStoreToLookback(profileId, days) {
 }
 
 async function warmRecentHistoryForProfile(profileId, options) {
-  return { ok: true, syncTriggered: false };
+  if (!isConnected) return { ok: true, syncTriggered: false };
+  const existing = waHistoryWarmupInFlightByProfile.get(profileId);
+  if (existing) return existing;
+  const work = (async () => {
+    try {
+      const res = await fetch("http://localhost:12345/api/messages?full=true&limit=50");
+      const data = await res.json().catch(() => ({}));
+      if (!data?.ok) {
+        return { ok: false, syncTriggered: false, error: data?.error || "History warmup failed" };
+      }
+      return {
+        ok: true,
+        syncTriggered: data?.data?.syncTriggered === true,
+        mode: data?.data?.mode || "",
+        message: data?.message || ""
+      };
+    } catch (err) {
+      return { ok: false, syncTriggered: false, error: err?.message || String(err) };
+    } finally {
+      setTimeout(() => waHistoryWarmupInFlightByProfile.delete(profileId), 1000);
+    }
+  })();
+  waHistoryWarmupInFlightByProfile.set(profileId, work);
+  return work;
 }
 
 async function resetChatHistoryForProfile(profileId, chatJid, options) {
@@ -4182,6 +4973,24 @@ function getMimeTypeForPath(filePath) {
   const ext = String(path.extname(String(filePath || "")).toLowerCase());
   if (!ext) return "application/octet-stream";
   return MIME_BY_EXT[ext] || "application/octet-stream";
+}
+
+function isValidRasterImageBuffer(bytes, mimeType, filePath) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 32) return false;
+  const mime = cleanString(mimeType).toLowerCase();
+  const ext = String(path.extname(String(filePath || "")).toLowerCase());
+  const isPng = mime === "image/png" || ext === ".png";
+  const isJpeg = mime === "image/jpeg" || ext === ".jpg" || ext === ".jpeg";
+  const isGif = mime === "image/gif" || ext === ".gif";
+  const isWebp = mime === "image/webp" || ext === ".webp";
+  const isBmp = mime === "image/bmp" || ext === ".bmp";
+
+  if (isPng) return bytes.length > 64 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  if (isJpeg) return bytes.length > 64 && bytes[0] === 0xff && bytes[1] === 0xd8;
+  if (isGif) return bytes.length > 64 && (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a");
+  if (isWebp) return bytes.length > 64 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP";
+  if (isBmp) return bytes.length > 64 && bytes.subarray(0, 2).toString("ascii") === "BM";
+  return !mime.startsWith("image/");
 }
 
 function attachmentKindFromMimeOrPath(mimeType, filePath) {
@@ -4946,12 +5755,13 @@ async function autoReconnectActiveProfile() {
     clearTimeout(t);
     const data = await res.json();
     if (data.ok && data.data) {
-      isConnected = data.data.connected;
-      const statusText = isConnected ? "Connected" : "Not connected";
+      isConnected = data.data.connected === true && data.data.loggedIn !== false;
+      const statusText = isConnected ? "Connected" : data.data.connected ? "Reconnecting..." : "Not connected";
       win?.webContents.send("wa:status", {
         isConnected,
         connected: isConnected,
         text: statusText,
+        loggedIn: data.data.loggedIn !== false,
         pushName: data.data.pushName || "",
         profileId
       });
@@ -5009,6 +5819,87 @@ async function sendPayloadToMsisdn(msisdn, messagePayload, sendOptions = {}) {
   }
 }
 
+function appendOutgoingChatMessageForProfile(profileId, chatJid, payload) {
+  const jid = canonicalizeChatJidForProfile(profileId, chatJid);
+  if (!jid) return 0;
+  const src = payload && typeof payload === "object" ? payload : {};
+  const text = String(src.text || "");
+  const attachment = src.attachment && typeof src.attachment === "object" ? src.attachment : null;
+  const now = normalizeEpochMs(src.sentAt || Date.now(), Date.now());
+  const messageId = cleanString(src.messageId || "") || `local_sent_${now}_${Math.random().toString(16).slice(2, 8)}`;
+  const key = {
+    remoteJid: jid,
+    fromMe: true,
+    id: messageId,
+    participant: ""
+  };
+  let message = {};
+  const mediaPath = cleanString(attachment?.path || attachment?.filePath || attachment?.url || "");
+  const fileName = cleanString(attachment?.fileName || path.basename(mediaPath || "file"));
+  const mimeType = cleanString(attachment?.mimeType || getMimeTypeForPath(mediaPath || fileName));
+  const kind = normalizeTemplateMessageType(attachment?.kind || attachmentKindFromMimeOrPath(mimeType, mediaPath || fileName));
+  const statSize = mediaPath && fs.existsSync(mediaPath) ? Number(fs.statSync(mediaPath).size || 0) : 0;
+
+  if (!attachment) {
+    if (!text.trim()) return 0;
+    message = { conversation: text };
+  } else if (kind === "image") {
+    message = {
+      imageMessage: {
+        caption: text,
+        mimetype: mimeType || "image/jpeg",
+        fileName,
+        fileLength: statSize
+      }
+    };
+  } else if (kind === "video") {
+    message = {
+      videoMessage: {
+        caption: text,
+        mimetype: mimeType || "video/mp4",
+        fileName,
+        fileLength: statSize
+      }
+    };
+  } else if (kind === "audio") {
+    message = {
+      audioMessage: {
+        mimetype: mimeType || "audio/mpeg",
+        fileName,
+        fileLength: statSize
+      }
+    };
+  } else {
+    message = {
+      documentMessage: {
+        caption: text,
+        mimetype: mimeType || "application/octet-stream",
+        fileName,
+        fileLength: statSize
+      }
+    };
+  }
+
+  const raw = {
+    key,
+    chatId: jid,
+    messageTimestamp: Math.floor(now / 1000),
+    pushName: "You",
+    message,
+    __mediaUrl: mediaPath.startsWith("http://") || mediaPath.startsWith("https://") ? mediaPath : "",
+    __localImagePath: kind === "image" && mediaPath && !mediaPath.startsWith("http") ? mediaPath : ""
+  };
+  const changed = upsertMessagesForProfile(profileId, [raw]);
+  if (changed > 0) {
+    sendToRenderer("wa:chatSync", {
+      profileId,
+      reason: "local_outgoing",
+      ts: Date.now()
+    });
+  }
+  return changed;
+}
+
 async function sendText(msisdn, text) {
   if (!(await ensureConnectedForSend()) || !isConnected) {
     throw new Error("WhatsApp not connected");
@@ -5037,6 +5928,8 @@ function validateTemplateMessagesForSend(messages) {
     if (type === "text") continue;
     const attachment = normalizeTemplateAttachmentRecord(row.attachment, type);
     const filePath = cleanString(attachment?.path || "");
+    const mediaUrl = cleanString(attachment?.url || "");
+    if (mediaUrl) continue;
     if (!filePath) throw new Error(`Template message ${i + 1} is missing media attachment`);
     if (!fs.existsSync(filePath)) throw new Error(`Template message ${i + 1} attachment file not found`);
     const stat = fs.statSync(filePath);
@@ -5058,41 +5951,45 @@ function buildTemplateMessagePayload(message, textOverride = null) {
 
   const attachment = normalizeTemplateAttachmentRecord(row.attachment, type);
   const filePath = cleanString(attachment?.path || "");
-  if (!filePath) throw new Error("Template media attachment is missing");
-  if (!fs.existsSync(filePath)) throw new Error("Template media attachment file not found");
-  const fileStat = fs.statSync(filePath);
-  if (!fileStat || !fileStat.isFile()) throw new Error("Template media attachment must be a file");
+  const mediaUrl = cleanString(attachment?.url || "");
+  const mediaRef = mediaUrl || filePath;
+  if (!mediaRef) throw new Error("Template media attachment is missing");
+  if (!mediaUrl) {
+    if (!fs.existsSync(filePath)) throw new Error("Template media attachment file not found");
+    const fileStat = fs.statSync(filePath);
+    if (!fileStat || !fileStat.isFile()) throw new Error("Template media attachment must be a file");
+  }
 
-  const fileName = cleanString(attachment.fileName || path.basename(filePath));
-  const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(filePath));
-  const detectedKind = attachmentKindFromMimeOrPath(mimeType, filePath);
+  const fileName = cleanString(attachment.fileName || path.basename(mediaRef));
+  const mimeType = cleanString(attachment.mimeType || getMimeTypeForPath(mediaRef));
+  const detectedKind = attachmentKindFromMimeOrPath(mimeType, mediaRef);
   let kind = type;
   if (kind === "text") kind = normalizeTemplateMessageType(detectedKind);
   if (kind === "text") kind = detectedKind || "document";
 
   if (kind === "image") {
     return {
-      image: { url: filePath },
+      image: { url: mediaRef },
       ...(trimmedText ? { caption: trimmedText } : {})
     };
   }
   if (kind === "video") {
     return {
-      video: { url: filePath },
+      video: { url: mediaRef },
       ...(mimeType ? { mimetype: mimeType } : {}),
       ...(trimmedText ? { caption: trimmedText } : {})
     };
   }
   if (kind === "audio") {
     return {
-      audio: { url: filePath },
+      audio: { url: mediaRef },
       ...(mimeType ? { mimetype: mimeType } : {}),
       ptt: false
     };
   }
   return {
-    document: { url: filePath },
-    fileName: fileName || path.basename(filePath),
+    document: { url: mediaRef },
+    fileName: fileName || path.basename(mediaRef),
     ...(mimeType ? { mimetype: mimeType } : {}),
     ...(trimmedText ? { caption: trimmedText } : {})
   };
@@ -5126,17 +6023,27 @@ function summarizeTemplateMessagesForAudit(messages) {
   return out.join("\n\n").trim();
 }
 
-async function disconnectActiveProfileSocket(statusText = "Disconnected") {
-  const activeProfileId = getActiveProfileId();
+async function callGoSessionEndpoint(endpointPath) {
+  const safePath = String(endpointPath || "").startsWith("/") ? String(endpointPath) : `/${String(endpointPath || "")}`;
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 5000);
   try {
-    const controller = new AbortController();
-    const t = setTimeout(() => controller.abort(), 5000); // 5s timeout
-    const res = await fetch("http://localhost:12345/api/logout", { signal: controller.signal });
+    const res = await fetch(`http://localhost:12345${safePath}`, { signal: controller.signal });
+    return await res.json();
+  } finally {
     clearTimeout(t);
-    const data = await res.json();
-    if (!data.ok) log.warn({ data }, "Go logout returned error");
+  }
+}
+
+async function disconnectActiveProfileSocket(statusText = "Disconnected", options = {}) {
+  const activeProfileId = getActiveProfileId();
+  const shouldLogout = options && options.logout === true;
+  const endpoint = shouldLogout ? "/api/logout" : "/api/disconnect";
+  try {
+    const data = await callGoSessionEndpoint(endpoint);
+    if (!data.ok) log.warn({ data, endpoint }, "Go session endpoint returned error");
   } catch (err) {
-    log.warn({ err: err.message }, "Failed to call Go logout");
+    log.warn({ err: err.message, endpoint }, "Failed to call Go session endpoint");
   }
 
   clearWaChatStateForProfile(activeProfileId);
@@ -5151,11 +6058,30 @@ async function disconnectActiveProfileSocket(statusText = "Disconnected") {
 }
 
 /* --------------------------- IPC ---------------------------- */
-ipcMain.handle("app:getTemplates", async () => readTemplates());
+ipcMain.handle("app:getTemplates", async () => {
+  const session = getAuthSession();
+  if (session.authToken) {
+    try {
+      const res = await marketingGetTemplates(session.authToken, true);
+      if (Array.isArray(res.templates)) saveTemplates(res.templates);
+      return res.templates;
+    } catch (err) {
+      log.warn({ err: err?.message || err }, "Failed to load marketing templates from Xano; using local cache");
+    }
+  }
+  return readTemplates();
+});
 
 ipcMain.handle("app:saveTemplates", async (_evt, templates) => {
-  saveTemplates(Array.isArray(templates) ? templates : []);
-  return { ok: true };
+  const list = Array.isArray(templates) ? templates : [];
+  const session = getAuthSession();
+  if (session.authToken) {
+    const saved = await marketingSaveTemplates(session.authToken, session.user || {}, list);
+    if (Array.isArray(saved.templates) && saved.templates.length > 0) saveTemplates(saved.templates);
+    return { ok: true, templates: saved.templates || [] };
+  }
+  saveTemplates(list);
+  return { ok: true, templates: normalizeTemplatesList(list) };
 });
 
 ipcMain.handle("app:getAppointmentTemplates", async () => {
@@ -5226,6 +6152,19 @@ ipcMain.handle("app:importTemplatesBundle", async (_evt, payload) => {
   }
 
   const result = isSingleTemplateMode ? importSingleMarketingTemplateBundle(parsed) : importTemplateBundle(parsed);
+  const session = getAuthSession();
+  if (session.authToken) {
+    try {
+      const current = readTemplates();
+      const toUpload = result.templateId
+        ? current.filter((t) => cleanString(t.id) === cleanString(result.templateId))
+        : current;
+      await marketingSaveTemplates(session.authToken, session.user || {}, toUpload);
+    } catch (err) {
+      log.warn({ err: err?.message || err }, "Imported template locally but failed to upload to Xano");
+      return { ok: true, filePath, xanoUploadFailed: true, ...result };
+    }
+  }
   return { ok: true, filePath, ...result };
 });
 
@@ -5308,6 +6247,76 @@ ipcMain.handle("app:saveAiRewriteConfig", async (_evt, config) => {
   return { ok: true, config: saved };
 });
 
+ipcMain.handle("marketing:getTemplates", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingGetTemplates(session.authToken, payload?.activeOnly !== false);
+});
+
+ipcMain.handle("marketing:saveTemplateAsset", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingSaveTemplateAsset(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:uploadTemplateAsset", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingUploadTemplateAsset(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:getCampaigns", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingGetCampaigns(session.authToken, payload?.activeOnly !== false);
+});
+
+ipcMain.handle("marketing:saveCampaign", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  if (!userCanManageMarketingCampaigns(session.user || {})) throw new Error("You do not have permission to save campaigns");
+  return await marketingSaveCampaign(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:getResolvedCampaign", async (_evt, campaignId) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingGetResolvedCampaign(session.authToken, campaignId);
+});
+
+ipcMain.handle("marketing:checkStatus", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingCheckStatus(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:recordSendLog", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingRecordSendLog(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:getBlastHistory", async (_evt, payload) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingGetBlastHistory(session.authToken, payload || {});
+});
+
+ipcMain.handle("marketing:getDueFollowups", async (_evt, campaignId) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  return await marketingGetDueFollowups(session.authToken, campaignId);
+});
+
+ipcMain.handle("marketing:importLegacyLogs", async (_evt, rows) => {
+  const session = getAuthSession();
+  if (!session.authToken) throw new Error("Not logged in");
+  if (!userCanImportMarketingLegacyLogs(session.user || {})) {
+    throw new Error("You do not have permission to import legacy marketing logs");
+  }
+  return await marketingImportLegacyLogs(session.authToken, rows);
+});
+
 ipcMain.handle("app:getProfiles", async () => {
   const profiles = loadProfiles();
   const activeProfileId = getActiveProfileId();
@@ -5334,8 +6343,17 @@ ipcMain.handle("app:deleteProfile", async (_evt, profileId) => {
 
 ipcMain.handle("app:setActiveProfile", async (_evt, profileId) => {
   setActiveProfileId(profileId);
-  await disconnectActiveProfileSocket("Profile selected. Click Connect to start session.");
-  return { ok: true, activeProfileId: getActiveProfileId() };
+  const backend = await restartGoBackendForProfile(profileId);
+  if (!backend?.isConnected) {
+    sendToRenderer("wa:status", {
+      connected: false,
+      isConnected: false,
+      text: "Profile selected. Click Connect to start session.",
+      reason: "disconnected",
+      profileId: getActiveProfileId()
+    });
+  }
+  return { ok: true, activeProfileId: getActiveProfileId(), backend };
 });
 
 ipcMain.handle("wa:handshake", async (_evt, payload) => {
@@ -5347,8 +6365,13 @@ ipcMain.handle("wa:handshake", async (_evt, payload) => {
       const resp = await fetch("http://localhost:12345/api/login/qr");
       const data = await resp.json();
       if (!data.ok) throw new Error(data.error || "Cannot fetch QR code");
-      const qrcode = require("qrcode");
-      const dataUrl = await qrcode.toDataURL(data.data, { margin: 2, scale: 6 });
+      if (data.data && typeof data.data === "object") {
+        win?.webContents.send("wa:status", { text: data.message || "Reconnecting existing WhatsApp session...", reason: "connecting" });
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const reconnect = await autoReconnectActiveProfile();
+        return { ok: true, reconnecting: true, data: data.data, reconnect };
+      }
+      const dataUrl = await QRCode.toDataURL(data.data, { margin: 2, scale: 6 });
       win?.webContents.send("wa:qr", dataUrl); // Signal ready
       win?.webContents.send("wa:status", { text: "Scan QR in WhatsApp", reason: "connecting" });
       return { ok: true, data: dataUrl };
@@ -5380,12 +6403,13 @@ ipcMain.handle("wa:getConnectionState", async () => {
   try {
     const res = await fetch("http://localhost:12345/api/status");
     const data = await res.json();
-    const isConn = !!data.data?.connected;
+    const isConn = data.data?.connected === true && data.data?.loggedIn !== false;
     return {
       ok: true,
       connected: isConn,
       isConnected: isConn,
-      text: isConn ? "Connected" : "Not connected",
+      loggedIn: data.data?.loggedIn !== false,
+      text: isConn ? "Connected" : data.data?.connected ? "Reconnecting..." : "Not connected",
       profileId: getActiveProfileId(),
       waVersion: "Go-WhatsMeow",
       pushName: data.data?.pushName || ""
@@ -5444,13 +6468,19 @@ ipcMain.handle("wa:getRecentChats", async (_evt, options) => {
     };
   }
 
+  if (opts.ensureHistory === true || opts.forceHistory === true) {
+    await warmRecentHistoryForProfile(profileId, opts);
+  }
+
   try {
     const resp = await fetch("http://localhost:12345/api/chats");
     const json = await resp.json();
     if (json.ok && json.data) {
       const state = ensureWaChatStateForProfile(profileId);
       for (const [jid, settings] of Object.entries(json.data)) {
-        const chat = ensureChatSummary(profileId, jid);
+        const normalizedJid = normalizeChatJid(jid);
+        if (!normalizedJid || !normalizedJid.includes("@")) continue;
+        const chat = ensureChatSummary(profileId, normalizedJid);
         if (chat) {
           chat.archived = settings.Archived || false;
           chat.pinned = settings.Pinned || false;
@@ -5491,15 +6521,30 @@ ipcMain.handle("wa:getChatMessages", async (_evt, payload) => {
     };
   }
 
+  let syncTriggered = false;
+  let syncMode = "";
   // Bridge call to Go (allows Go to trigger on-demand sync if needed)
   try {
     const limit = src.limit || 50;
-    await fetch(`http://localhost:12345/api/messages?chatJid=${encodeURIComponent(chatJid)}&limit=${limit}`);
+    const res = await fetch(`http://localhost:12345/api/messages?chatJid=${encodeURIComponent(chatJid)}&limit=${limit}`);
+    const data = await res.json().catch(() => ({}));
+    syncTriggered = data?.data?.syncTriggered === true;
+    syncMode = cleanString(data?.data?.mode || "");
   } catch (err) {
     // Ignore errors for now as we have local cache
   }
 
-  const messages = getChatMessagesForProfile(profileId, chatJid, src || {});
+  let messages = getChatMessagesForProfile(profileId, chatJid, src || {});
+  const initialCount = messages.length;
+  if (syncTriggered || initialCount === 0) {
+    const deadline = Date.now() + 6500;
+    while (Date.now() < deadline) {
+      await delayTick(350);
+      messages = getChatMessagesForProfile(profileId, chatJid, src || {});
+      if (messages.length > initialCount) break;
+      if (initialCount > 0 && syncMode !== "chat_on_demand") break;
+    }
+  }
   return {
     ok: true,
     connected: !!isConnected,
@@ -5554,6 +6599,15 @@ async function sendChatMessage(payload) {
     });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Go send failed");
+    const profileId = getActiveProfileId();
+    if (profileId) {
+      appendOutgoingChatMessageForProfile(profileId, chatJid, {
+        text,
+        attachment,
+        messageId: data?.data?.ID || "",
+        sentAt: data?.data?.Timestamp || Date.now()
+      });
+    }
     return { ok: true, data: data.data };
   } catch (err) {
     return { ok: false, error: err.message };
@@ -5597,6 +6651,12 @@ ipcMain.handle("wa:pickAttachment", async () => {
     const fileName = path.basename(filePath);
     const mimeType = getMimeTypeForPath(filePath);
     const kind = attachmentKindFromMimeOrPath(mimeType, filePath);
+    if (kind === "image") {
+      const preview = nativeImage.createFromPath(filePath);
+      if (!preview || preview.isEmpty()) {
+        continue;
+      }
+    }
     attachments.push({
       path: filePath,
       fileName,
@@ -5625,6 +6685,30 @@ ipcMain.handle("wa:resolveImagePreview", async (_evt, payload) => {
 ipcMain.handle("wa:clearSentForTemplate", async (_evt, templateId) => {
   clearSentForTemplate(templateId);
   return { ok: true };
+});
+
+ipcMain.handle("wa:getMarketingBlastGuard", async () => {
+  const profileId = getActiveProfileId();
+  return { ok: true, profileId, guard: getMarketingBlastGuard(profileId) };
+});
+
+ipcMain.handle("wa:getSentStatusForTemplate", async (_evt, payload) => {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const templateId = cleanString(src.templateId);
+  const phones = Array.isArray(src.phones) ? src.phones : [];
+  return {
+    ok: true,
+    templateId,
+    sentAtByPhone: getSentStatusMapForTemplate(templateId, phones),
+    latestMarketingSentAtByPhone: getLatestMarketingSentAtByPhone(phones)
+  };
+});
+
+ipcMain.handle("wa:getMarketingBlastHistory", async () => {
+  return {
+    ok: true,
+    rows: getMarketingBlastHistory()
+  };
 });
 
 ipcMain.handle("app:openCsvDialogAndParse", async (_evt, mapping) => {
@@ -5666,6 +6750,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     recipients,
     varsByPhone,
     aiRewrite,
+    marketingContext,
     pacing = { pattern: "cycle", minSec: 7, maxSec: 10 },
     templatePacing = { pattern: "random", minSec: 2, maxSec: 4 },
     safety = { maxRecipients: 200 },
@@ -5674,6 +6759,10 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
   if (!templateId) throw new Error("Missing templateId");
   if (!Array.isArray(recipients) || recipients.length === 0) throw new Error("No recipients");
+  const isMarketingBlast = String(templateId || "").startsWith("marketing_");
+  if (isMarketingBlast && recipients.length > MARKETING_BLAST_LIMIT) {
+    throw new Error(`Maximum marketing blast is ${MARKETING_BLAST_LIMIT} contacts only. Please reduce the list.`);
+  }
 
   const maxRecipients = Math.max(1, Number(safety?.maxRecipients ?? 200));
   if (recipients.length > maxRecipients) throw new Error(`Too many recipients. Limit is ${maxRecipients}.`);
@@ -5705,11 +6794,16 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   let sent = 0;
   let failed = 0;
   let skipped = 0;
+  const sentPhones = [];
   const skippedAlreadySentPhones = [];
   const skippedAlreadySentAtByPhone = {};
+  const marketingLogErrors = [];
+  const marketingLogResults = [];
   const batchJob = beginBatchJob("sendBatch", recipients.length);
   let stopped = false;
   let stoppedAtIndex = 0;
+  let xanoDailyLimitReached = false;
+  let xanoStopReason = "";
   let stopEventSent = false;
   const emitStopped = (indexHint) => {
     if (stopEventSent) return;
@@ -5722,6 +6816,62 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
       status: "stopped",
       error: "Stopped by user"
     });
+  };
+  const recordMarketingAttempt = async (msisdn, vars, status, messageSnapshot) => {
+    if (!isMarketingBlast || !sessionAuthToken || !marketingContext || typeof marketingContext !== "object") return null;
+    const safeVars = vars && typeof vars === "object" ? vars : {};
+    const senderBranch =
+      cleanString(marketingContext.branch) ||
+      cleanString(safeVars?.my_branch) ||
+      cleanString(safeVars?.myBranch) ||
+      cleanString(safeVars?.branch) ||
+      cleanString(safeVars?.Branch) ||
+      cleanString(clinicSession?.user?.Branch);
+    const recipientName = cleanString(safeVars?.name) || cleanString(safeVars?.Name) || "Patient";
+    const sentBy = firstNonEmptyString([
+      clinicSession?.user?.email,
+      clinicSession?.user?.nickname,
+      clinicSession?.user?.name
+    ]);
+    try {
+      const result = await marketingRecordSendLog(sessionAuthToken, {
+        template_id: marketingContext.template_id || String(templateId || "").replace(/^marketing_/, ""),
+        root_template_id: marketingContext.root_template_id,
+        phone: msisdn,
+        patient_name: recipientName,
+        branch: senderBranch,
+        profile: cleanString(marketingContext.profile) || DEFAULT_WA_PROFILE_NAME,
+        sent_by: sentBy,
+        sent_at: new Date().toISOString(),
+        message_snapshot: cleanString(messageSnapshot),
+        status
+      });
+      const normalized = {
+        phone: msisdn,
+        requestedStatus: status,
+        status: cleanString(result?.status || status),
+        reason: cleanString(result?.reason || ""),
+        send_log_id: result?.send_log_id,
+        daily_limit: result?.daily_limit && typeof result.daily_limit === "object" ? result.daily_limit : null
+      };
+      marketingLogResults.push(normalized);
+      if (normalized.status === "skipped" && normalized.reason === "daily_limit_reached") {
+        xanoDailyLimitReached = true;
+        xanoStopReason = "daily_limit_reached";
+      }
+      return normalized;
+    } catch (err) {
+      const message = String(err?.message || err || "Failed to record Xano marketing send log");
+      marketingLogErrors.push({
+        phone: msisdn,
+        status,
+        message,
+        apiCode: cleanString(err?.apiCode || ""),
+        statusCode: Number(err?.statusCode || 0) || 0
+      });
+      log.warn({ err, msisdn, status }, "Failed to record Xano marketing send log");
+      return null;
+    }
   };
 
   try {
@@ -5751,11 +6901,23 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         continue;
       }
 
-      if (skipAlreadySent && wasSent(templateId, msisdn)) {
+			if (!isMarketingBlast && skipAlreadySent && wasSent(templateId, msisdn)) {
         skipped++;
+        const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
         const lastSentAt = getSentAt(templateId, msisdn);
         skippedAlreadySentPhones.push(msisdn);
         if (lastSentAt) skippedAlreadySentAtByPhone[msisdn] = lastSentAt;
+        await recordMarketingAttempt(
+          msisdn,
+          vars,
+          "skipped",
+          lastSentAt ? `Already sent on ${lastSentAt}` : "Already sent (this template)"
+        );
+        if (xanoDailyLimitReached) {
+          stopped = true;
+          stoppedAtIndex = i + 1;
+          break;
+        }
         win?.webContents.send("batch:progress", {
           ts: nowIsoShort(),
           index: i + 1,
@@ -5779,8 +6941,11 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         continue;
       }
 
+      let currentVars = {};
+      let currentSnapshot = "";
       try {
         const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
+        currentVars = vars;
         const hintedName = firstNonEmptyString([vars?.name, vars?.Name, vars?.patient_name, vars?.patientName]);
         if (hintedName) {
           rememberRecipientNameForProfile(activeProfileIdForBatch, msisdn, hintedName);
@@ -5827,6 +6992,12 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
         if (preparedMessages.length === 0) {
           skipped++;
+          await recordMarketingAttempt(msisdn, currentVars, "skipped", "No sendable message after rendering");
+          if (xanoDailyLimitReached) {
+            stopped = true;
+            stoppedAtIndex = i + 1;
+            break;
+          }
           win?.webContents.send("batch:progress", {
             ts: nowIsoShort(),
             index: i + 1,
@@ -5888,26 +7059,24 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
 
         markSent(templateId, msisdn);
         sent++;
+        sentPhones.push(msisdn);
+        currentSnapshot = summarizeTemplateMessagesForAudit(preparedMessages);
 
         if (String(templateId || "").startsWith("marketing_")) {
-          const recipientBranch =
-            cleanString(vars?.branch) || cleanString(vars?.Branch) || cleanString(clinicSession?.user?.Branch);
-          const recipientName = cleanString(vars?.name) || cleanString(vars?.Name) || cleanString(hintedName) || "Patient";
-          const sentBy = firstNonEmptyString([
-            clinicSession?.user?.name,
-            clinicSession?.user?.nickname,
-            clinicSession?.user?.email
-          ]);
-
-          clinicRecordSentMessage(sessionAuthToken, {
-            branch: recipientBranch,
-            name: recipientName,
-            phone: msisdn,
-            sent_by: sentBy,
-            message: summarizeTemplateMessagesForAudit(preparedMessages)
-          }).catch((err) => {
-            log.warn({ err, msisdn }, "Failed to record sent marketing message");
-          });
+          await recordMarketingAttempt(msisdn, currentVars, "sent", currentSnapshot);
+          if (xanoDailyLimitReached) {
+            stopped = true;
+            stoppedAtIndex = i + 1;
+            win?.webContents.send("batch:progress", {
+              ts: nowIsoShort(),
+              index: i + 1,
+              total: recipients.length,
+              phone: msisdn,
+              status: "skipped",
+              error: "Daily marketing limit reached"
+            });
+            break;
+          }
         }
 
         win?.webContents.send("batch:progress", {
@@ -5919,6 +7088,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
         });
       } catch (e) {
         failed++;
+        await recordMarketingAttempt(msisdn, currentVars, "failed", currentSnapshot || String(e?.message || e));
         win?.webContents.send("batch:progress", {
           ts: nowIsoShort(),
           index: i + 1,
@@ -5944,13 +7114,36 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     finishBatchJob(batchJob);
   }
 
+  if (isMarketingBlast) {
+    const senderBranch =
+      cleanString(clinicSession?.user?.Branch) ||
+      cleanString(clinicSession?.user?.branch) ||
+      "";
+    appendMarketingBlastHistory({
+      ts: nowIsoShort(),
+      profileId: activeProfileIdForBatch,
+      branch: senderBranch,
+      templateId,
+      total: recipients.length,
+      sent,
+      failed,
+      skipped,
+      stopped
+    });
+  }
+
   return {
     ok: true,
     sent,
+    sentPhones,
     failed,
     skipped,
     skippedAlreadySentPhones,
     skippedAlreadySentAtByPhone,
+    marketingLogErrors,
+    marketingLogResults,
+    xanoDailyLimitReached,
+    xanoStopReason,
     stopped,
     stoppedAtIndex,
     total: recipients.length
@@ -6166,6 +7359,10 @@ function createWindow() {
     });
   });
 
+  win.on("closed", () => {
+    win = null;
+  });
+
   win.loadFile(path.join(__dirname, "renderer", "index.html"));
 }
 
@@ -6177,7 +7374,7 @@ app.whenReady().then(() => {
   schedulePersistWaChatCache();
 
   try {
-    startGoBackend(); // START GO SIDECAR
+    startGoBackend(getActiveProfileId()); // START GO SIDECAR
   } catch (error) {
     showStartupError("The bundled Go backend could not be found. Please reinstall WhatsConect.", error);
     app.quit();
@@ -6198,7 +7395,7 @@ app.on("before-quit", () => {
     // ignore
   }
 
-  killGoBackend(); // KILL GO SIDECAR
+  killGoBackend().catch(() => { }); // KILL GO SIDECAR
 });
 
 app.on("window-all-closed", () => {

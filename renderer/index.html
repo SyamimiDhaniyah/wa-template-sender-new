@@ -243,113 +243,142 @@
             <div class="panelTitleRow">
               <div>
                 <h2>Marketing</h2>
-                <p>Simple number list + template selection for campaign sends.</p>
+                <p>Select a template, load patients, check status, then send.</p>
               </div>
             </div>
 
             <div class="marketingLayout">
-              <div class="marketingLeft">
-                <div class="card">
-                  <div class="cardHead">
-                    <div>
-                      <h3>Send List</h3>
-                      <div class="smallText" id="marketingSummary">0 selected</div>
-                    </div>
-                    <div class="inlineRow">
-                      <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
-                      <button class="btnGhost" id="btnSelectMarketingSkipped" disabled>Select Skipped</button>
-                      <button class="btnGhost" id="btnClearMarketingRecipients">Clear</button>
-                    </div>
-                  </div>
-
-                  <div class="subCard">
-                    <div class="subHead">Manual Add</div>
-                    <div class="smallText">One line each: <code>phone,name</code> or just <code>phone</code></div>
-                    <textarea id="marketingPasteInput" class="fieldInput" rows="4" placeholder="0131231231,Ali&#10;01188888888,Nina"></textarea>
-                    <button class="btnGhost" id="btnAddMarketingFromText">Add to send list</button>
-                  </div>
-
-                  <div class="tableWrap tall">
-                    <table class="dataTable">
-                      <thead>
-                        <tr>
-                          <th style="width: 44px;"><input type="checkbox" id="marketingSelectAll" /></th>
-                          <th style="width: 170px;">Phone</th>
-                          <th style="width: 210px;">Name</th>
-                          <th style="width: 170px;">Branch</th>
-                          <th style="width: 150px;">Date</th>
-                          <th style="width: 120px;">Day</th>
-                          <th style="width: 110px;">Time</th>
-                          <th style="width: 220px;">Dentist</th>
-                          <th style="width: 70px;">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody id="marketingRecipientsBody"></tbody>
-                    </table>
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>1. Select Template</h3>
+                    <div class="smallText">Choose one marketing template. Xano checks duplicate status and the rolling 24-hour limit.</div>
                   </div>
                 </div>
 
-                <div class="card">
-                  <div class="cardHead">
-                    <div>
-                      <h3>Loaded Patients</h3>
-                      <div class="smallText" id="marketingLoadedSummary">0 selected / 0 loaded</div>
-                    </div>
+                <div class="marketingStepGrid">
+                  <div class="hidden">
+                    <label class="fieldLabel">Campaign</label>
+                    <select id="marketingCampaignSelect" class="fieldInput"></select>
                   </div>
-
-                  <div class="smallText">Load patients from the full month of N months ago, then add selected to Send List.</div>
-                  <div class="inlineRow wrap">
-                    <label class="fieldLabel">Months ago</label>
-                    <input id="marketingMonthsAgo" class="fieldInput compact small" type="number" min="1" max="24" value="6" />
-                    <label class="fieldLabel">Branch</label>
-                    <select id="marketingBranchSelect" class="fieldInput compact"></select>
-                    <label class="fieldLabel">Per page</label>
-                    <input id="marketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" value="50" />
-                    <button class="btnGhost" id="btnLoadPastPatients">Load</button>
+                  <div>
+                    <label class="fieldLabel">Marketing Template</label>
+                    <select id="marketingTemplateSelect" class="fieldInput"></select>
                   </div>
-                  <div class="smallText" id="pastPatientRangeText">-</div>
-
-                  <div class="inlineRow" style="justify-content: space-between;">
-                    <div class="inlineRow">
-                      <button class="btnGhost" id="btnMarketingLoadedPrev" disabled>Prev</button>
-                      <div class="smallText" id="marketingLoadedPageText">Page 1 / 1</div>
-                      <button class="btnGhost" id="btnMarketingLoadedNext" disabled>Next</button>
-                    </div>
-                    <button class="btnGhost" id="btnMarketingAddLoadedToList" disabled>Add to send list</button>
-                  </div>
-
-                  <div class="tableWrap short">
-                    <table class="dataTable">
-                      <thead>
-                        <tr>
-                          <th style="width: 44px;"><input type="checkbox" id="marketingLoadedSelectAll" /></th>
-                          <th style="width: 170px;">Phone</th>
-                          <th style="width: 220px;">Name</th>
-                          <th style="width: 220px;">Dentist</th>
-                          <th>Last Appt</th>
-                        </tr>
-                      </thead>
-                      <tbody id="marketingLoadedBody"></tbody>
-                    </table>
-                  </div>
+                </div>
+                <div class="inlineRow wrap hidden">
+                  <button class="btnGhost" id="btnMarketingUseTemplate1" type="button">Template 1</button>
+                  <button class="btnGhost" id="btnMarketingUseTemplate2" type="button">Template 2</button>
+                  <button class="btnGhost" id="btnLoadDueFollowups" type="button">Load Due Follow-ups</button>
+                </div>
+                <div class="smallText campaignHint">
+                  Branch template overrides are used automatically when available.
                 </div>
               </div>
 
               <div class="card">
                 <div class="cardHead">
                   <div>
-                    <h3>Send</h3>
-                    <div class="smallText">Choose one template and send to selected numbers.</div>
+                    <h3>2. Recipients</h3>
+                    <div class="smallText" id="marketingSummary">0 selected</div>
+                  </div>
+                  <div class="inlineRow">
+                    <select id="marketingRecipientFilter" class="fieldInput compact">
+                      <option value="all">All</option>
+                      <option value="not_sent">Not Sent Yet</option>
+                      <option value="already_sent">Already Sent</option>
+                    </select>
+                    <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
+                    <button class="btnGhost hidden" id="btnSelectMarketingSkipped" disabled>Select Skipped</button>
+                    <button class="btnGhost" id="btnClearMarketingRecipients">Clear</button>
                   </div>
                 </div>
 
-                <label class="fieldLabel">Template</label>
-                <select id="marketingTemplateSelect" class="fieldInput"></select>
+                <div class="subCard">
+                  <div class="subHead">Manual Add</div>
+                  <div class="smallText">One line each: <code>phone,name</code>, <code>name,phone</code>, or just <code>phone</code></div>
+                  <textarea id="marketingPasteInput" class="fieldInput" rows="4" placeholder="0131231231,Ali&#10;Nina,01188888888"></textarea>
+                  <button class="btnGhost" id="btnAddMarketingFromText">Add to send list</button>
+                </div>
+
+                <div class="tableWrap tall">
+                  <table class="dataTable marketingRecipientsTable">
+                    <thead>
+                      <tr>
+                        <th style="width: 44px;"><input type="checkbox" id="marketingSelectAll" /></th>
+                        <th style="width: 210px;">Patient Name</th>
+                        <th style="width: 170px;">Phone</th>
+                        <th style="width: 190px;">Branch</th>
+                        <th style="width: 150px;">Status</th>
+                        <th style="width: 72px;">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="marketingRecipientsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>Loaded Patients</h3>
+                    <div class="smallText" id="marketingLoadedSummary">0 selected / 0 loaded</div>
+                  </div>
+                </div>
+
+                <div class="smallText">Load patients from the full month of N months ago, then add selected to Send List.</div>
+                <div class="inlineRow wrap">
+                  <label class="fieldLabel">Months ago</label>
+                  <input id="marketingMonthsAgo" class="fieldInput compact small" type="number" min="1" max="24" value="6" />
+                  <label class="fieldLabel">Branch</label>
+                  <select id="marketingBranchSelect" class="fieldInput compact"></select>
+                  <label class="fieldLabel">Per page</label>
+                  <input id="marketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" value="35" />
+                  <button class="btnGhost" id="btnLoadPastPatients">Load</button>
+                </div>
+                <div class="smallText" id="pastPatientRangeText">-</div>
+
+                <div class="inlineRow" style="justify-content: space-between;">
+                  <div class="inlineRow">
+                    <button class="btnGhost" id="btnMarketingLoadedPrev" disabled>Prev</button>
+                    <div class="smallText" id="marketingLoadedPageText">Page 1 / 1</div>
+                    <button class="btnGhost" id="btnMarketingLoadedNext" disabled>Next</button>
+                  </div>
+                  <button class="btnGhost" id="btnMarketingAddLoadedToList" disabled>Add to send list</button>
+                </div>
+
+                <div class="tableWrap short">
+                  <table class="dataTable">
+                    <thead>
+                      <tr>
+                        <th style="width: 44px;"><input type="checkbox" id="marketingLoadedSelectAll" /></th>
+                        <th style="width: 170px;">Phone</th>
+                        <th style="width: 220px;">Name</th>
+                        <th style="width: 220px;">Dentist</th>
+                        <th>Last Appt</th>
+                        <th style="width: 170px;">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody id="marketingLoadedBody"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="cardHead">
+                  <div>
+                    <h3>3. Preview &amp; Send</h3>
+                    <div class="smallText">Review the message first. The send button will ask for final confirmation.</div>
+                  </div>
+                </div>
 
                 <label class="checkLine">
                   <input type="checkbox" id="aiMarketing" />
                   <span>AI Variation</span>
                 </label>
+
+                <div class="smallText" id="marketingBlastLimitText">Selected: 0 / 35</div>
+                <div class="smallText" id="marketingBlastCooldownText">Select a template and load recipients to check the rolling 24-hour limit.</div>
 
                 <div class="previewBox">
                   <div class="previewTitle">Message Preview</div>
@@ -371,6 +400,44 @@
                 <button class="btnGhost" id="btnImportTemplates">Import Template</button>
                 <button class="btnGhost" id="btnExportTemplates">Export Template</button>
               </div>
+            </div>
+
+            <div class="card campaignManagerCard hidden" id="campaignManagerCard">
+              <div class="cardHead">
+                <div>
+                  <h3>Marketing Campaigns</h3>
+                  <div class="smallText">Create or edit campaigns with exactly two master templates.</div>
+                </div>
+                <button class="btnGhost" id="btnNewCampaign" type="button">New Campaign</button>
+              </div>
+
+              <div class="campaignManagerGrid">
+                <div>
+                  <label class="fieldLabel">Campaign</label>
+                  <select id="campaignEditorSelect" class="fieldInput"></select>
+                </div>
+                <div>
+                  <label class="fieldLabel">Campaign Name</label>
+                  <input id="campaignName" class="fieldInput" placeholder="Whitening Promo May 2026" />
+                </div>
+                <div>
+                  <label class="fieldLabel">Template 1</label>
+                  <select id="campaignTemplate1" class="fieldInput"></select>
+                </div>
+                <div>
+                  <label class="fieldLabel">Template 2</label>
+                  <select id="campaignTemplate2" class="fieldInput"></select>
+                </div>
+              </div>
+
+              <div class="inlineRow wrap campaignOptionsRow">
+                <label class="checkLine">
+                  <input type="checkbox" id="campaignActive" checked />
+                  <span>Active</span>
+                </label>
+                <button class="btnPrimary" id="btnSaveCampaign" type="button">Create Campaign</button>
+              </div>
+              <div class="smallText" id="campaignManagerHint">Select New campaign to create. Existing campaign templates cannot be changed.</div>
             </div>
 
             <div class="templateLayout">
@@ -578,14 +645,18 @@
             <div class="panelTitleRow">
               <div>
                 <h2>Queue</h2>
-                <p>Track batch sending progress and stop active marketing sends when needed.</p>
+                <p>Track appointment sends and marketing blast history separately.</p>
+              </div>
+              <div class="queueModeTabs" role="tablist" aria-label="Queue type">
+                <button class="queueModeTab active" data-queue-view="appointment" type="button" role="tab" aria-selected="true">Appointment</button>
+                <button class="queueModeTab" data-queue-view="marketing" type="button" role="tab" aria-selected="false">Marketing</button>
               </div>
             </div>
 
-            <section class="activityBar queueActivityBar">
+            <section class="activityBar queueActivityBar queueLiveCard" data-queue-panel="appointment">
               <div class="activityHead">
                 <div>
-                  <h3>Send Activity</h3>
+                  <h3>Appointment Send Activity</h3>
                   <div class="smallText" id="queueSummaryText">0/0 (success: 0, failed: 0)</div>
                 </div>
                 <div class="activityActions">
@@ -604,6 +675,34 @@
                     </tr>
                   </thead>
                   <tbody id="activityBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="activityBar queueActivityBar queueHistoryCard hidden" data-queue-panel="marketing">
+              <div class="activityHead">
+                <div>
+                  <h3>Marketing Blast History</h3>
+                  <div class="smallText">Date / Time | Branch | Profile | Total | Sent | Skipped | Failed</div>
+                </div>
+                <div class="activityActions">
+                  <button class="btnGhost" id="btnRefreshMarketingHistory" type="button">Refresh</button>
+                </div>
+              </div>
+              <div class="tableWrap short">
+                <table class="dataTable">
+                  <thead>
+                    <tr>
+                      <th style="width: 190px;">Date / Time</th>
+                      <th style="width: 190px;">Branch</th>
+                      <th style="width: 130px;">Profile</th>
+                      <th style="width: 90px;">Total</th>
+                      <th style="width: 90px;">Sent</th>
+                      <th style="width: 90px;">Skipped</th>
+                      <th style="width: 90px;">Failed</th>
+                    </tr>
+                  </thead>
+                  <tbody id="marketingBlastHistoryBody"></tbody>
                 </table>
               </div>
             </section>
@@ -652,7 +751,7 @@
                   <label class="fieldLabel">Months ago</label>
                   <input id="settingMarketingMonths" class="fieldInput compact small" type="number" min="1" max="24" />
                   <label class="fieldLabel">Per page</label>
-                  <input id="settingMarketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" />
+                  <input id="settingMarketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" value="35" />
                 </div>
               </div>
 

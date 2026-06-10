@@ -22,6 +22,18 @@ contextBridge.exposeInMainWorld("api", {
   clinicGetPastPatients: (payload) => ipcRenderer.invoke("clinic:getPastPatients", payload),
   clinicEditPatient: (payload) => ipcRenderer.invoke("clinic:editPatient", payload),
 
+  marketingGetTemplates: (payload) => ipcRenderer.invoke("marketing:getTemplates", payload || {}),
+  marketingSaveTemplateAsset: (payload) => ipcRenderer.invoke("marketing:saveTemplateAsset", payload || {}),
+  marketingUploadTemplateAsset: (payload) => ipcRenderer.invoke("marketing:uploadTemplateAsset", payload || {}),
+  marketingGetCampaigns: (payload) => ipcRenderer.invoke("marketing:getCampaigns", payload || {}),
+  marketingSaveCampaign: (payload) => ipcRenderer.invoke("marketing:saveCampaign", payload || {}),
+  marketingGetResolvedCampaign: (campaignId) => ipcRenderer.invoke("marketing:getResolvedCampaign", campaignId),
+  marketingCheckStatus: (payload) => ipcRenderer.invoke("marketing:checkStatus", payload || {}),
+  marketingRecordSendLog: (payload) => ipcRenderer.invoke("marketing:recordSendLog", payload || {}),
+  marketingGetBlastHistory: (payload) => ipcRenderer.invoke("marketing:getBlastHistory", payload || {}),
+  marketingGetDueFollowups: (campaignId) => ipcRenderer.invoke("marketing:getDueFollowups", campaignId),
+  marketingImportLegacyLogs: (rows) => ipcRenderer.invoke("marketing:importLegacyLogs", rows || []),
+
   getProfiles: () => ipcRenderer.invoke("app:getProfiles"),
   createProfile: (name) => ipcRenderer.invoke("app:createProfile", name),
   renameProfile: (profileId, name) => ipcRenderer.invoke("app:renameProfile", profileId, name),
@@ -56,6 +68,9 @@ contextBridge.exposeInMainWorld("api", {
   waSendBatch: (payload) => ipcRenderer.invoke("wa:sendBatch", payload),
   waSendPreparedBatch: (payload) => ipcRenderer.invoke("wa:sendPreparedBatch", payload),
   waStopBatch: () => ipcRenderer.invoke("wa:stopBatch"),
+  waGetMarketingBlastGuard: () => ipcRenderer.invoke("wa:getMarketingBlastGuard"),
+  waGetSentStatusForTemplate: (payload) => ipcRenderer.invoke("wa:getSentStatusForTemplate", payload),
+  waGetMarketingBlastHistory: () => ipcRenderer.invoke("wa:getMarketingBlastHistory"),
 
   clearSentForTemplate: (templateId) => ipcRenderer.invoke("wa:clearSentForTemplate", templateId),
   importCsv: (mapping) => ipcRenderer.invoke("app:openCsvDialogAndParse", mapping),

@@ -1,1 +1,29 @@
-[]
+[
+  {
+    "id": "6",
+    "name": "QA Test Template 2026-06-04",
+    "body": "Hi {name}, this is a WhatsConect QA test from {my_branch}.",
+    "messages": [
+      {
+        "id": "tm_1780537592768",
+        "type": "text",
+        "text": "Hi {name}, this is a WhatsConect QA test from {my_branch}.",
+        "attachment": null
+      }
+    ],
+    "variables": [
+      "name",
+      "my_branch",
+      "phone"
+    ],
+    "sendPolicy": "once",
+    "send_policy": "once",
+    "active": true,
+    "scope": "global",
+    "branch": "",
+    "root_template_id": 6,
+    "parent_template_id": null,
+    "version": 1,
+    "is_branch_override": false
+  }
+]

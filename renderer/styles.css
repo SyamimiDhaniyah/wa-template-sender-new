@@ -318,6 +318,30 @@ p {
   line-height: 1.45;
 }
 
+.campaignHint {
+  margin-top: 8px;
+}
+
+.campaignManagerCard {
+  margin-bottom: 12px;
+}
+
+.campaignManagerGrid {
+  display: grid;
+  grid-template-columns: 1.2fr 1.4fr 1fr 1fr;
+  gap: 10px;
+  align-items: end;
+}
+
+.campaignOptionsRow {
+  margin-top: 10px;
+}
+
+.statusWarnText {
+  color: var(--warn);
+  font-weight: 700;
+}
+
 .inlineRow {
   display: flex;
   align-items: center;
@@ -441,6 +465,28 @@ p {
   vertical-align: top;
 }
 
+.marketingRecipientsTable {
+  min-width: 1220px;
+}
+
+.marketingRecipientsTable th,
+.marketingRecipientsTable td {
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.marketingRecipientsTable td:nth-child(3),
+.marketingRecipientsTable td:nth-child(8) {
+  max-width: 210px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.marketingRecipientsTable .btnGhost {
+  padding: 7px 10px;
+  border-radius: 10px;
+}
+
 .rowSelected td {
   background: #e6f6f3;
 }
@@ -544,14 +590,20 @@ p {
 
 .marketingLayout {
   display: grid;
-  grid-template-columns: 1.3fr 1fr;
+  grid-template-columns: 1fr;
   gap: 12px;
 }
 
-.marketingLeft {
+.marketingLayout > .card {
   display: grid;
   gap: 12px;
   min-height: 0;
+}
+
+.marketingStepGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
 }
 
 .subCard {
@@ -575,6 +627,7 @@ p {
   background: #f7fcfb;
   padding: 10px;
   margin: 10px 0;
+  max-width: 760px;
 }
 
 .previewTitle {
@@ -1462,6 +1515,56 @@ p {
   padding: 14px;
 }
 
+.queueSections {
+  display: grid;
+  gap: 0;
+}
+
+.queueModeTabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #edf6f4;
+  box-shadow: 0 8px 18px rgba(21, 35, 35, 0.05);
+}
+
+.queueModeTab {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: #244343;
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 800;
+  padding: 8px 14px;
+}
+
+.queueModeTab:hover {
+  background: #dff0ed;
+}
+
+.queueModeTab.active {
+  background: #ffffff;
+  border-color: #b7dad5;
+  color: var(--accent-strong);
+  box-shadow: 0 6px 16px rgba(13, 143, 131, 0.12);
+}
+
+.queueLiveCard {
+  border-color: #cfe8e3;
+  background: linear-gradient(180deg, #ffffff 0%, #f8fcfb 100%);
+}
+
+.queueHistoryCard {
+  border-color: #d8e5e2;
+  background: linear-gradient(180deg, #fcfefd 0%, #f6fbfa 100%);
+}
+
 .activityHead {
   display: flex;
   justify-content: space-between;
@@ -1479,11 +1582,23 @@ p {
   font-size: 15px;
 }
 
+.queueLiveCard .activityHead h3 {
+  color: #103d38;
+}
+
+.queueHistoryCard .activityHead h3 {
+  color: #29544e;
+}
+
 #queueSummaryText {
   margin-top: 2px;
 }
 
 .statusPill {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  line-height: 1.1;
   font-size: 11px;
   border-radius: 999px;
   padding: 3px 8px;
@@ -1707,7 +1822,9 @@ p {
 @media (max-width: 1300px) {
   .appointmentLayout,
   .marketingLayout,
+  .marketingStepGrid,
   .templateLayout,
+  .campaignManagerGrid,
   .connectLayout,
   .settingsLayout {
     grid-template-columns: 1fr;
@@ -1756,6 +1873,15 @@ p {
 
   .tabWrap {
     padding: 12px;
+  }
+
+  .panelTitleRow {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .queueModeTabs {
+    align-self: flex-end;
   }
 
   .confirmBody {
