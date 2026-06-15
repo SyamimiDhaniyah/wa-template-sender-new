@@ -502,15 +502,24 @@ func handleSend(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, APIResponse{Ok: false, Error: "Failed to read attachment: " + err.Error()}, 500)
 			return
 		}
-		uploaded, err := client.Upload(context.Background(), data, whatsmeow.MediaImage) // Default to image for now, can be improved
+		kind := strings.ToLower(strings.TrimSpace(req.Attachment.Kind))
+		if kind == "" {
+			kind = "image"
+		}
+		mediaType := whatsmeow.MediaImage
+		switch kind {
+		case "video":
+			mediaType = whatsmeow.MediaVideo
+		case "audio":
+			mediaType = whatsmeow.MediaAudio
+		case "document":
+			mediaType = whatsmeow.MediaDocument
+		}
+
+		uploaded, err := client.Upload(context.Background(), data, mediaType)
 		if err != nil {
 			sendJSON(w, APIResponse{Ok: false, Error: "Failed to upload media: " + err.Error()}, 500)
 			return
-		}
-
-		kind := req.Attachment.Kind
-		if kind == "" {
-			kind = "image"
 		}
 
 		switch kind {
