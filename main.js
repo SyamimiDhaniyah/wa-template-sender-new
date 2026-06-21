@@ -865,23 +865,32 @@ function normalizePastPatientRecord(raw) {
   };
 }
 
-async function clinicFetchPastPatientsForBranch(authToken, branch, startDay, endDay) {
+async function clinicFetchPastPatientsPage(authToken, branch, startDay, endDay, { limit = 500, offset = 0 } = {}) {
   const qs = new URLSearchParams({
     branch,
     start_day: String(Math.round(startDay)),
-    end_day: String(Math.round(endDay))
+    end_day: String(Math.round(endDay)),
+    limit: String(Math.min(Math.max(Number(limit) || 500, 1), 500)),
+    offset: String(Math.max(Number(offset) || 0, 0))
   });
-  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/past_patient?${qs.toString()}`;
+  const endpoint = `${CLINIC_API_BASE}/api:lY50ALPv/past_patient_fast?${qs.toString()}`;
   const controller = new AbortController();
-  const timeoutMs = 15000;
+  const timeoutMs = 20000;
   const t = setTimeout(() => controller.abort(), timeoutMs);
-  let data;
   try {
-    data = await clinicFetchJson(endpoint, {
+    const data = await clinicFetchJson(endpoint, {
       method: "GET",
       headers: clinicAuthHeaders(authToken, false),
       signal: controller.signal
     });
+    const rawRows = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    return {
+      total: Number(data?.total || rawRows.length) || 0,
+      limit: Number(data?.limit || limit) || limit,
+      offset: Number(data?.offset || offset) || offset,
+      has_more: data?.has_more === true,
+      rows: rawRows.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No)
+    };
   } catch (err) {
     if (err?.name === "AbortError") {
       throw new Error(`Load patients timed out for ${branch}. Please try again.`);
@@ -890,8 +899,6 @@ async function clinicFetchPastPatientsForBranch(authToken, branch, startDay, end
   } finally {
     clearTimeout(t);
   }
-
-  return Array.isArray(data) ? data.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No) : [];
 }
 
 async function clinicGetPastPatients(authToken, payload) {
@@ -903,28 +910,21 @@ async function clinicGetPastPatients(authToken, payload) {
   if (!Number.isFinite(startDay) || startDay <= 0) throw new Error("start_day timestamp is required");
   if (!Number.isFinite(endDay) || endDay <= 0) throw new Error("end_day timestamp is required");
 
-  if (!isAiVentureMarketingBranch(branch)) {
-    return await clinicFetchPastPatientsForBranch(authToken, branch, startDay, endDay);
-  }
-
-  const clinicBranches = (await clinicGetBranchList(authToken))
-    .map((x) => cleanString(x.label))
-    .filter((label) => label && !isAiVentureMarketingBranch(label));
-  if (clinicBranches.length === 0) throw new Error("No clinic branches available for AI Venture patient load");
-
   const rows = [];
-  const failures = [];
-  for (const clinicBranch of clinicBranches) {
-    try {
-      rows.push(...(await clinicFetchPastPatientsForBranch(authToken, clinicBranch, startDay, endDay)));
-    } catch (err) {
-      failures.push(`${clinicBranch}: ${cleanString(err?.message || err) || "failed"}`);
-      log.warn({ err, clinicBranch }, "AI Venture past patient branch load failed");
-    }
+  const pageLimit = 500;
+  const maxRows = isAiVentureMarketingBranch(branch) ? 5000 : 1000;
+  let offset = 0;
+  let total = 0;
+  for (let page = 0; page < 20 && rows.length < maxRows; page += 1) {
+    const res = await clinicFetchPastPatientsPage(authToken, branch, startDay, endDay, { limit: pageLimit, offset });
+    rows.push(...res.rows);
+    total = res.total || rows.length;
+    offset += res.limit || pageLimit;
+    if (!res.has_more || res.rows.length === 0) break;
   }
 
-  if (rows.length === 0 && failures.length > 0) {
-    throw new Error(`AI Venture patient load failed for all branches: ${failures.slice(0, 3).join("; ")}`);
+  if (total > rows.length) {
+    log.warn({ branch, returned: rows.length, total }, "Past patient load capped before all rows were fetched");
   }
 
   return rows;
