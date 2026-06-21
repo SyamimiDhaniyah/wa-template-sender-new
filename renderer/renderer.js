@@ -2696,23 +2696,23 @@ function renderBranchesToSelect(selectId, defaultBranch) {
   if (!select) return;
   select.innerHTML = "";
   const preferredBranch = cleanString(defaultBranch);
-  const includePreferredBranch = selectId === "marketingBranchSelect" && preferredBranch;
-  if (includePreferredBranch && !state.branches.some((branch) => branch.label === preferredBranch)) {
+  const marketingHqBranch = "AI Venture";
+  const isMarketingSelect = selectId === "marketingBranchSelect";
+  const appendOption = (value) => {
+    const label = cleanString(value);
+    if (!label || Array.from(select.options).some((opt) => opt.value === label)) return;
     const opt = document.createElement("option");
-    opt.value = preferredBranch;
-    opt.textContent = preferredBranch;
+    opt.value = label;
+    opt.textContent = label;
     select.appendChild(opt);
-  }
-  for (const branch of state.branches) {
-    const opt = document.createElement("option");
-    opt.value = branch.label;
-    opt.textContent = branch.label;
-    select.appendChild(opt);
-  }
+  };
+  if (isMarketingSelect && preferredBranch) appendOption(preferredBranch);
+  if (isMarketingSelect) appendOption(marketingHqBranch);
+  for (const branch of state.branches) appendOption(branch.label);
   if (select.options.length === 0) return;
   const preferred = preferredBranch && Array.from(select.options).some((opt) => opt.value === preferredBranch)
     ? preferredBranch
-    : select.options[0].value;
+    : state.branches.find((branch) => cleanString(branch.label))?.label || select.options[0].value;
   select.value = preferred;
 }
 
@@ -3107,6 +3107,10 @@ function selectedMarketingTemplateApiIds(template = getSelectedMarketingTemplate
     template_id: Number(templateId) || templateId,
     root_template_id: Number(rootId) || rootId
   };
+}
+
+function isAiVentureMarketingBranch(branch) {
+  return cleanString(branch).toLowerCase() === "ai venture";
 }
 
 function currentMarketingBranchForLimit() {
@@ -4247,14 +4251,17 @@ function readCampaignEditorPayload(templatePair = null) {
 function buildMarketingTemplateVars(recipient) {
   const row = recipient && typeof recipient === "object" ? recipient : {};
   const selectedBranch = el("marketingBranchSelect").value || state.session.user?.Branch || "";
-  const myBranch = state.session.user?.Branch || selectedBranch || "";
+  const displayBranch = isAiVentureMarketingBranch(selectedBranch) ? "Dentabay" : selectedBranch;
+  const myBranch = isAiVentureMarketingBranch(state.session.user?.Branch || selectedBranch)
+    ? "Dentabay"
+    : state.session.user?.Branch || displayBranch || "";
   const dateTs = toInt(row.apptDate, 0) || toInt(row.apptStartTime, 0) || Date.now();
   const weekday = formatWeekdayForMessage(dateTs, "english");
   const titles = normalizeGenderTitles(row.gender);
 
   return {
     name: row.name || "Patient",
-    branch: selectedBranch,
+    branch: displayBranch,
     my_branch: myBranch,
     dentist: row.dentist || "",
     date: formatDateForMessage(dateTs, "english"),

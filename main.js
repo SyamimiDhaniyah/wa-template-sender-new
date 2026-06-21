@@ -755,6 +755,12 @@ async function clinicGetMe(authToken) {
   return normalizeAuthUser(data || {});
 }
 
+const AI_VENTURE_MARKETING_BRANCH = "AI Venture";
+
+function isAiVentureMarketingBranch(branch) {
+  return cleanString(branch).toLowerCase() === AI_VENTURE_MARKETING_BRANCH.toLowerCase();
+}
+
 function normalizeBranchRecord(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   return {
@@ -848,9 +854,9 @@ async function clinicGetPatient(authToken, icNumber) {
 function normalizePastPatientRecord(raw) {
   const src = raw && typeof raw === "object" ? raw : {};
   return {
-    Appt_Date: Number(src.Appt_Date || 0) || 0,
-    Appt_Start_Time: Number(src.Appt_Start_Time || 0) || 0,
-    Dentist_Name: cleanString(src.Dentist_Name),
+    Appt_Date: Number(src.Appt_Date || src.Last_Appt_In_Month || 0) || 0,
+    Appt_Start_Time: Number(src.Appt_Start_Time || src.Last_Appt_In_Month || 0) || 0,
+    Dentist_Name: cleanString(src.Dentist_Name || src.Last_Dentist_In_Month),
     Patient_Name: cleanString(src.Patient_Name),
     nickname: cleanString(src.nickname),
     gender: cleanString(src.gender).toLowerCase(),
@@ -859,15 +865,7 @@ function normalizePastPatientRecord(raw) {
   };
 }
 
-async function clinicGetPastPatients(authToken, payload) {
-  const src = payload && typeof payload === "object" ? payload : {};
-  const branch = cleanString(src.branch);
-  const startDay = Number(src.start_day || 0);
-  const endDay = Number(src.end_day || 0);
-  if (!branch) throw new Error("Branch is required");
-  if (!Number.isFinite(startDay) || startDay <= 0) throw new Error("start_day timestamp is required");
-  if (!Number.isFinite(endDay) || endDay <= 0) throw new Error("end_day timestamp is required");
-
+async function clinicFetchPastPatientsForBranch(authToken, branch, startDay, endDay) {
   const qs = new URLSearchParams({
     branch,
     start_day: String(Math.round(startDay)),
@@ -886,7 +884,7 @@ async function clinicGetPastPatients(authToken, payload) {
     });
   } catch (err) {
     if (err?.name === "AbortError") {
-      throw new Error("Load patients timed out. Please try again.");
+      throw new Error(`Load patients timed out for ${branch}. Please try again.`);
     }
     throw err;
   } finally {
@@ -894,6 +892,42 @@ async function clinicGetPastPatients(authToken, payload) {
   }
 
   return Array.isArray(data) ? data.map(normalizePastPatientRecord).filter((x) => x.Patient_Phone_No) : [];
+}
+
+async function clinicGetPastPatients(authToken, payload) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const branch = cleanString(src.branch);
+  const startDay = Number(src.start_day || 0);
+  const endDay = Number(src.end_day || 0);
+  if (!branch) throw new Error("Branch is required");
+  if (!Number.isFinite(startDay) || startDay <= 0) throw new Error("start_day timestamp is required");
+  if (!Number.isFinite(endDay) || endDay <= 0) throw new Error("end_day timestamp is required");
+
+  if (!isAiVentureMarketingBranch(branch)) {
+    return await clinicFetchPastPatientsForBranch(authToken, branch, startDay, endDay);
+  }
+
+  const clinicBranches = (await clinicGetBranchList(authToken))
+    .map((x) => cleanString(x.label))
+    .filter((label) => label && !isAiVentureMarketingBranch(label));
+  if (clinicBranches.length === 0) throw new Error("No clinic branches available for AI Venture patient load");
+
+  const rows = [];
+  const failures = [];
+  for (const clinicBranch of clinicBranches) {
+    try {
+      rows.push(...(await clinicFetchPastPatientsForBranch(authToken, clinicBranch, startDay, endDay)));
+    } catch (err) {
+      failures.push(`${clinicBranch}: ${cleanString(err?.message || err) || "failed"}`);
+      log.warn({ err, clinicBranch }, "AI Venture past patient branch load failed");
+    }
+  }
+
+  if (rows.length === 0 && failures.length > 0) {
+    throw new Error(`AI Venture patient load failed for all branches: ${failures.slice(0, 3).join("; ")}`);
+  }
+
+  return rows;
 }
 
 async function clinicEditPatient(authToken, payload) {
