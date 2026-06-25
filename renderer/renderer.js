@@ -204,7 +204,7 @@ const state = {
   marketingBlastCooldownTimer: null,
   activityRows: [],
   queueStats: { total: 0, byIndex: {} },
-  queueActiveView: "appointment",
+  queueActiveView: "marketing",
   currentTemplateId: null,
   currentTemplateMessageId: null,
   confirmResolver: null,
@@ -774,8 +774,8 @@ function setActiveTab(tabName) {
   if (wrap) wrap.classList.toggle("is-whatsapp", tab === "whatsapp");
 }
 
-function normalizeQueueView(view) {
-  return String(view || "") === "marketing" ? "marketing" : "appointment";
+function normalizeQueueView() {
+  return "marketing";
 }
 
 function setQueueActiveView(view) {
@@ -2631,6 +2631,7 @@ function updateQueueStatsFromProgress(row) {
 
 function renderActivity() {
   const tbody = el("activityBody");
+  if (!tbody) return;
   tbody.innerHTML = "";
   const rows = state.activityRows.filter((row) => String(row?.queueType || "appointment") === "appointment");
   for (const row of rows) {
@@ -4311,6 +4312,7 @@ function applySettingsToUi() {
 }
 
 function applyAppointmentTemplatesToUi() {
+  if (!el("btnSaveAppointmentTemplates")) return;
   const t = state.appointmentTemplates;
   el("tplRemindBahasa").value = t.remindAppointment?.bahasa || "";
   el("tplRemindEnglish").value = t.remindAppointment?.english || "";
@@ -5292,10 +5294,7 @@ async function reloadTemplateData() {
   if (state.templateDataLoadPromise) return await state.templateDataLoadPromise;
 
   const job = (async () => {
-    const [templatesRaw, appointmentTplRes] = await Promise.all([
-      window.api.getTemplates(),
-      window.api.getAppointmentTemplates()
-    ]);
+    const templatesRaw = await window.api.getTemplates();
 
     state.templates = preferVisibleMarketingTemplates((Array.isArray(templatesRaw) ? templatesRaw : []).map((t, i) => normalizeTemplate(t, i)));
     state.marketingCampaigns = [];
@@ -5309,15 +5308,9 @@ async function reloadTemplateData() {
       state.currentTemplateId = state.templates[0]?.id || null;
     }
 
-    state.appointmentTemplates = {
-      ...DEFAULT_APPOINTMENT_TEMPLATES,
-      ...(appointmentTplRes?.templates || {})
-    };
-
     renderTemplateList();
     loadTemplateEditor();
     renderMarketingTemplateSelect();
-    applyAppointmentTemplatesToUi();
     refreshMarketingPreview();
     refreshMarketingRecipientStatuses().catch(() => { });
   })();
@@ -5355,10 +5348,6 @@ async function runInitialAppWarmup() {
 
     await waitForNextPaint();
 
-    const appointmentsWarmup = loadAppointments().catch((e) => {
-      console.warn("Background appointments warmup failed:", e);
-    });
-
     const whatsappWarmup = state.waConnected
       ? refreshWaChatsWithHistoryWarmup().catch((e) => {
         console.warn("WhatsApp history warmup failed:", e);
@@ -5368,7 +5357,7 @@ async function runInitialAppWarmup() {
         return Promise.resolve();
       })();
 
-    await Promise.allSettled([templateWarmup, appointmentsWarmup, whatsappWarmup]);
+    await Promise.allSettled([templateWarmup, whatsappWarmup]);
   })();
 
   state.startupWarmupPromise = job;
@@ -5634,14 +5623,6 @@ function bindEvents() {
         await refreshMarketingBlastHistory().catch(() => { });
       }
 
-      if (tabName === "appointment" && state.appointments.length === 0) {
-        try {
-          await loadAppointments();
-        } catch (e) {
-          toast("Appointment", String(e?.message || e));
-        }
-      }
-
       if (tabName === "whatsapp") {
         try {
           await refreshWaChats({
@@ -5843,66 +5824,68 @@ function bindEvents() {
     toast("Session", "Logged out");
   });
 
-  const autoLoadAppointments = async () => {
-    try {
-      await loadAppointments();
-    } catch (e) {
-      toast("Appointments", String(e?.message || e));
-    }
-  };
+  if (el("tab-appointment")) {
+    const autoLoadAppointments = async () => {
+      try {
+        await loadAppointments();
+      } catch (e) {
+        toast("Appointments", String(e?.message || e));
+      }
+    };
 
-  el("apptBranchSelect").addEventListener("change", autoLoadAppointments);
-  el("apptDateInput").addEventListener("change", autoLoadAppointments);
+    el("apptBranchSelect")?.addEventListener("change", autoLoadAppointments);
+    el("apptDateInput")?.addEventListener("change", autoLoadAppointments);
 
-  el("btnApptPrevDay").addEventListener("click", async () => {
-    const cur = String(el("apptDateInput").value || "").trim() || getTodayYmdKl();
-    el("apptDateInput").value = shiftYmdKl(cur, -1);
-    await autoLoadAppointments();
-  });
+    el("btnApptPrevDay")?.addEventListener("click", async () => {
+      const cur = String(el("apptDateInput")?.value || "").trim() || getTodayYmdKl();
+      el("apptDateInput").value = shiftYmdKl(cur, -1);
+      await autoLoadAppointments();
+    });
 
-  el("btnApptNextDay").addEventListener("click", async () => {
-    const cur = String(el("apptDateInput").value || "").trim() || getTodayYmdKl();
-    el("apptDateInput").value = shiftYmdKl(cur, 1);
-    await autoLoadAppointments();
-  });
+    el("btnApptNextDay")?.addEventListener("click", async () => {
+      const cur = String(el("apptDateInput")?.value || "").trim() || getTodayYmdKl();
+      el("apptDateInput").value = shiftYmdKl(cur, 1);
+      await autoLoadAppointments();
+    });
 
-  el("btnApptSelectAll").addEventListener("click", () => {
-    state.selectedAppointmentIds = new Set(state.appointments.map((a) => String(a.id)));
-    renderAppointmentTable();
-  });
+    el("btnApptSelectAll")?.addEventListener("click", () => {
+      state.selectedAppointmentIds = new Set(state.appointments.map((a) => String(a.id)));
+      renderAppointmentTable();
+    });
 
-  el("btnApptClearSelection").addEventListener("click", () => {
-    state.selectedAppointmentIds = new Set();
-    renderAppointmentTable();
-  });
+    el("btnApptClearSelection")?.addEventListener("click", () => {
+      state.selectedAppointmentIds = new Set();
+      renderAppointmentTable();
+    });
 
-  el("btnSelectRemind").addEventListener("click", () => selectAppointmentsByRule(appointmentIsRemindEligible));
-  el("btnSelectFollow").addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
-  el("btnSelectReview").addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
+    el("btnSelectRemind")?.addEventListener("click", () => selectAppointmentsByRule(appointmentIsRemindEligible));
+    el("btnSelectFollow")?.addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
+    el("btnSelectReview")?.addEventListener("click", () => selectAppointmentsByRule(appointmentIsFollowEligible));
 
-  el("btnSendRemind").addEventListener("click", async () => {
-    try {
-      await doAppointmentSend("remindAppointment", "langRemind", "aiRemind");
-    } catch (e) {
-      toast("Send error", String(e?.message || e));
-    }
-  });
+    el("btnSendRemind")?.addEventListener("click", async () => {
+      try {
+        await doAppointmentSend("remindAppointment", "langRemind", "aiRemind");
+      } catch (e) {
+        toast("Send error", String(e?.message || e));
+      }
+    });
 
-  el("btnSendFollow").addEventListener("click", async () => {
-    try {
-      await doAppointmentSend("followUp", "langFollow", "aiFollow");
-    } catch (e) {
-      toast("Send error", String(e?.message || e));
-    }
-  });
+    el("btnSendFollow")?.addEventListener("click", async () => {
+      try {
+        await doAppointmentSend("followUp", "langFollow", "aiFollow");
+      } catch (e) {
+        toast("Send error", String(e?.message || e));
+      }
+    });
 
-  el("btnSendReview").addEventListener("click", async () => {
-    try {
-      await doAppointmentSend("requestReview", "langReview", "aiReview");
-    } catch (e) {
-      toast("Send error", String(e?.message || e));
-    }
-  });
+    el("btnSendReview")?.addEventListener("click", async () => {
+      try {
+        await doAppointmentSend("requestReview", "langReview", "aiReview");
+      } catch (e) {
+        toast("Send error", String(e?.message || e));
+      }
+    });
+  }
 
   el("btnAddMarketingFromText").addEventListener("click", async () => {
     const inputEl = el("marketingPasteInput");
@@ -6399,7 +6382,7 @@ function bindEvents() {
     }
   });
 
-  el("btnSaveAppointmentTemplates").addEventListener("click", async () => {
+  el("btnSaveAppointmentTemplates")?.addEventListener("click", async () => {
     try {
       const payload = readAppointmentTemplatesFromUi();
       const res = await window.api.saveAppointmentTemplates(payload);
@@ -6539,7 +6522,7 @@ function bindEvents() {
     }
   });
 
-  el("btnClearActivity").addEventListener("click", () => {
+  el("btnClearActivity")?.addEventListener("click", () => {
     state.activityRows = state.activityRows.filter((row) => String(row?.queueType || "appointment") !== "appointment");
     resetQueueStats(0);
     renderActivity();
@@ -6548,7 +6531,7 @@ function bindEvents() {
   el("btnRefreshMarketingHistory").addEventListener("click", async () => {
     await refreshMarketingBlastHistory().catch(() => { });
   });
-  el("btnStopSending").addEventListener("click", async () => {
+  el("btnStopSending")?.addEventListener("click", async () => {
     if (!state.batchSending) {
       setBatchSending(false);
       toast("Send", "No active sending process");

@@ -46,7 +46,6 @@
 
         <nav class="tabNav">
           <button class="tabBtn active" data-tab="whatsapp">WhatsApp</button>
-          <button class="tabBtn" data-tab="appointment">Appointment</button>
           <button class="tabBtn" data-tab="marketing">Marketing</button>
           <button class="tabBtn" data-tab="templates">Template</button>
           <button class="tabBtn" data-tab="connect">Connect</button>
@@ -128,114 +127,6 @@
                   </div>
                 </footer>
               </section>
-            </div>
-          </div>
-
-          <div class="tabPanel hidden" id="tab-appointment">
-            <div class="panelTitleRow">
-              <div>
-                <h2>Appointments</h2>
-                <p>Select patients and send reminders/follow-up/review in one place.</p>
-              </div>
-              <div class="inlineRow">
-                <label class="fieldLabel">Branch</label>
-                <select id="apptBranchSelect" class="fieldInput compact"></select>
-                <label class="fieldLabel">Date</label>
-                <input id="apptDateInput" class="fieldInput compact" type="date" />
-                <button class="btnGhost" id="btnApptPrevDay" title="Previous day" aria-label="Previous day">&lt;</button>
-                <button class="btnGhost" id="btnApptNextDay" title="Next day" aria-label="Next day">&gt;</button>
-              </div>
-            </div>
-
-            <div class="appointmentLayout">
-              <div class="card">
-                <div class="cardHead">
-                  <div>
-                    <h3>Appointment List</h3>
-                    <div class="smallText" id="apptSummary">0 records</div>
-                  </div>
-                  <div class="inlineRow">
-                    <button class="btnGhost" id="btnApptSelectAll">Select All</button>
-                    <button class="btnGhost" id="btnApptClearSelection">Clear</button>
-                  </div>
-                </div>
-
-                <div class="tableWrap tall">
-                  <table class="dataTable" id="apptTable">
-                    <thead>
-                      <tr>
-                        <th style="width: 44px;"></th>
-                        <th style="width: 110px;">Time</th>
-                        <th style="width: 220px;">Patient</th>
-                        <th style="width: 180px;">Dentist</th>
-                        <th>Treatment</th>
-                        <th style="width: 64px;">WA</th>
-                        <th style="width: 80px;">Came</th>
-                      </tr>
-                    </thead>
-                    <tbody id="apptTableBody"></tbody>
-                  </table>
-                </div>
-              </div>
-
-              <div class="card">
-                <div class="cardHead">
-                  <div>
-                    <h3>Quick Actions</h3>
-                    <div class="smallText">Use Select Patients to auto-pick by rule.</div>
-                  </div>
-                </div>
-
-                <div class="actionGrid">
-                  <section class="actionCard">
-                    <h4>Remind Appointment</h4>
-                    <p>Selects appointments where start time has not passed yet.</p>
-                    <button class="btnGhost" id="btnSelectRemind">Select Patients</button>
-                    <label class="fieldLabel">Language</label>
-                    <select class="fieldInput compact" id="langRemind">
-                      <option value="bahasa">Bahasa</option>
-                      <option value="english">English</option>
-                    </select>
-                    <label class="checkLine">
-                      <input type="checkbox" id="aiRemind" />
-                      <span>AI Variation</span>
-                    </label>
-                    <button class="btnPrimary" id="btnSendRemind">Send</button>
-                  </section>
-
-                  <section class="actionCard">
-                    <h4>Follow Up</h4>
-                    <p>Selects appointments where start time has passed and patient came.</p>
-                    <button class="btnGhost" id="btnSelectFollow">Select Patients</button>
-                    <label class="fieldLabel">Language</label>
-                    <select class="fieldInput compact" id="langFollow">
-                      <option value="bahasa">Bahasa</option>
-                      <option value="english">English</option>
-                    </select>
-                    <label class="checkLine">
-                      <input type="checkbox" id="aiFollow" />
-                      <span>AI Variation</span>
-                    </label>
-                    <button class="btnPrimary" id="btnSendFollow">Send</button>
-                  </section>
-
-                  <section class="actionCard">
-                    <h4>Request Review</h4>
-                    <p>Selects appointments where start time has passed and patient came.</p>
-                    <button class="btnGhost" id="btnSelectReview">Select Patients</button>
-                    <label class="fieldLabel">Language</label>
-                    <select class="fieldInput compact" id="langReview">
-                      <option value="bahasa">Bahasa</option>
-                      <option value="english">English</option>
-                    </select>
-                    <label class="checkLine">
-                      <input type="checkbox" id="aiReview" />
-                      <span>AI Variation</span>
-                    </label>
-                    <button class="btnPrimary" id="btnSendReview">Send</button>
-                  </section>
-                </div>
-              </div>
             </div>
           </div>
 
@@ -394,7 +285,7 @@
             <div class="panelTitleRow">
               <div>
                 <h2>Templates</h2>
-                <p>Manage marketing templates and appointment message templates.</p>
+                <p>Manage marketing templates.</p>
               </div>
               <div class="inlineRow">
                 <button class="btnGhost" id="btnImportTemplates">Import Template</button>
@@ -524,58 +415,6 @@
                 </div>
               </div>
 
-              <div class="card">
-                <div class="cardHead">
-                  <div>
-                    <h3>Appointment Templates</h3>
-                    <div class="smallText">Editable by branch preference.</div>
-                  </div>
-                </div>
-
-                <div class="apptTemplateEditor">
-                  <details class="subCard apptTplDrawer">
-                    <summary class="apptTplDrawerSummary">
-                      <span class="subHead">Remind Appointment</span>
-                      <span class="smallText apptTplDrawerHint">Click to expand</span>
-                    </summary>
-                    <div class="apptTplDrawerBody">
-                      <label class="fieldLabel">Bahasa</label>
-                      <textarea id="tplRemindBahasa" class="fieldInput" rows="6"></textarea>
-                      <label class="fieldLabel">English</label>
-                      <textarea id="tplRemindEnglish" class="fieldInput" rows="6"></textarea>
-                    </div>
-                  </details>
-
-                  <details class="subCard apptTplDrawer">
-                    <summary class="apptTplDrawerSummary">
-                      <span class="subHead">Follow Up</span>
-                      <span class="smallText apptTplDrawerHint">Click to expand</span>
-                    </summary>
-                    <div class="apptTplDrawerBody">
-                      <label class="fieldLabel">Bahasa</label>
-                      <textarea id="tplFollowBahasa" class="fieldInput" rows="5"></textarea>
-                      <label class="fieldLabel">English</label>
-                      <textarea id="tplFollowEnglish" class="fieldInput" rows="5"></textarea>
-                    </div>
-                  </details>
-
-                  <details class="subCard apptTplDrawer">
-                    <summary class="apptTplDrawerSummary">
-                      <span class="subHead">Request Review</span>
-                      <span class="smallText apptTplDrawerHint">Click to expand</span>
-                    </summary>
-                    <div class="apptTplDrawerBody">
-                      <label class="fieldLabel">Bahasa</label>
-                      <textarea id="tplReviewBahasa" class="fieldInput" rows="5"></textarea>
-                      <label class="fieldLabel">English</label>
-                      <textarea id="tplReviewEnglish" class="fieldInput" rows="5"></textarea>
-                    </div>
-                  </details>
-                </div>
-
-                <div class="smallText">Common placeholders: {name}, {salutation}, {salutation_bm}, {salutation_en}, {branch}, {dentist}, {date}, {weekday}, {time}, {address}, {branch_phone}, {google_direction}, {waze_direction}, {google_review_link}, {title_bm}, {title_en}</div>
-                <button class="btnPrimary" id="btnSaveAppointmentTemplates">Save Appointment Templates</button>
-              </div>
             </div>
           </div>
 
@@ -645,41 +484,11 @@
             <div class="panelTitleRow">
               <div>
                 <h2>Queue</h2>
-                <p>Track appointment sends and marketing blast history separately.</p>
-              </div>
-              <div class="queueModeTabs" role="tablist" aria-label="Queue type">
-                <button class="queueModeTab active" data-queue-view="appointment" type="button" role="tab" aria-selected="true">Appointment</button>
-                <button class="queueModeTab" data-queue-view="marketing" type="button" role="tab" aria-selected="false">Marketing</button>
+                <p>Review marketing blast history.</p>
               </div>
             </div>
 
-            <section class="activityBar queueActivityBar queueLiveCard" data-queue-panel="appointment">
-              <div class="activityHead">
-                <div>
-                  <h3>Appointment Send Activity</h3>
-                  <div class="smallText" id="queueSummaryText">0/0 (success: 0, failed: 0)</div>
-                </div>
-                <div class="activityActions">
-                  <button class="btnGhost" id="btnStopSending" disabled>Stop</button>
-                  <button class="btnGhost" id="btnClearActivity">Clear</button>
-                </div>
-              </div>
-              <div class="tableWrap short">
-                <table class="dataTable">
-                  <thead>
-                    <tr>
-                      <th style="width: 170px;">Time</th>
-                      <th style="width: 160px;">Phone</th>
-                      <th style="width: 110px;">Status</th>
-                      <th>Error</th>
-                    </tr>
-                  </thead>
-                  <tbody id="activityBody"></tbody>
-                </table>
-              </div>
-            </section>
-
-            <section class="activityBar queueActivityBar queueHistoryCard hidden" data-queue-panel="marketing">
+            <section class="activityBar queueActivityBar queueHistoryCard" data-queue-panel="marketing">
               <div class="activityHead">
                 <div>
                   <h3>Marketing Blast History</h3>
@@ -719,7 +528,7 @@
             <div class="settingsLayout">
               <div class="card">
                 <h3>Message Gap Between Recipients</h3>
-                <p class="smallText">Delay after each recipient (appointment and marketing sends).</p>
+                <p class="smallText">Delay after each marketing recipient.</p>
 
                 <div class="inlineRow wrap">
                   <label class="fieldLabel">Min seconds</label>

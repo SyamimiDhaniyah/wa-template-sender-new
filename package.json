@@ -1,7 +1,7 @@
 {
   "name": "whatsconect",
   "version": "1.1.0",
-  "description": "WhatsConect messaging console for templates, appointments, and marketing.",
+  "description": "WhatsConect messaging console for templates and marketing.",
   "author": "Dentabay",
   "private": true,
   "main": "main.js",

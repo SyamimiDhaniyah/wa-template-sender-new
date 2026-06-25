@@ -3,8 +3,6 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("api", {
   getTemplates: () => ipcRenderer.invoke("app:getTemplates"),
   saveTemplates: (templates) => ipcRenderer.invoke("app:saveTemplates", templates),
-  getAppointmentTemplates: () => ipcRenderer.invoke("app:getAppointmentTemplates"),
-  saveAppointmentTemplates: (templates) => ipcRenderer.invoke("app:saveAppointmentTemplates", templates),
   getClinicSettings: () => ipcRenderer.invoke("app:getClinicSettings"),
   saveClinicSettings: (settings) => ipcRenderer.invoke("app:saveClinicSettings", settings),
   exportTemplatesBundle: (payload) => ipcRenderer.invoke("app:exportTemplatesBundle", payload || {}),
@@ -17,7 +15,6 @@ contextBridge.exposeInMainWorld("api", {
   clinicLogout: () => ipcRenderer.invoke("clinic:logout"),
   clinicRefreshMe: () => ipcRenderer.invoke("clinic:refreshMe"),
   clinicGetBranchList: () => ipcRenderer.invoke("clinic:getBranchList"),
-  clinicGetAppointmentList: (payload) => ipcRenderer.invoke("clinic:getAppointmentList", payload),
   clinicGetPatient: (payload) => ipcRenderer.invoke("clinic:getPatient", payload),
   clinicGetPastPatients: (payload) => ipcRenderer.invoke("clinic:getPastPatients", payload),
   clinicEditPatient: (payload) => ipcRenderer.invoke("clinic:editPatient", payload),
