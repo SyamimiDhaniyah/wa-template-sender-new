@@ -644,9 +644,13 @@ p {
 
 .templateLayout {
   display: grid;
-  grid-template-columns: minmax(340px, 0.85fr) minmax(560px, 1.55fr);
-  gap: 16px;
+  grid-template-columns: minmax(360px, 0.88fr) minmax(640px, 1.6fr);
+  gap: 18px;
   align-items: start;
+}
+
+.templateWorkbench {
+  min-width: 1080px;
 }
 
 .templateWorkbench > .card {
@@ -659,9 +663,15 @@ p {
   gap: 14px;
 }
 
-.templateListCard {
+.templateListCard,
+.templateDetailCard {
   position: sticky;
   top: 14px;
+}
+
+.templateDetailCard {
+  max-height: calc(100vh - 156px);
+  overflow: auto;
 }
 
 .templateToolbar {
@@ -849,17 +859,18 @@ p {
 
 .templateMessagesPanel {
   border: 1px solid #d9e8e6;
-  border-radius: 12px;
+  border-radius: 14px;
   background: #fbfdfd;
-  padding: 8px;
+  padding: 10px;
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .templateMessagesLayout {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 8px;
+  grid-template-columns: minmax(188px, 0.42fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
 }
 
 .templateMessageListPane {
@@ -1973,28 +1984,9 @@ p {
   .appointmentLayout,
   .marketingLayout,
   .marketingStepGrid,
-  .templateLayout,
   .campaignManagerGrid,
   .connectLayout,
   .settingsLayout {
-    grid-template-columns: 1fr;
-  }
-
-  .templateFieldGrid,
-  .templatePeriodGrid {
-    grid-template-columns: 1fr;
-  }
-
-  .templateListCard {
-    position: static;
-  }
-
-  .templatePeriodSummary {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .templateMessagesLayout {
     grid-template-columns: 1fr;
   }
 

@@ -1194,6 +1194,7 @@ async function marketingSaveTemplates(authToken, user, templatesInput) {
           messages: basePayload.messages,
           variables: basePayload.variables,
           send_policy: basePayload.send_policy,
+          active: basePayload.active,
           active_start_at: basePayload.active_start_at,
           active_end_at: basePayload.active_end_at
         })
