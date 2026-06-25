@@ -344,8 +344,10 @@
                   <input id="templateSearchInput" class="fieldInput" placeholder="Search templates" />
                   <select id="templateStatusFilter" class="fieldInput compact">
                     <option value="active">Active</option>
-                    <option value="all">All</option>
+                    <option value="scheduled">Scheduled</option>
+                    <option value="expired">Expired</option>
                     <option value="inactive">Inactive</option>
+                    <option value="all">All</option>
                   </select>
                 </div>
                 <div class="templateList" id="templateList"></div>
@@ -375,6 +377,21 @@
                         <option value="once">Once per recipient</option>
                         <option value="multiple">Allow multiple sends</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div class="templatePeriodGrid">
+                    <label class="checkLine templateActiveLine">
+                      <input type="checkbox" id="templateActive" checked />
+                      <span>Active</span>
+                    </label>
+                    <div>
+                      <label class="fieldLabel">Start</label>
+                      <input id="templateActiveStart" class="fieldInput compact" type="datetime-local" />
+                    </div>
+                    <div>
+                      <label class="fieldLabel">End</label>
+                      <input id="templateActiveEnd" class="fieldInput compact" type="datetime-local" />
                     </div>
                   </div>
 

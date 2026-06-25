@@ -519,8 +519,55 @@ function formatTemplateTimestamp(value) {
   }).format(new Date(ms));
 }
 
+function normalizeEpochMs(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = Number(value);
+  if (!raw || !Number.isFinite(raw)) return null;
+  return raw < 10000000000 ? Math.round(raw * 1000) : Math.round(raw);
+}
+
+function epochMsToDateTimeLocal(value) {
+  const ms = normalizeEpochMs(value);
+  if (!ms) return "";
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function dateTimeLocalToEpochMs(value) {
+  const text = cleanString(value);
+  if (!text) return null;
+  const date = new Date(text);
+  const ms = date.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function templateStatusInfo(template, nowMs = Date.now()) {
+  const t = template && typeof template === "object" ? template : {};
+  const startAt = normalizeEpochMs(t.active_start_at ?? t.activeStartAt);
+  const endAt = normalizeEpochMs(t.active_end_at ?? t.activeEndAt);
+  if (t.active === false) return { key: "inactive", label: "Inactive", isSendable: false };
+  if (startAt && nowMs < startAt) return { key: "scheduled", label: "Scheduled", isSendable: false };
+  if (endAt && nowMs > endAt) return { key: "expired", label: "Expired", isSendable: false };
+  return { key: "active", label: "Active", isSendable: true };
+}
+
+function templateIsSendable(template) {
+  return templateStatusInfo(template).isSendable === true;
+}
+
+function templatePeriodLabel(template) {
+  const startAt = normalizeEpochMs(template?.active_start_at ?? template?.activeStartAt);
+  const endAt = normalizeEpochMs(template?.active_end_at ?? template?.activeEndAt);
+  if (!startAt && !endAt) return "No active period";
+  if (startAt && endAt) return `${formatTemplateTimestamp(startAt)} – ${formatTemplateTimestamp(endAt)}`;
+  if (startAt) return `From ${formatTemplateTimestamp(startAt)}`;
+  return `Until ${formatTemplateTimestamp(endAt)}`;
+}
+
 function templateStatusLabel(template) {
-  return template?.active === false ? "Inactive" : "Active";
+  return templateStatusInfo(template).label;
 }
 
 function templateTypeSummary(template) {
@@ -538,10 +585,18 @@ function getFilteredTemplates() {
   const search = cleanString(state.templateSearch).toLowerCase();
   const filter = cleanString(state.templateStatusFilter || "active");
   return (Array.isArray(state.templates) ? state.templates : []).filter((template) => {
-    if (filter === "active" && template.active === false) return false;
-    if (filter === "inactive" && template.active !== false) return false;
+    const status = templateStatusInfo(template).key;
+    if (filter !== "all" && status !== filter) return false;
     if (!search) return true;
-    const haystack = [template.name, marketingTemplateSnippet(template), template.created_by, template.updated_by, template.branch]
+    const haystack = [
+      template.name,
+      marketingTemplateSnippet(template),
+      template.created_by,
+      template.updated_by,
+      template.branch,
+      templatePeriodLabel(template),
+      templateStatusLabel(template)
+    ]
       .map((x) => cleanString(x).toLowerCase())
       .join(" ");
     return haystack.includes(search);
@@ -557,7 +612,7 @@ function renderTemplateMetaSummary(template) {
   }
   const updated = formatTemplateTimestamp(template.updated_at || template.created_at);
   const owner = cleanString(template.updated_by || template.created_by) || "-";
-  target.textContent = `${templateStatusLabel(template)} · ${templateTypeSummary(template)} · Updated ${updated} · By ${owner}`;
+  target.textContent = `${templateStatusLabel(template)} · ${templatePeriodLabel(template)} · ${templateTypeSummary(template)} · Updated ${updated} · By ${owner}`;
 }
 
 function getPlaceholderMetaByKey(key) {
@@ -880,6 +935,8 @@ function normalizeTemplate(raw, idx) {
     sendPolicy,
     send_policy: sendPolicy,
     active: src.active !== false,
+    active_start_at: normalizeEpochMs(src.active_start_at ?? src.activeStartAt),
+    active_end_at: normalizeEpochMs(src.active_end_at ?? src.activeEndAt),
     scope: String(src.scope || "global"),
     branch: String(src.branch || ""),
     root_template_id: rootTemplateId,
@@ -3750,13 +3807,14 @@ function renderTemplateList() {
     const item = document.createElement("button");
     item.type = "button";
     item.className = `templateItem${state.currentTemplateId === t.id ? " active" : ""}`;
-    const statusClass = t.active === false ? "inactive" : "active";
+    const status = templateStatusInfo(t);
     item.innerHTML = `
       <div class="templateItemTop">
         <span class="templateItemName">${escapeHtml(t.name)}</span>
-        <span class="templateStatusBadge ${statusClass}">${escapeHtml(templateStatusLabel(t))}</span>
+        <span class="templateStatusBadge ${status.key}">${escapeHtml(status.label)}</span>
       </div>
       <div class="templateItemMeta">${escapeHtml(templateTypeSummary(t))}</div>
+      <div class="templateItemMeta">${escapeHtml(templatePeriodLabel(t))}</div>
       <div class="templateItemSnippet">${escapeHtml(marketingTemplateSnippet(t))}</div>
       <div class="templateItemFooter">
         <span>${escapeHtml(formatTemplateTimestamp(t.updated_at || t.created_at))}</span>
@@ -3788,6 +3846,9 @@ function loadTemplateEditor() {
     state.currentTemplateMessageId = null;
     el("templateName").value = "";
     el("templateSendPolicy").value = "once";
+    el("templateActive").checked = true;
+    el("templateActiveStart").value = "";
+    el("templateActiveEnd").value = "";
     el("templateVariablesText").textContent = "Variables: -";
     el("templatePlaceholderPreview").textContent = "Type template to preview placeholders.";
     renderTemplateMetaSummary(null);
@@ -3800,6 +3861,9 @@ function loadTemplateEditor() {
   ensureSelectedTemplateMessage(t);
   el("templateName").value = t.name;
   el("templateSendPolicy").value = t.sendPolicy;
+  el("templateActive").checked = t.active !== false;
+  el("templateActiveStart").value = epochMsToDateTimeLocal(t.active_start_at);
+  el("templateActiveEnd").value = epochMsToDateTimeLocal(t.active_end_at);
   renderTemplateMetaSummary(t);
   renderTemplateMessageList();
   renderTemplateMessageEditor();
@@ -3964,7 +4028,7 @@ function renderTemplatePlaceholderPreview(text) {
 function renderMarketingTemplateSelect() {
   const select = el("marketingTemplateSelect");
   select.innerHTML = "";
-  const activeTemplates = (Array.isArray(state.templates) ? state.templates : []).filter((t) => t.active !== false);
+  const activeTemplates = (Array.isArray(state.templates) ? state.templates : []).filter(templateIsSendable);
 
   for (const t of activeTemplates) {
     const opt = document.createElement("option");
@@ -4021,7 +4085,7 @@ function getMasterMarketingTemplatesForCampaigns() {
   return state.templates.filter((template) => {
     const scope = cleanString(template.scope || "global").toLowerCase();
     const templateId = cleanString(template.root_template_id || template.id);
-    return template.active !== false &&
+    return templateIsSendable(template) &&
       scope === "global" &&
       template.is_branch_override !== true &&
       /^\d+$/.test(templateId);
@@ -4846,6 +4910,12 @@ function readMarketingTemplateEditorToState() {
   if (!t) return;
   t.name = el("templateName").value.trim() || "Untitled";
   t.sendPolicy = el("templateSendPolicy").value === "multiple" ? "multiple" : "once";
+  t.active = el("templateActive")?.checked !== false;
+  t.active_start_at = dateTimeLocalToEpochMs(el("templateActiveStart")?.value || "");
+  t.active_end_at = dateTimeLocalToEpochMs(el("templateActiveEnd")?.value || "");
+  if (t.active_start_at && t.active_end_at && t.active_end_at <= t.active_start_at) {
+    throw new Error("Template end time must be after start time");
+  }
   const messages = ensureTemplateMessages(t);
   const currentMessage = getSelectedTemplateMessage(t);
   if (currentMessage && messages.length > 0) {
@@ -4975,6 +5045,10 @@ async function sendMarketing() {
 
   const template = getSelectedMarketingTemplate();
   if (!template) throw new Error("Please select a template");
+  const status = templateStatusInfo(template);
+  if (!status.isSendable) {
+    throw new Error(`${template.name} is ${status.label.toLowerCase()}. Choose an active template.`);
+  }
   const normalizedMessages = normalizeTemplateMessages(template.messages, template.body || "");
   template.messages = normalizedMessages;
   updateTemplateDerivedFields(template);
@@ -6252,12 +6326,26 @@ function bindEvents() {
     renderTemplateList();
   });
 
+  for (const id of ["templateActive", "templateActiveStart", "templateActiveEnd"]) {
+    el(id)?.addEventListener("change", () => {
+      try {
+        readMarketingTemplateEditorToState();
+        renderTemplateMetaSummary(getSelectedMarketingTemplate());
+        renderTemplateList();
+        renderMarketingTemplateSelect();
+        refreshMarketingPreview();
+      } catch (e) {
+        toast("Templates", String(e?.message || e));
+      }
+    });
+  }
+
   el("templateName").addEventListener("input", () => {
     readMarketingTemplateEditorToState();
     renderTemplateList();
     renderTemplateMessageList();
     const selectedTemplate = getSelectedMarketingTemplate();
-    if (selectedTemplate?.active !== false) renderMarketingTemplateSelect();
+    if (templateIsSendable(selectedTemplate)) renderMarketingTemplateSelect();
   });
 
   el("templateBody").addEventListener("input", () => {

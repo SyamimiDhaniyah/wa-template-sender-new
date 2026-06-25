@@ -508,6 +508,13 @@ function cleanString(v) {
   return String(v || "").trim();
 }
 
+function normalizeEpochMs(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const raw = Number(value);
+  if (!raw || !Number.isFinite(raw)) return null;
+  return raw < 10000000000 ? Math.round(raw * 1000) : Math.round(raw);
+}
+
 function clampInt(raw, min, max, fallback) {
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
@@ -997,7 +1004,9 @@ function buildMarketingTemplatePayload(templateRaw) {
     })),
     variables: Array.isArray(template.variables) ? template.variables : [],
     send_policy: template.sendPolicy === "multiple" ? "multiple" : "once",
-    active: template.active !== false
+    active: template.active !== false,
+    active_start_at: template.active_start_at,
+    active_end_at: template.active_end_at
   };
 }
 
@@ -1137,7 +1146,9 @@ async function marketingSaveTemplates(authToken, user, templatesInput) {
           body: basePayload.body,
           messages: basePayload.messages,
           variables: basePayload.variables,
-          send_policy: basePayload.send_policy
+          send_policy: basePayload.send_policy,
+          active_start_at: basePayload.active_start_at,
+          active_end_at: basePayload.active_end_at
         })
       });
     }
@@ -1917,6 +1928,8 @@ function normalizeTemplateRecord(raw, idx) {
     sendPolicy,
     send_policy: sendPolicy,
     active: t.active !== false,
+    active_start_at: normalizeEpochMs(t.active_start_at ?? t.activeStartAt),
+    active_end_at: normalizeEpochMs(t.active_end_at ?? t.activeEndAt),
     scope: cleanString(t.scope || "global"),
     branch: cleanString(t.branch),
     root_template_id: rootTemplateId === null || rootTemplateId === undefined || rootTemplateId === "" ? String(t.id || fallbackId) : rootTemplateId,
