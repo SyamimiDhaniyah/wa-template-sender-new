@@ -603,8 +603,29 @@ function getFilteredTemplates() {
   });
 }
 
+function renderTemplatePeriodSummary(template) {
+  const target = el("templatePeriodSummary");
+  if (!target) return;
+  if (!template) {
+    target.innerHTML = `<span class="templateStatusBadge inactive">No Template</span><span>Select a template to edit the send window.</span>`;
+    return;
+  }
+  const status = templateStatusInfo(template);
+  const period = templatePeriodLabel(template);
+  const startAt = normalizeEpochMs(template?.active_start_at ?? template?.activeStartAt);
+  const endAt = normalizeEpochMs(template?.active_end_at ?? template?.activeEndAt);
+  let detail = "Ready to send now.";
+  if (status.key === "inactive") detail = "Send blocked until Active is ticked and saved.";
+  else if (status.key === "scheduled") detail = `Send blocked until ${formatTemplateTimestamp(startAt)}.`;
+  else if (status.key === "expired") detail = `Send blocked after ${formatTemplateTimestamp(endAt)}. Edit End to reopen.`;
+  target.innerHTML = `
+    <span class="templateStatusBadge ${escapeHtml(status.key)}">${escapeHtml(status.label)}</span>
+    <span><strong>${escapeHtml(period)}</strong> · ${escapeHtml(detail)}</span>`;
+}
+
 function renderTemplateMetaSummary(template) {
   const target = el("templateMetaSummary");
+  renderTemplatePeriodSummary(template);
   if (!target) return;
   if (!template) {
     target.textContent = "Select a template to edit.";
@@ -612,7 +633,7 @@ function renderTemplateMetaSummary(template) {
   }
   const updated = formatTemplateTimestamp(template.updated_at || template.created_at);
   const owner = cleanString(template.updated_by || template.created_by) || "-";
-  target.textContent = `${templateStatusLabel(template)} · ${templatePeriodLabel(template)} · ${templateTypeSummary(template)} · Updated ${updated} · By ${owner}`;
+  target.textContent = `${templateTypeSummary(template)} · Updated ${updated} · By ${owner}`;
 }
 
 function getPlaceholderMetaByKey(key) {
@@ -3813,11 +3834,14 @@ function renderTemplateList() {
         <span class="templateItemName">${escapeHtml(t.name)}</span>
         <span class="templateStatusBadge ${status.key}">${escapeHtml(status.label)}</span>
       </div>
-      <div class="templateItemMeta">${escapeHtml(templateTypeSummary(t))}</div>
-      <div class="templateItemMeta">${escapeHtml(templatePeriodLabel(t))}</div>
+      <div class="templateItemStats">
+        <span>${escapeHtml(templateTypeSummary(t))}</span>
+        <span>${escapeHtml(cleanString(t.scope || "global").toLowerCase() === "branch" || t.is_branch_override === true ? "Branch" : "Master")}</span>
+      </div>
+      <div class="templateItemPeriod">${escapeHtml(templatePeriodLabel(t))}</div>
       <div class="templateItemSnippet">${escapeHtml(marketingTemplateSnippet(t))}</div>
       <div class="templateItemFooter">
-        <span>${escapeHtml(formatTemplateTimestamp(t.updated_at || t.created_at))}</span>
+        <span>Updated ${escapeHtml(formatTemplateTimestamp(t.updated_at || t.created_at))}</span>
         <span>${escapeHtml(cleanString(t.updated_by || t.created_by) || "-")}</span>
       </div>`;
     item.addEventListener("click", () => {

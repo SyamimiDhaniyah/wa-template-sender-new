@@ -1119,6 +1119,53 @@ async function marketingGetTemplates(authToken, activeOnly = true) {
   };
 }
 
+function marketingTemplateStatusInfo(template, nowMs = Date.now()) {
+  const t = template && typeof template === "object" ? template : {};
+  const startAt = normalizeEpochMs(t.active_start_at ?? t.activeStartAt, 0);
+  const endAt = normalizeEpochMs(t.active_end_at ?? t.activeEndAt, 0);
+  if (t.active === false) return { key: "inactive", label: "inactive", isSendable: false };
+  if (startAt && nowMs < startAt) return { key: "scheduled", label: "scheduled", isSendable: false, at: startAt };
+  if (endAt && nowMs > endAt) return { key: "expired", label: "expired", isSendable: false, at: endAt };
+  return { key: "active", label: "active", isSendable: true };
+}
+
+function marketingTemplateGuardLabel(template, status) {
+  const name = cleanString(template?.name) || "Selected template";
+  if (status?.key === "scheduled") return `${name} is scheduled and cannot be sent yet.`;
+  if (status?.key === "expired") return `${name} is expired. Edit the active period End time before sending.`;
+  if (status?.key === "inactive") return `${name} is inactive. Tick Active and save before sending.`;
+  return `${name} is not active.`;
+}
+
+async function assertMarketingTemplateSendableFromBackend(authToken, marketingContext) {
+  const ctx = marketingContext && typeof marketingContext === "object" ? marketingContext : {};
+  const templateId = cleanString(ctx.template_id ?? ctx.templateId);
+  const rootTemplateId = cleanString(ctx.root_template_id ?? ctx.rootTemplateId ?? templateId);
+  if (!templateId) throw new Error("Marketing template id is required before sending.");
+  if (!authToken) throw new Error("Please log in before sending marketing templates.");
+
+  let rows = [];
+  try {
+    const res = await marketingGetTemplates(authToken, false);
+    rows = Array.isArray(res?.templates) ? res.templates : [];
+  } catch (err) {
+    throw new Error(`Cannot verify template active period with backend: ${String(err?.message || err)}`);
+  }
+
+  const byId = rows.find((row) => cleanString(row?.id) === templateId);
+  const byRoot = rows.find((row) => cleanString(row?.root_template_id || row?.rootTemplateId || row?.id) === rootTemplateId);
+  const template = byId || byRoot;
+  if (!template) {
+    throw new Error("Cannot verify selected marketing template in backend. Refresh templates and try again.");
+  }
+
+  const status = marketingTemplateStatusInfo(template);
+  if (!status.isSendable) {
+    throw new Error(marketingTemplateGuardLabel(template, status));
+  }
+  return template;
+}
+
 async function marketingSaveTemplates(authToken, user, templatesInput) {
   const rows = normalizeTemplatesList(Array.isArray(templatesInput) ? templatesInput : []);
   const canManageMaster = userCanManageMarketingTemplates(user);
@@ -6829,6 +6876,9 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const clinicSession = getAuthSession();
   const sessionAuthToken = cleanString(clinicSession?.authToken);
   const aiAuthToken = cleanString(aiCfg.authToken) || sessionAuthToken;
+  if (isMarketingBlast) {
+    await assertMarketingTemplateSendableFromBackend(sessionAuthToken, marketingContext);
+  }
   if (aiCfg.enabled && !aiCfg.endpoint) {
     throw new Error("AI rewrite is enabled but backend endpoint is empty");
   }

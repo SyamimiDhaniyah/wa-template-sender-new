@@ -644,8 +644,8 @@ p {
 
 .templateLayout {
   display: grid;
-  grid-template-columns: minmax(320px, 0.9fr) minmax(520px, 1.45fr);
-  gap: 14px;
+  grid-template-columns: minmax(340px, 0.85fr) minmax(560px, 1.55fr);
+  gap: 16px;
   align-items: start;
 }
 
@@ -656,46 +656,53 @@ p {
 .templateListCard,
 .templateDetailCard {
   display: grid;
-  gap: 12px;
+  gap: 14px;
+}
+
+.templateListCard {
+  position: sticky;
+  top: 14px;
 }
 
 .templateToolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) 132px;
   gap: 8px;
 }
 
 .templateList {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  max-height: 620px;
+  border: 1px solid #dce8e6;
+  border-radius: 16px;
+  max-height: 680px;
   overflow: auto;
-  padding: 8px;
-  background: #fcfefe;
+  padding: 10px;
+  background: linear-gradient(180deg, #fbfefd 0%, #f7fbfa 100%);
 }
 
 .templateItem {
   width: 100%;
   text-align: left;
-  border: 1px solid #d5e5e2;
-  border-radius: 12px;
-  padding: 10px;
+  border: 1px solid #d8e6e4;
+  border-radius: 14px;
+  padding: 12px;
   cursor: pointer;
-  margin-bottom: 8px;
+  margin-bottom: 10px;
   background: #ffffff;
   display: grid;
-  gap: 6px;
+  gap: 8px;
   color: inherit;
+  box-shadow: 0 1px 0 rgba(18, 55, 50, 0.03);
 }
 
 .templateItem:hover {
-  background: #f4fbfa;
+  background: #f6fcfb;
+  border-color: #bddbd6;
 }
 
 .templateItem.active {
-  background: #e5f7f4;
-  border-color: #62b8ad;
-  box-shadow: inset 3px 0 0 #14766d;
+  background: #edf9f7;
+  border-color: #5eb7ac;
+  box-shadow: inset 4px 0 0 #14766d, 0 8px 18px rgba(20, 118, 109, 0.08);
 }
 
 .templateItemTop,
@@ -711,32 +718,60 @@ p {
 .templateItemName {
   font-size: 14px;
   font-weight: 800;
-  color: #153c38;
+  color: #143c38;
+  line-height: 1.25;
+}
+
+.templateItemStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.templateItemStats span {
+  border: 1px solid #dbe9e7;
+  border-radius: 999px;
+  background: #f7fbfa;
+  color: #315f59;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 3px 7px;
 }
 
 .templateItemMeta,
 .templateItemFooter,
-.templateItemSnippet {
+.templateItemSnippet,
+.templateItemPeriod {
   font-size: 11px;
   color: var(--muted);
 }
 
+.templateItemPeriod {
+  color: #315f59;
+  font-weight: 700;
+}
+
 .templateItemSnippet {
-  line-height: 1.4;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .templateItemFooter {
   border-top: 1px solid #e3eeec;
-  padding-top: 6px;
+  padding-top: 7px;
 }
 
 .templateStatusBadge {
   border-radius: 999px;
-  padding: 3px 7px;
+  padding: 4px 8px;
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.02em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .templateStatusBadge.active {
@@ -778,6 +813,27 @@ p {
   grid-template-columns: minmax(110px, 140px) minmax(0, 1fr) minmax(0, 1fr);
   gap: 10px;
   align-items: end;
+  border: 1px solid #d9e8e6;
+  border-radius: 14px;
+  background: #fbfdfd;
+  padding: 10px;
+}
+
+.templatePeriodSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #d9e8e6;
+  border-radius: 12px;
+  background: #f7fcfb;
+  color: #315f59;
+  font-size: 12px;
+  line-height: 1.35;
+  padding: 9px 10px;
+}
+
+.templatePeriodSummary strong {
+  color: #153c38;
 }
 
 .templateActiveLine {
@@ -1927,6 +1983,15 @@ p {
   .templateFieldGrid,
   .templatePeriodGrid {
     grid-template-columns: 1fr;
+  }
+
+  .templateListCard {
+    position: static;
+  }
+
+  .templatePeriodSummary {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .templateMessagesLayout {
