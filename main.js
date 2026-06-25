@@ -161,7 +161,8 @@ function startGoBackend(profileId = "default") {
   goBackendProcess = spawn(backendPath, [], {
     cwd: backendDir,
     stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env }
+    windowsHide: true,
+    env: { ...process.env, WHATSCONECT_HTTP_ADDR: process.env.WHATSCONECT_HTTP_ADDR || "127.0.0.1:12345" }
   });
 
   const processGoBackendStdoutLine = (rawLine) => {
@@ -1137,10 +1138,15 @@ function marketingTemplateGuardLabel(template, status) {
   return `${name} is not active.`;
 }
 
-async function assertMarketingTemplateSendableFromBackend(authToken, marketingContext) {
+async function assertMarketingTemplateSendableFromBackend(authToken, marketingContext, fallbackTemplateId = "") {
   const ctx = marketingContext && typeof marketingContext === "object" ? marketingContext : {};
-  const templateId = cleanString(ctx.template_id ?? ctx.templateId);
+  const contextTemplateId = cleanString(ctx.template_id ?? ctx.templateId);
+  const fallbackId = cleanString(fallbackTemplateId).replace(/^marketing_/, "");
+  const templateId = fallbackId || contextTemplateId;
   const rootTemplateId = cleanString(ctx.root_template_id ?? ctx.rootTemplateId ?? templateId);
+  if (contextTemplateId && fallbackId && contextTemplateId !== fallbackId && rootTemplateId !== fallbackId) {
+    throw new Error("Selected marketing template changed before sending. Refresh templates and try again.");
+  }
   if (!templateId) throw new Error("Marketing template id is required before sending.");
   if (!authToken) throw new Error("Please log in before sending marketing templates.");
 
@@ -1153,7 +1159,12 @@ async function assertMarketingTemplateSendableFromBackend(authToken, marketingCo
   }
 
   const byId = rows.find((row) => cleanString(row?.id) === templateId);
-  const byRoot = rows.find((row) => cleanString(row?.root_template_id || row?.rootTemplateId || row?.id) === rootTemplateId);
+  if (fallbackId && !byId) {
+    throw new Error("Cannot verify selected marketing template in backend. Refresh templates and try again.");
+  }
+  const byRoot = fallbackId
+    ? null
+    : rows.find((row) => cleanString(row?.root_template_id || row?.rootTemplateId || row?.id) === rootTemplateId);
   const template = byId || byRoot;
   if (!template) {
     throw new Error("Cannot verify selected marketing template in backend. Refresh templates and try again.");
@@ -6878,7 +6889,7 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const sessionAuthToken = cleanString(clinicSession?.authToken);
   const aiAuthToken = cleanString(aiCfg.authToken) || sessionAuthToken;
   if (isMarketingBlast) {
-    await assertMarketingTemplateSendableFromBackend(sessionAuthToken, marketingContext);
+    await assertMarketingTemplateSendableFromBackend(sessionAuthToken, marketingContext, templateId);
   }
   if (aiCfg.enabled && !aiCfg.endpoint) {
     throw new Error("AI rewrite is enabled but backend endpoint is empty");

@@ -848,11 +848,19 @@ func main() {
 	if envProfile := strings.TrimSpace(os.Getenv("WHATSCONECT_PROFILE_ID")); envProfile != "" {
 		profileId = envProfile
 	}
+	httpAddr := strings.TrimSpace(os.Getenv("WHATSCONECT_HTTP_ADDR"))
+	if httpAddr == "" {
+		httpAddr = "127.0.0.1:12345"
+	}
 	configDir, err := os.UserConfigDir()
 	if err != nil || configDir == "" {
 		log.Fatalf("Failed to resolve user config directory: %v", err)
 	}
-	appDataPath = filepath.Join(configDir, "whatsconect", "wa_profiles", profileId)
+	baseDataPath := strings.TrimSpace(os.Getenv("WHATSCONECT_DATA_DIR"))
+	if baseDataPath == "" {
+		baseDataPath = filepath.Join(configDir, "whatsconect")
+	}
+	appDataPath = filepath.Join(baseDataPath, "wa_profiles", profileId)
 	if err := os.MkdirAll(appDataPath, os.ModePerm); err != nil {
 		log.Fatalf("Failed to create app data directory: %v", err)
 	}
@@ -919,7 +927,8 @@ func main() {
 	StartAutomationWorker(client)
 
 	go func() {
-		if err := http.ListenAndServe(":12345", nil); err != nil {
+		log.Printf("WhatsConect backend listening on %s with profile %s", httpAddr, profileId)
+		if err := http.ListenAndServe(httpAddr, nil); err != nil {
 			log.Fatal(err)
 		}
 	}()

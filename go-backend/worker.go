@@ -48,10 +48,10 @@ type ClaimJob struct {
 }
 
 var (
-	workerStarted   int32 // in-memory guard to prevent multiple instances of the worker goroutine
-	workerConfig    WorkerConfig
-	workerConfigMu  sync.RWMutex
-	globalClient    *whatsmeow.Client
+	workerStarted  int32 // in-memory guard to prevent multiple instances of the worker goroutine
+	workerConfig   WorkerConfig
+	workerConfigMu sync.RWMutex
+	globalClient   *whatsmeow.Client
 )
 
 func getWorkerConfig() WorkerConfig {
@@ -63,8 +63,6 @@ func getWorkerConfig() WorkerConfig {
 // UpdateWorkerConfig updates the worker configuration dynamically in memory
 func UpdateWorkerConfig(token string, enabled bool, branchID int, deviceCode string) {
 	workerConfigMu.Lock()
-	defer workerConfigMu.Unlock()
-
 	workerConfig.XanoAuthToken = token
 	workerConfig.WorkerEnabled = enabled
 	if branchID > 0 {
@@ -81,9 +79,47 @@ func UpdateWorkerConfig(token string, enabled bool, branchID int, deviceCode str
 			maskedToken = workerConfig.XanoAuthToken[:4] + "..." + workerConfig.XanoAuthToken[len(workerConfig.XanoAuthToken)-4:]
 		}
 	}
+	savedBranchID := workerConfig.BranchID
+	savedDeviceCode := workerConfig.DeviceCode
+	workerConfigMu.Unlock()
 
 	log.Printf("[WorkerConfig Update] WORKER_ENABLED: %v, BRANCH_ID: %d, DEVICE_CODE: %s, Token: %s",
-		workerConfig.WorkerEnabled, workerConfig.BranchID, workerConfig.DeviceCode, maskedToken)
+		enabled, savedBranchID, savedDeviceCode, maskedToken)
+
+	if enabled && token != "" {
+		workerConfigMu.RLock()
+		client := globalClient
+		workerConfigMu.RUnlock()
+		startAutomationWorkerLoopIfReady(client)
+	}
+}
+
+func startAutomationWorkerLoopIfReady(whatsAppClient *whatsmeow.Client) bool {
+	config := getWorkerConfig()
+
+	if !config.WorkerEnabled {
+		log.Println("[Worker] Background automation worker disabled. WhatsConect will run as a manual desktop sender only.")
+		return false
+	}
+
+	if config.XanoAuthToken == "" {
+		log.Println("[Worker] Background automation worker enabled, but no Xano token is configured. Worker will not start.")
+		return false
+	}
+
+	if whatsAppClient == nil {
+		log.Println("[Worker] Background automation worker enabled, but WhatsApp client is not ready. Worker will not start.")
+		return false
+	}
+
+	if !atomic.CompareAndSwapInt32(&workerStarted, 0, 1) {
+		log.Println("[Worker] StartAutomationWorker called, but worker is already running. Ignoring start request.")
+		return false
+	}
+
+	log.Println("[Worker] Starting background automation worker loop.")
+	go runWorkerLoop(whatsAppClient)
+	return true
 }
 
 // StartAutomationWorker initializes and starts the background worker loop if enabled
@@ -95,29 +131,23 @@ func StartAutomationWorker(whatsAppClient *whatsmeow.Client) {
 	globalClient = whatsAppClient
 	workerConfigMu.Unlock()
 
-	if !atomic.CompareAndSwapInt32(&workerStarted, 0, 1) {
-		log.Println("[Worker] StartAutomationWorker called, but worker is already running. Ignoring start request.")
-		return
-	}
-
-	log.Println("[Worker] Starting background automation worker loop (waiting for dynamic token configuration)...")
-	go runWorkerLoop(whatsAppClient)
+	startAutomationWorkerLoopIfReady(whatsAppClient)
 }
 
 func loadConfig() WorkerConfig {
 	config := WorkerConfig{
-		WorkerEnabled:                 getEnvBool("WORKER_ENABLED", false),
-		DevelopmentMode:               getEnvBool("DEVELOPMENT_MODE", true),
-		XanoBaseURL:                   getEnvString("XANO_BASE_URL", "https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv"),
-		XanoAuthToken:                 getEnvString("XANO_AUTH_TOKEN", ""),
-		BranchID:                      getEnvInt("BRANCH_ID", 4),
-		DeviceCode:                    getEnvString("DEVICE_CODE", "BRANCH4-MAIN-PC"),
-		PollIntervalSeconds:           getEnvInt("POLL_INTERVAL_SECONDS", 60),
-		NoJobSleepSeconds:             getEnvInt("NO_JOB_SLEEP_SECONDS", 60),
-		DisconnectedSleepSeconds:      getEnvInt("DISCONNECTED_SLEEP_SECONDS", 120),
-		HeartbeatIntervalSeconds:      getEnvInt("HEARTBEAT_INTERVAL_SECONDS", 60),
-		ErrorBackoffInitialSeconds:    getEnvInt("ERROR_BACKOFF_INITIAL_SECONDS", 60),
-		ErrorBackoffMaxSeconds:        getEnvInt("ERROR_BACKOFF_MAX_SECONDS", 600),
+		WorkerEnabled:              getEnvBool("WORKER_ENABLED", false),
+		DevelopmentMode:            getEnvBool("DEVELOPMENT_MODE", true),
+		XanoBaseURL:                getEnvString("XANO_BASE_URL", "https://xqoc-ewo0-x3u2.s2.xano.io/api:lY50ALPv"),
+		XanoAuthToken:              getEnvString("XANO_AUTH_TOKEN", ""),
+		BranchID:                   getEnvInt("BRANCH_ID", 4),
+		DeviceCode:                 getEnvString("DEVICE_CODE", "BRANCH4-MAIN-PC"),
+		PollIntervalSeconds:        getEnvInt("POLL_INTERVAL_SECONDS", 60),
+		NoJobSleepSeconds:          getEnvInt("NO_JOB_SLEEP_SECONDS", 60),
+		DisconnectedSleepSeconds:   getEnvInt("DISCONNECTED_SLEEP_SECONDS", 120),
+		HeartbeatIntervalSeconds:   getEnvInt("HEARTBEAT_INTERVAL_SECONDS", 60),
+		ErrorBackoffInitialSeconds: getEnvInt("ERROR_BACKOFF_INITIAL_SECONDS", 60),
+		ErrorBackoffMaxSeconds:     getEnvInt("ERROR_BACKOFF_MAX_SECONDS", 600),
 	}
 
 	allowlistRaw := getEnvString("DEVELOPMENT_RECIPIENT_ALLOWLIST", "60109648647")
@@ -298,6 +328,17 @@ func calculateBackoff(current time.Duration, config WorkerConfig) time.Duration 
 func calculateNextSleep(lastHeartbeat, lastClaim time.Time, consecutiveNoJobs int, waStatus string, config WorkerConfig, backoffDuration time.Duration) time.Duration {
 	if backoffDuration > 0 {
 		return backoffDuration
+	}
+
+	if !config.WorkerEnabled || config.XanoAuthToken == "" {
+		idleSeconds := config.NoJobSleepSeconds
+		if idleSeconds < 5 {
+			idleSeconds = 5
+		}
+		if idleSeconds > 60 {
+			idleSeconds = 60
+		}
+		return time.Duration(idleSeconds) * time.Second
 	}
 
 	now := time.Now()
