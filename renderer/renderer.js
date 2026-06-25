@@ -5393,7 +5393,6 @@ async function loadInitialDataAfterLogin() {
     renderBranchesToSelect("apptBranchSelect", userBranch);
     renderBranchesToSelect("marketingBranchSelect", userBranch);
 
-    el("apptDateInput").value = getTodayYmdKl();
     const range = monthRangeMonthsAgo(el("marketingMonthsAgo").value);
     el("pastPatientRangeText").textContent = `Range: ${range.label} (${formatDateForMessage(
       range.startTs,
