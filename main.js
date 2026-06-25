@@ -1922,7 +1922,12 @@ function normalizeTemplateRecord(raw, idx) {
     root_template_id: rootTemplateId === null || rootTemplateId === undefined || rootTemplateId === "" ? String(t.id || fallbackId) : rootTemplateId,
     parent_template_id: parentTemplateId === undefined ? null : parentTemplateId,
     version: Math.max(1, Number(t.version || 1) || 1),
-    is_branch_override: t.is_branch_override === true
+    is_branch_override: t.is_branch_override === true,
+    created_at: t.created_at ?? t.createdAt ?? null,
+    updated_at: t.updated_at ?? t.updatedAt ?? null,
+    created_by: cleanString(t.created_by || t.createdBy),
+    updated_by: cleanString(t.updated_by || t.updatedBy),
+    template_key: cleanString(t.template_key || t.templateKey)
   };
 }
 
@@ -6096,7 +6101,7 @@ ipcMain.handle("app:getTemplates", async () => {
   const session = getAuthSession();
   if (session.authToken) {
     try {
-      const res = await marketingGetTemplates(session.authToken, true);
+      const res = await marketingGetTemplates(session.authToken, false);
       if (Array.isArray(res.templates)) saveTemplates(res.templates);
       return res.templates;
     } catch (err) {

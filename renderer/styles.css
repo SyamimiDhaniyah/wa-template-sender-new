@@ -644,31 +644,48 @@ p {
 
 .templateLayout {
   display: grid;
-  grid-template-columns: 1.1fr 1fr;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(520px, 1.45fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.templateWorkbench > .card {
+  min-width: 0;
+}
+
+.templateListCard,
+.templateDetailCard {
+  display: grid;
   gap: 12px;
 }
 
-.templateManager {
+.templateToolbar {
   display: grid;
-  grid-template-columns: 280px 1fr;
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
 }
 
 .templateList {
   border: 1px solid var(--line);
   border-radius: 12px;
-  max-height: 430px;
+  max-height: 620px;
   overflow: auto;
   padding: 8px;
   background: #fcfefe;
 }
 
 .templateItem {
+  width: 100%;
+  text-align: left;
   border: 1px solid #d5e5e2;
-  border-radius: 10px;
-  padding: 8px;
+  border-radius: 12px;
+  padding: 10px;
   cursor: pointer;
   margin-bottom: 8px;
+  background: #ffffff;
+  display: grid;
+  gap: 6px;
+  color: inherit;
 }
 
 .templateItem:hover {
@@ -677,18 +694,73 @@ p {
 
 .templateItem.active {
   background: #e5f7f4;
-  border-color: #9fd4ce;
+  border-color: #62b8ad;
+  box-shadow: inset 3px 0 0 #14766d;
+}
+
+.templateItemTop,
+.templateItemFooter,
+.templateSectionTitleRow,
+.templateDetailHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .templateItemName {
-  font-size: 13px;
-  font-weight: 700;
+  font-size: 14px;
+  font-weight: 800;
+  color: #153c38;
 }
 
-.templateItemMeta {
+.templateItemMeta,
+.templateItemFooter,
+.templateItemSnippet {
   font-size: 11px;
   color: var(--muted);
-  margin-top: 4px;
+}
+
+.templateItemSnippet {
+  line-height: 1.4;
+}
+
+.templateItemFooter {
+  border-top: 1px solid #e3eeec;
+  padding-top: 6px;
+}
+
+.templateStatusBadge {
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.templateStatusBadge.active {
+  background: #dff7ed;
+  color: #116243;
+}
+
+.templateStatusBadge.inactive {
+  background: #f1f3f5;
+  color: #687076;
+}
+
+.templateEmptyState {
+  border: 1px dashed #cfe2df;
+  border-radius: 12px;
+  color: var(--muted);
+  padding: 18px;
+  text-align: center;
+}
+
+.templateFieldGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 10px;
 }
 
 .templateEditor,
@@ -1830,7 +1902,7 @@ p {
     grid-template-columns: 1fr;
   }
 
-  .templateManager {
+  .templateFieldGrid {
     grid-template-columns: 1fr;
   }
 

@@ -207,6 +207,8 @@ const state = {
   queueActiveView: "marketing",
   currentTemplateId: null,
   currentTemplateMessageId: null,
+  templateSearch: "",
+  templateStatusFilter: "active",
   confirmResolver: null,
   templateBodyCaretPos: 0,
   templateDataLoadPromise: null,
@@ -500,6 +502,62 @@ function marketingTemplateSnippet(template) {
   }
   if (messages.length > 1) head += ` (+${messages.length - 1} more)`;
   return head;
+}
+
+function formatTemplateTimestamp(value) {
+  const raw = Number(value || 0);
+  if (!raw || !Number.isFinite(raw)) return "-";
+  const ms = raw < 10000000000 ? raw * 1000 : raw;
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: TIMEZONE,
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).format(new Date(ms));
+}
+
+function templateStatusLabel(template) {
+  return template?.active === false ? "Inactive" : "Active";
+}
+
+function templateTypeSummary(template) {
+  const messages = normalizeTemplateMessages(template?.messages, template?.body || "");
+  const counts = messages.reduce((acc, msg) => {
+    const type = normalizeTemplateMessageType(msg?.type);
+    acc[type] = (acc[type] || 0) + 1;
+    return acc;
+  }, {});
+  const parts = Object.entries(counts).map(([type, count]) => `${count} ${templateMessageTypeLabel(type)}`);
+  return parts.join(" · ") || "Text";
+}
+
+function getFilteredTemplates() {
+  const search = cleanString(state.templateSearch).toLowerCase();
+  const filter = cleanString(state.templateStatusFilter || "active");
+  return (Array.isArray(state.templates) ? state.templates : []).filter((template) => {
+    if (filter === "active" && template.active === false) return false;
+    if (filter === "inactive" && template.active !== false) return false;
+    if (!search) return true;
+    const haystack = [template.name, marketingTemplateSnippet(template), template.created_by, template.updated_by, template.branch]
+      .map((x) => cleanString(x).toLowerCase())
+      .join(" ");
+    return haystack.includes(search);
+  });
+}
+
+function renderTemplateMetaSummary(template) {
+  const target = el("templateMetaSummary");
+  if (!target) return;
+  if (!template) {
+    target.textContent = "Select a template to edit.";
+    return;
+  }
+  const updated = formatTemplateTimestamp(template.updated_at || template.created_at);
+  const owner = cleanString(template.updated_by || template.created_by) || "-";
+  target.textContent = `${templateStatusLabel(template)} · ${templateTypeSummary(template)} · Updated ${updated} · By ${owner}`;
 }
 
 function getPlaceholderMetaByKey(key) {
@@ -828,6 +886,11 @@ function normalizeTemplate(raw, idx) {
     parent_template_id: src.parent_template_id ?? src.parentTemplateId ?? null,
     version: Math.max(1, Number(src.version || 1) || 1),
     is_branch_override: src.is_branch_override === true,
+    created_at: src.created_at ?? src.createdAt ?? null,
+    updated_at: src.updated_at ?? src.updatedAt ?? null,
+    created_by: String(src.created_by || src.createdBy || ""),
+    updated_by: String(src.updated_by || src.updatedBy || ""),
+    template_key: String(src.template_key || src.templateKey || ""),
     campaignDraftKey: cleanString(src.campaignDraftKey || src.campaign_draft_key || ""),
     campaignStep: Number(src.campaignStep || src.campaign_step || 0) || 0
   };
@@ -838,7 +901,7 @@ function preferVisibleMarketingTemplates(templates) {
   const userBranch = cleanString(state.session?.user?.Branch).toLowerCase();
   const groups = new Map();
   for (const template of rows) {
-    if (!template || template.active === false) continue;
+    if (!template) continue;
     const rootId = cleanString(template.root_template_id || template.id);
     if (!rootId) continue;
     const list = groups.get(rootId) || [];
@@ -3672,29 +3735,47 @@ function renderMarketingRecipients() {
 
 function renderTemplateList() {
   const list = el("templateList");
+  if (!list) return;
   list.innerHTML = "";
   updateMarketingTemplatePermissionControls();
 
-  for (const t of state.templates) {
-    const item = document.createElement("div");
+  const rows = getFilteredTemplates();
+  const countTarget = el("templateListCount");
+  if (countTarget) {
+    const total = Array.isArray(state.templates) ? state.templates.length : 0;
+    countTarget.textContent = `${rows.length} of ${total} templates`;
+  }
+
+  for (const t of rows) {
+    const item = document.createElement("button");
+    item.type = "button";
     item.className = `templateItem${state.currentTemplateId === t.id ? " active" : ""}`;
-    item.innerHTML = `<div class="templateItemName">${escapeHtml(t.name)}</div><div class="templateItemMeta">${escapeHtml(
-      marketingTemplateSnippet(t)
-    )}</div>`;
+    const statusClass = t.active === false ? "inactive" : "active";
+    item.innerHTML = `
+      <div class="templateItemTop">
+        <span class="templateItemName">${escapeHtml(t.name)}</span>
+        <span class="templateStatusBadge ${statusClass}">${escapeHtml(templateStatusLabel(t))}</span>
+      </div>
+      <div class="templateItemMeta">${escapeHtml(templateTypeSummary(t))}</div>
+      <div class="templateItemSnippet">${escapeHtml(marketingTemplateSnippet(t))}</div>
+      <div class="templateItemFooter">
+        <span>${escapeHtml(formatTemplateTimestamp(t.updated_at || t.created_at))}</span>
+        <span>${escapeHtml(cleanString(t.updated_by || t.created_by) || "-")}</span>
+      </div>`;
     item.addEventListener("click", () => {
       state.currentTemplateId = t.id;
       renderTemplateList();
       loadTemplateEditor();
-      renderMarketingTemplateSelect();
+      if (t.active !== false) renderMarketingTemplateSelect();
       refreshMarketingPreview();
     });
     list.appendChild(item);
   }
 
-  if (state.templates.length === 0) {
+  if (rows.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "smallText";
-    empty.textContent = "No marketing templates.";
+    empty.className = "templateEmptyState";
+    empty.textContent = "No matching templates.";
     list.appendChild(empty);
   }
 }
@@ -3709,6 +3790,7 @@ function loadTemplateEditor() {
     el("templateSendPolicy").value = "once";
     el("templateVariablesText").textContent = "Variables: -";
     el("templatePlaceholderPreview").textContent = "Type template to preview placeholders.";
+    renderTemplateMetaSummary(null);
     renderTemplateMessageList();
     renderTemplateMessageEditor();
     return;
@@ -3718,6 +3800,7 @@ function loadTemplateEditor() {
   ensureSelectedTemplateMessage(t);
   el("templateName").value = t.name;
   el("templateSendPolicy").value = t.sendPolicy;
+  renderTemplateMetaSummary(t);
   renderTemplateMessageList();
   renderTemplateMessageEditor();
   refreshTemplateVariableSummary();
@@ -3738,7 +3821,7 @@ function updateMarketingTemplatePermissionControls() {
   if (importBtn) importBtn.classList.toggle("hidden", !canManageMaster);
   if (saveBtn) {
     saveBtn.classList.toggle("hidden", !canManageMaster && !canEditBranch);
-    saveBtn.textContent = canManageMaster ? "Save Marketing Templates" : "Save Branch Version";
+    saveBtn.textContent = canManageMaster ? "Save Template" : "Save Branch Version";
   }
 }
 
@@ -3881,8 +3964,9 @@ function renderTemplatePlaceholderPreview(text) {
 function renderMarketingTemplateSelect() {
   const select = el("marketingTemplateSelect");
   select.innerHTML = "";
+  const activeTemplates = (Array.isArray(state.templates) ? state.templates : []).filter((t) => t.active !== false);
 
-  for (const t of state.templates) {
+  for (const t of activeTemplates) {
     const opt = document.createElement("option");
     opt.value = t.id;
     const scope = cleanString(t.scope || "global").toLowerCase();
@@ -3891,7 +3975,7 @@ function renderMarketingTemplateSelect() {
     select.appendChild(opt);
   }
 
-  if (state.templates.length === 0) {
+  if (activeTemplates.length === 0) {
     const opt = document.createElement("option");
     opt.value = "";
     opt.textContent = "No template";
@@ -3900,8 +3984,8 @@ function renderMarketingTemplateSelect() {
     return;
   }
 
-  if (!state.currentTemplateId || !state.templates.some((x) => x.id === state.currentTemplateId)) {
-    state.currentTemplateId = state.templates[0].id;
+  if (!state.currentTemplateId || !activeTemplates.some((x) => x.id === state.currentTemplateId)) {
+    state.currentTemplateId = activeTemplates[0].id;
   }
 
   select.value = state.currentTemplateId;
@@ -5604,7 +5688,7 @@ function bindEvents() {
       const tabName = String(btn.dataset.tab || "");
       setActiveTab(tabName);
 
-      if (tabName === "template" || tabName === "marketing" || tabName === "appointment") {
+      if (tabName === "templates" || tabName === "marketing") {
         try {
           await reloadTemplateData();
         } catch (e) {
@@ -6158,11 +6242,22 @@ function bindEvents() {
     }
   });
 
+  el("templateSearchInput")?.addEventListener("input", () => {
+    state.templateSearch = el("templateSearchInput")?.value || "";
+    renderTemplateList();
+  });
+
+  el("templateStatusFilter")?.addEventListener("change", () => {
+    state.templateStatusFilter = el("templateStatusFilter")?.value || "active";
+    renderTemplateList();
+  });
+
   el("templateName").addEventListener("input", () => {
     readMarketingTemplateEditorToState();
     renderTemplateList();
     renderTemplateMessageList();
-    renderMarketingTemplateSelect();
+    const selectedTemplate = getSelectedMarketingTemplate();
+    if (selectedTemplate?.active !== false) renderMarketingTemplateSelect();
   });
 
   el("templateBody").addEventListener("input", () => {
