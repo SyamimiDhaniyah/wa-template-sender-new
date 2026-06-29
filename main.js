@@ -409,7 +409,8 @@ const MARKETING_API = {
 };
 const DEFAULT_WA_PROFILE_NAME = "Dentabay";
 const MARKETING_BLAST_LIMIT = 35;
-const MARKETING_BLAST_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const DAY_IN_MS = 24 * 60 * 60 * 1000;
+const MARKETING_BLAST_COOLDOWN_MS = DAY_IN_MS;
 const MARKETING_BLAST_GUARD_KEY = "marketingBlastGuardByProfile";
 const MARKETING_BLAST_HISTORY_KEY = "marketingBlastHistory";
 const MARKETING_BLAST_HISTORY_MAX_ROWS = 500;
@@ -421,7 +422,8 @@ const DEFAULT_CLINIC_SETTINGS = {
   templateGapMinSec: 2,
   templateGapMaxSec: 4,
   marketingMonthsAgoDefault: 6,
-  marketingPageSizeDefault: 35
+  marketingPageSizeDefault: 35,
+  marketingCooldownMonths: 6
 };
 
 const DEFAULT_APPOINTMENT_TEMPLATES = {
@@ -538,6 +540,7 @@ function normalizeClinicSettings(input) {
   const templateGapMaxSec = Math.max(templateGapMinSec, templateGapMaxCandidate);
   const marketingMonthsAgoDefault = clampInt(src.marketingMonthsAgoDefault, 1, 24, 6);
   const marketingPageSizeDefault = clampInt(src.marketingPageSizeDefault, 10, 500, DEFAULT_CLINIC_SETTINGS.marketingPageSizeDefault);
+  const marketingCooldownMonths = clampInt(src.marketingCooldownMonths, 1, 24, DEFAULT_CLINIC_SETTINGS.marketingCooldownMonths);
 
   return {
     timezone: CLINIC_TZ,
@@ -546,7 +549,8 @@ function normalizeClinicSettings(input) {
     templateGapMinSec,
     templateGapMaxSec,
     marketingMonthsAgoDefault,
-    marketingPageSizeDefault
+    marketingPageSizeDefault,
+    marketingCooldownMonths
   };
 }
 
@@ -1290,6 +1294,43 @@ async function marketingCheckStatus(authToken, payload) {
   const limit = Math.max(0, Number(dailyLimit.limit ?? MARKETING_BLAST_LIMIT) || 0);
   const sentLast24h = Math.max(0, Number(dailyLimit.sent_last_24h ?? dailyLimit.sentLast24h ?? 0) || 0);
   const remaining = Math.max(0, Number(dailyLimit.remaining ?? Math.max(0, limit - sentLast24h)) || 0);
+  const cooldown = await marketingGetCooldownStatusByPhone(authToken, {
+    phones: Array.isArray(src.phones) ? src.phones : [],
+    branch: cleanString(src.branch),
+    profile: cleanString(src.profile) || DEFAULT_WA_PROFILE_NAME
+  });
+  const cooldownByPhone = cooldown?.by_phone && typeof cooldown.by_phone === "object" ? cooldown.by_phone : {};
+  const statusesByPhone = new Map();
+  for (const raw of Array.isArray(data?.statuses) ? data.statuses : []) {
+    const phone = (() => {
+      try {
+        return normalizeMsisdn(raw?.phone || "");
+      } catch {
+        return cleanString(raw?.phone || "").replace(/\D/g, "");
+      }
+    })();
+    if (phone) statusesByPhone.set(phone, { ...raw, phone });
+  }
+  for (const [phone, cooldownStatus] of Object.entries(cooldownByPhone)) {
+    const existing = statusesByPhone.get(phone) || { phone, can_send: true, status: "eligible" };
+    if (cooldownStatus?.status === "cooldown") {
+      statusesByPhone.set(phone, {
+        ...existing,
+        ...cooldownStatus,
+        phone,
+        can_send: false,
+        status: "cooldown",
+        reason: "marketing_cooldown",
+        label: `Cooldown until ${cleanString(cooldownStatus.cooldown_until).slice(0, 10)}`
+      });
+    } else {
+      statusesByPhone.set(phone, {
+        ...existing,
+        latest_marketing_sent_at: cooldownStatus?.last_marketing_sent_at || existing.latest_marketing_sent_at || "",
+        marketing_cooldown: cooldownStatus || null
+      });
+    }
+  }
   return {
     ok: true,
     template_id: data?.template_id ?? (Number(templateId) || templateId),
@@ -1300,7 +1341,11 @@ async function marketingCheckStatus(authToken, payload) {
       remaining,
       limit_reached: dailyLimit.limit_reached === true || dailyLimit.limitReached === true || remaining <= 0
     },
-    statuses: Array.isArray(data?.statuses) ? data.statuses : []
+    marketing_cooldown: {
+      cooldown_months: cooldown?.cooldown_months || getClinicSettings().marketingCooldownMonths,
+      cooldown_ms: cooldown?.cooldown_ms || 0
+    },
+    statuses: [...statusesByPhone.values()]
   };
 }
 
@@ -1341,6 +1386,122 @@ async function marketingGetBlastHistory(authToken, payload = {}) {
     can_view_all_branches: data?.can_view_all_branches === true,
     branch: cleanString(data?.branch),
     rows: Array.isArray(data?.rows) ? data.rows : []
+  };
+}
+
+function addMonthsToEpochMs(epochMs, months) {
+  const base = normalizeEpochMs(epochMs);
+  const count = clampInt(months, 1, 24, DEFAULT_CLINIC_SETTINGS.marketingCooldownMonths);
+  if (!base) return 0;
+  const date = new Date(base);
+  const day = date.getDate();
+  date.setMonth(date.getMonth() + count);
+  if (date.getDate() < day) date.setDate(0);
+  return date.getTime();
+}
+
+function marketingSentAtMsFromRow(row) {
+  const src = row && typeof row === "object" ? row : {};
+  const raw = src.sent_at ?? src.sentAt ?? src.created_at ?? src.createdAt ?? "";
+  const epoch = normalizeEpochMs(raw);
+  if (epoch) return epoch;
+  const parsed = Date.parse(cleanString(raw));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeMarketingLogPhone(row) {
+  const src = row && typeof row === "object" ? row : {};
+  try {
+    return normalizeMsisdn(src.phone || src.recipient_phone || src.recipientPhone || "");
+  } catch {
+    return cleanString(src.phone || src.recipient_phone || src.recipientPhone || "").replace(/\D/g, "");
+  }
+}
+
+async function marketingGetCooldownStatusByPhone(authToken, payload = {}) {
+  const src = payload && typeof payload === "object" ? payload : {};
+  const phones = Array.isArray(src.phones) ? src.phones : [];
+  const settings = getClinicSettings();
+  const cooldownMonths = clampInt(src.cooldownMonths ?? settings.marketingCooldownMonths, 1, 24, DEFAULT_CLINIC_SETTINGS.marketingCooldownMonths);
+  const normalizedPhones = [...new Set(phones.map((phone) => {
+    try {
+      return normalizeMsisdn(phone);
+    } catch {
+      return cleanString(phone).replace(/\D/g, "");
+    }
+  }).filter(Boolean))];
+  const empty = {
+    cooldown_months: cooldownMonths,
+    cooldown_ms: 0,
+    by_phone: {}
+  };
+  if (!authToken || normalizedPhones.length === 0) return empty;
+
+  let rows = [];
+  try {
+    const history = await marketingGetBlastHistory(authToken, {
+      // 6-month cooldown can span more than 1,000 sends if the 35/day safety limit is used often.
+      limit: 10000,
+      status: "sent"
+    });
+    rows = Array.isArray(history?.rows) ? history.rows : [];
+  } catch (err) {
+    log.warn({ err }, "Failed to load marketing history for cooldown check");
+    return empty;
+  }
+
+  const phoneSet = new Set(normalizedPhones);
+  const latestByPhone = {};
+  for (const row of rows) {
+    const status = cleanString(row?.status || "sent").toLowerCase();
+    if (status && status !== "sent") continue;
+    const phone = normalizeMarketingLogPhone(row);
+    if (!phone || !phoneSet.has(phone)) continue;
+    const sentAtMs = marketingSentAtMsFromRow(row);
+    if (!sentAtMs) continue;
+    if (!latestByPhone[phone] || sentAtMs > latestByPhone[phone].sent_at_ms) {
+      latestByPhone[phone] = {
+        sent_at_ms: sentAtMs,
+        sent_at: new Date(sentAtMs).toISOString(),
+        template_id: row?.template_id ?? row?.templateId ?? "",
+        campaign_id: row?.campaign_id ?? row?.campaignId ?? "",
+        branch: cleanString(row?.branch || ""),
+        profile: cleanString(row?.profile || "")
+      };
+    }
+  }
+
+  const now = Date.now();
+  const byPhone = {};
+  for (const phone of normalizedPhones) {
+    const latest = latestByPhone[phone] || null;
+    if (!latest) {
+      byPhone[phone] = { phone, can_send: true, status: "eligible", reason: "" };
+      continue;
+    }
+    const cooldownUntilMs = addMonthsToEpochMs(latest.sent_at_ms, cooldownMonths);
+    const active = cooldownUntilMs > now;
+    byPhone[phone] = {
+      phone,
+      can_send: !active,
+      status: active ? "cooldown" : "eligible",
+      reason: active ? "marketing_cooldown" : "cooldown_expired",
+      last_marketing_sent_at: latest.sent_at,
+      last_marketing_sent_at_ms: latest.sent_at_ms,
+      cooldown_until: cooldownUntilMs ? new Date(cooldownUntilMs).toISOString() : "",
+      cooldown_until_ms: cooldownUntilMs,
+      cooldown_months: cooldownMonths,
+      remaining_ms: active ? Math.max(0, cooldownUntilMs - now) : 0,
+      template_id: latest.template_id,
+      campaign_id: latest.campaign_id,
+      branch: latest.branch,
+      profile: latest.profile
+    };
+  }
+  return {
+    cooldown_months: cooldownMonths,
+    cooldown_ms: cooldownMonths * 30 * DAY_IN_MS,
+    by_phone: byPhone
   };
 }
 
@@ -6911,6 +7072,9 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
   const sentPhones = [];
   const skippedAlreadySentPhones = [];
   const skippedAlreadySentAtByPhone = {};
+  const skippedCooldownPhones = [];
+  const skippedCooldownUntilByPhone = {};
+  let marketingCooldownByPhone = {};
   const marketingLogErrors = [];
   const marketingLogResults = [];
   const batchJob = beginBatchJob("sendBatch", recipients.length);
@@ -6988,6 +7152,15 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     }
   };
 
+  if (isMarketingBlast && sessionAuthToken) {
+    const cooldownStatus = await marketingGetCooldownStatusByPhone(sessionAuthToken, {
+      phones: recipients,
+      branch: cleanString(marketingContext?.branch),
+      profile: cleanString(marketingContext?.profile) || DEFAULT_WA_PROFILE_NAME
+    });
+    marketingCooldownByPhone = cooldownStatus?.by_phone && typeof cooldownStatus.by_phone === "object" ? cooldownStatus.by_phone : {};
+  }
+
   try {
     for (let i = 0; i < recipients.length; i++) {
       if (isBatchJobCancelRequested(batchJob)) {
@@ -7012,6 +7185,40 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
           status: "failed",
           error: "Invalid phone number"
         });
+        continue;
+      }
+
+      const cooldownInfo = isMarketingBlast ? marketingCooldownByPhone[msisdn] : null;
+      if (cooldownInfo?.status === "cooldown") {
+        skipped++;
+        const vars = (varsByPhone && (varsByPhone[rawPhone] || varsByPhone[msisdn])) || {};
+        skippedCooldownPhones.push(msisdn);
+        if (cooldownInfo.cooldown_until) skippedCooldownUntilByPhone[msisdn] = cooldownInfo.cooldown_until;
+        await recordMarketingAttempt(
+          msisdn,
+          vars,
+          "skipped",
+          cooldownInfo.cooldown_until ? `Marketing cooldown until ${cooldownInfo.cooldown_until}` : "Marketing cooldown active"
+        );
+        win?.webContents.send("batch:progress", {
+          ts: nowIsoShort(),
+          index: i + 1,
+          total: recipients.length,
+          phone: msisdn,
+          status: "skipped",
+          error: cooldownInfo.cooldown_until ? `Marketing cooldown until ${cooldownInfo.cooldown_until}` : "Marketing cooldown active",
+          cooldownUntil: cooldownInfo.cooldown_until || ""
+        });
+        if (i < recipients.length - 1) {
+          const ms = delayMsFromPattern(pattern, minSec, maxSec, i);
+          const completedDelay = await waitDelayOrBatchCancel(batchJob, ms);
+          if (!completedDelay) {
+            stopped = true;
+            stoppedAtIndex = i + 2;
+            emitStopped(stoppedAtIndex);
+            break;
+          }
+        }
         continue;
       }
 
@@ -7254,6 +7461,8 @@ ipcMain.handle("wa:sendBatch", async (_evt, payload) => {
     skipped,
     skippedAlreadySentPhones,
     skippedAlreadySentAtByPhone,
+    skippedCooldownPhones,
+    skippedCooldownUntilByPhone,
     marketingLogErrors,
     marketingLogResults,
     xanoDailyLimitReached,

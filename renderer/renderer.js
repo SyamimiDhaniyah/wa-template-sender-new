@@ -9,7 +9,8 @@ const DEFAULT_CLINIC_SETTINGS = {
   templateGapMinSec: 2,
   templateGapMaxSec: 4,
   marketingMonthsAgoDefault: 6,
-  marketingPageSizeDefault: 35
+  marketingPageSizeDefault: 35,
+  marketingCooldownMonths: 6
 };
 const DEFAULT_APPOINTMENT_TEMPLATES = {
   remindAppointment: {
@@ -3180,11 +3181,19 @@ function formatMarketingBlastRemaining(msRaw) {
   return `${seconds}s`;
 }
 
+function isMarketingStatusSendable(statusInfo) {
+  const kind = cleanString(statusInfo?.kind || "not_sent");
+  return kind === "not_sent";
+}
+
 function updateMarketingBlastControls() {
   const dailyLimit = normalizeMarketingDailyLimit(state.marketingDailyLimit);
   state.marketingDailyLimit = dailyLimit;
-  const selectedCount = getSelectedMarketingRecipients().length;
-  const eligibleSelectedCount = getSelectedMarketingRecipients().filter((row) => marketingRecipientStatusInfo(row).kind !== "already_sent").length;
+  const selectedRows = getSelectedMarketingRecipients();
+  const selectedCount = selectedRows.length;
+  const selectedStatuses = selectedRows.map((row) => marketingRecipientStatusInfo(row));
+  const eligibleSelectedCount = selectedStatuses.filter(isMarketingStatusSendable).length;
+  const cooldownBlockedCount = selectedStatuses.filter((info) => info.kind === "cooldown").length;
   const overLimit = eligibleSelectedCount > dailyLimit.limit || (dailyLimit.loaded && eligibleSelectedCount > dailyLimit.remaining);
   const btn = el("btnSendMarketing");
   const limitText = el("marketingBlastLimitText");
@@ -3192,20 +3201,23 @@ function updateMarketingBlastControls() {
   const hasTemplate = !!getSelectedMarketingTemplate();
 
   if (limitText) {
-    limitText.textContent = `Selected: ${selectedCount} · Eligible: ${eligibleSelectedCount}`;
+    limitText.textContent = `Selected: ${selectedCount} · Eligible: ${eligibleSelectedCount}${cooldownBlockedCount ? ` · Cooldown blocked: ${cooldownBlockedCount}` : ""}`;
   }
 
   if (cooldownText) {
+    const cooldownMonths = clamp(state.settings?.marketingCooldownMonths, 1, 24, 6);
     if (dailyLimit.limit_reached) {
       cooldownText.textContent = `Daily marketing limit reached. Sent last 24h: ${dailyLimit.sent_last_24h} / ${dailyLimit.limit} · Remaining: 0`;
     } else if (eligibleSelectedCount > dailyLimit.limit) {
       cooldownText.textContent = `Maximum marketing blast is ${dailyLimit.limit} contacts. Please reduce the list.`;
     } else if (overLimit) {
       cooldownText.textContent = `Selected exceeds remaining daily limit. Sent last 24h: ${dailyLimit.sent_last_24h} / ${dailyLimit.limit} · Remaining: ${dailyLimit.remaining}`;
+    } else if (cooldownBlockedCount > 0 && dailyLimit.loaded) {
+      cooldownText.textContent = `${cooldownBlockedCount} contact${cooldownBlockedCount === 1 ? "" : "s"} blocked by ${cooldownMonths}-month marketing cooldown. Sent last 24h: ${dailyLimit.sent_last_24h} / ${dailyLimit.limit} · Remaining: ${dailyLimit.remaining}`;
     } else if (dailyLimit.loaded) {
-      cooldownText.textContent = `Sent last 24h: ${dailyLimit.sent_last_24h} / ${dailyLimit.limit} · Remaining: ${dailyLimit.remaining}`;
+      cooldownText.textContent = `Sent last 24h: ${dailyLimit.sent_last_24h} / ${dailyLimit.limit} · Remaining: ${dailyLimit.remaining} · Cooldown: ${cooldownMonths} months per phone`;
     } else {
-      cooldownText.textContent = `Select a template and load recipients to check the rolling 24-hour limit.`;
+      cooldownText.textContent = `Select a template and load recipients to check the rolling 24-hour limit and ${cooldownMonths}-month marketing cooldown.`;
     }
   }
 
@@ -3352,9 +3364,9 @@ async function getMarketingStatusMapsForPhones(phones, options = {}) {
         const phone = normalizePhone(raw?.phone || "");
         if (!phone) continue;
         statusByPhone[phone] = raw;
-        const sentAt = raw?.last_sent_at || raw?.sent_at || raw?.template_sent_at || "";
+        const sentAt = raw?.last_sent_at || raw?.sent_at || raw?.template_sent_at || raw?.last_marketing_sent_at || "";
         if (sentAt) sentAtByPhone[phone] = cleanString(sentAt);
-        const recent = raw?.recent_marketing_sent_at || raw?.last_sent_at || "";
+        const recent = raw?.recent_marketing_sent_at || raw?.last_marketing_sent_at || raw?.last_sent_at || "";
         if (recent) recentByPhone[phone] = cleanString(recent);
       }
       return {
@@ -3412,20 +3424,30 @@ function applyMarketingStatusMapsToRows(rows, statusMaps) {
 }
 
 function marketingRecipientStatusInfo(row) {
-  const forcedSentAt = cleanString(row?.campaignSentAt || "") || marketingRecipientSentAt(row?.phone);
-  if (forcedSentAt) {
-    return {
-      kind: "already_sent",
-      label: "Already Sent",
-      sentAt: forcedSentAt,
-      recent: marketingRecentWarningInfoFromSentAt(cleanString(row?.recentMarketingSentAt || "") || marketingRecipientRecentSentAt(row?.phone))
-    };
-  }
   const backendStatus = row?.marketingStatus && typeof row.marketingStatus === "object" ? row.marketingStatus : null;
   if (backendStatus) {
     const canSend = backendStatus.can_send === true;
     const status = cleanString(backendStatus.status);
-    const sentAt = cleanString(backendStatus.last_sent_at || backendStatus.sent_at || backendStatus.template_sent_at);
+    const sentAt = cleanString(backendStatus.last_sent_at || backendStatus.sent_at || backendStatus.template_sent_at || backendStatus.last_marketing_sent_at);
+    if (status === "cooldown" || cleanString(backendStatus.reason) === "marketing_cooldown") {
+      const cooldownUntil = cleanString(backendStatus.cooldown_until || "");
+      return {
+        kind: "cooldown",
+        label: cooldownUntil ? `Cooldown until ${cooldownUntil.slice(0, 10)}` : "Cooldown",
+        sentAt,
+        cooldownUntil,
+        recent: marketingRecentWarningInfoFromSentAt(sentAt || backendStatus.recent_marketing_sent_at || "")
+      };
+    }
+    const forcedSentAt = cleanString(row?.campaignSentAt || "") || marketingRecipientSentAt(row?.phone);
+    if (forcedSentAt) {
+      return {
+        kind: "already_sent",
+        label: "Already Sent",
+        sentAt: forcedSentAt,
+        recent: marketingRecentWarningInfoFromSentAt(cleanString(row?.recentMarketingSentAt || "") || marketingRecipientRecentSentAt(row?.phone))
+      };
+    }
     const label = canSend ? (cleanString(backendStatus.label) || "Not Sent Yet") : "Already Sent";
     return {
       kind: canSend && status !== "already_sent" ? "not_sent" : "already_sent",
@@ -3457,10 +3479,10 @@ function getFilteredMarketingRecipients() {
   const mode = String(state.marketingRecipientFilter || "all");
   const rows = Array.isArray(state.marketingRecipients) ? state.marketingRecipients : [];
   if (mode === "already_sent") {
-    return rows.filter((row) => marketingRecipientStatusInfo(row).kind === "already_sent");
+    return rows.filter((row) => !isMarketingStatusSendable(marketingRecipientStatusInfo(row)));
   }
   if (mode === "not_sent") {
-    return rows.filter((row) => marketingRecipientStatusInfo(row).kind !== "already_sent");
+    return rows.filter((row) => isMarketingStatusSendable(marketingRecipientStatusInfo(row)));
   }
   return rows;
 }
@@ -3623,7 +3645,7 @@ function selectMarketingRecipientsByPhones(phoneList) {
 function syncMarketingSelectAll() {
   const all = el("marketingSelectAll");
   const filteredRows = getFilteredMarketingRecipients();
-  const selectableRows = filteredRows.filter((row) => marketingRecipientStatusInfo(row).kind !== "already_sent");
+  const selectableRows = filteredRows.filter((row) => isMarketingStatusSendable(marketingRecipientStatusInfo(row)));
   const total = selectableRows.length;
   const selected = selectableRows.filter((x) => x.selected).length;
   all.checked = total > 0 && selected === total;
@@ -3653,7 +3675,7 @@ function syncMarketingLoadedSelectAll() {
   const all = el("marketingLoadedSelectAll");
   if (!all) return;
   const pageRows = getMarketingLoadedPageRows();
-  const selectableRows = pageRows.filter((row) => marketingRecipientStatusInfo(row).kind !== "already_sent");
+  const selectableRows = pageRows.filter((row) => isMarketingStatusSendable(marketingRecipientStatusInfo(row)));
   const total = selectableRows.length;
   const selected = selectableRows.filter((x) => x.selected).length;
   all.checked = total > 0 && selected === total;
@@ -3675,7 +3697,7 @@ function renderMarketingLoadedPatients() {
     const statusInfo = marketingRecipientStatusInfo(row);
     cb.type = "checkbox";
     cb.checked = !!row.selected;
-    cb.disabled = statusInfo.kind === "already_sent";
+    cb.disabled = !isMarketingStatusSendable(statusInfo);
     cb.addEventListener("change", () => {
       row.selected = !!cb.checked;
       refreshMarketingLoadedSummary();
@@ -3698,10 +3720,10 @@ function renderMarketingLoadedPatients() {
     } else tdAppt.textContent = "-";
 
     const tdStatus = document.createElement("td");
-    tdStatus.innerHTML = statusInfo.kind === "already_sent"
+    tdStatus.innerHTML = !isMarketingStatusSendable(statusInfo)
       ? `<span class="statusPill status-skipped">${escapeHtml(statusInfo.label || "Blocked")}</span>`
       : `<span class="statusPill status-sent">${escapeHtml(statusInfo.label || "Not Sent Yet")}</span>`;
-    if (statusInfo.sentAt && statusInfo.kind !== "already_sent") {
+    if (statusInfo.sentAt && isMarketingStatusSendable(statusInfo)) {
       const meta = document.createElement("div");
       meta.className = "smallText";
       meta.textContent = statusInfo.sentAt;
@@ -3752,7 +3774,7 @@ function renderMarketingRecipients() {
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = !!row.selected;
-    cb.disabled = statusInfo.kind === "already_sent";
+    cb.disabled = !isMarketingStatusSendable(statusInfo);
     cb.addEventListener("change", () => {
       row.selected = !!cb.checked;
       refreshMarketingSummary();
@@ -3768,10 +3790,10 @@ function renderMarketingRecipients() {
     const tdBranch = document.createElement("td");
     tdBranch.textContent = vars.branch || "-";
     const tdStatus = document.createElement("td");
-    tdStatus.innerHTML = statusInfo.kind === "already_sent"
+    tdStatus.innerHTML = !isMarketingStatusSendable(statusInfo)
       ? `<span class="statusPill status-skipped">${escapeHtml(statusInfo.label || "Blocked")}</span>`
       : `<span class="statusPill status-sent">${escapeHtml(statusInfo.label || "Not Sent Yet")}</span>`;
-    if (statusInfo.sentAt && statusInfo.kind !== "already_sent") {
+    if (statusInfo.sentAt && isMarketingStatusSendable(statusInfo)) {
       const meta = document.createElement("div");
       meta.className = "smallText";
       meta.textContent = statusInfo.sentAt;
@@ -4478,6 +4500,7 @@ function applySettingsToUi() {
   el("settingTemplateGapMax").value = String(s.templateGapMaxSec || 4);
   el("settingMarketingMonths").value = String(s.marketingMonthsAgoDefault || 6);
   el("settingMarketingPageSize").value = String(s.marketingPageSizeDefault || 35);
+  if (el("settingMarketingCooldownMonths")) el("settingMarketingCooldownMonths").value = String(s.marketingCooldownMonths || 6);
   el("marketingMonthsAgo").value = String(s.marketingMonthsAgoDefault || 6);
   state.marketingLoadedPageSize = clamp(s.marketingPageSizeDefault, 10, 500, state.marketingLoadedPageSize || 35);
   if (el("marketingPageSize")) el("marketingPageSize").value = String(state.marketingLoadedPageSize || 35);
@@ -5113,18 +5136,23 @@ async function sendMarketing() {
     applyMarketingStatusMapsToRows(selected, statusMaps);
     const allowed = [];
     const blocked = [];
+    const cooldownBlocked = [];
     for (const row of editableRecipients) {
       const src = selectedByPhone.get(row.phone) || {};
       const statusInfo = marketingRecipientStatusInfo(src);
-      if (statusInfo.kind !== "already_sent") allowed.push(row);
-      else blocked.push(row.phone);
+      if (isMarketingStatusSendable(statusInfo)) allowed.push(row);
+      else {
+        blocked.push(row.phone);
+        if (statusInfo.kind === "cooldown") cooldownBlocked.push(row.phone);
+      }
     }
     editableRecipients = allowed;
     renderMarketingRecipients();
     renderMarketingLoadedPatients();
     updateMarketingBlastControls();
     if (blocked.length > 0) {
-      toast("Marketing status", `Skipped ${blocked.length} already sent recipient${blocked.length === 1 ? "" : "s"}`);
+      const suffix = cooldownBlocked.length > 0 ? ` (${cooldownBlocked.length} cooldown)` : "";
+      toast("Marketing status", `Skipped ${blocked.length} blocked recipient${blocked.length === 1 ? "" : "s"}${suffix}`);
     }
     if (editableRecipients.length === 0) throw new Error("No eligible recipients after Xano status check");
     const dailyLimit = normalizeMarketingDailyLimit(state.marketingDailyLimit);
@@ -5332,7 +5360,8 @@ async function saveSettings() {
     templateGapMinSec: clamp(el("settingTemplateGapMin").value, 1, 30, 2),
     templateGapMaxSec: clamp(el("settingTemplateGapMax").value, 1, 30, 4),
     marketingMonthsAgoDefault: clamp(el("settingMarketingMonths").value, 1, 24, 6),
-    marketingPageSizeDefault: clamp(el("settingMarketingPageSize").value, 10, 500, 35)
+    marketingPageSizeDefault: clamp(el("settingMarketingPageSize").value, 10, 500, 35),
+    marketingCooldownMonths: clamp(el("settingMarketingCooldownMonths")?.value, 1, 24, 6)
   };
   if (next.gapMaxSec < next.gapMinSec) next.gapMaxSec = next.gapMinSec;
   if (next.templateGapMaxSec < next.templateGapMinSec) next.templateGapMaxSec = next.templateGapMinSec;
@@ -6147,7 +6176,7 @@ function bindEvents() {
   el("marketingSelectAll").addEventListener("change", () => {
     const checked = !!el("marketingSelectAll").checked;
     getFilteredMarketingRecipients().forEach((row) => {
-      row.selected = checked && marketingRecipientStatusInfo(row).kind !== "already_sent";
+      row.selected = checked && isMarketingStatusSendable(marketingRecipientStatusInfo(row));
     });
     renderMarketingRecipients();
     refreshMarketingPreview();
@@ -6248,7 +6277,7 @@ function bindEvents() {
   el("marketingLoadedSelectAll").addEventListener("change", () => {
     const checked = !!el("marketingLoadedSelectAll").checked;
     for (const row of getMarketingLoadedPageRows()) {
-      row.selected = checked && marketingRecipientStatusInfo(row).kind !== "already_sent";
+      row.selected = checked && isMarketingStatusSendable(marketingRecipientStatusInfo(row));
     }
     renderMarketingLoadedPatients();
   });

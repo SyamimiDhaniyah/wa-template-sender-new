@@ -177,7 +177,7 @@
                     <select id="marketingRecipientFilter" class="fieldInput compact">
                       <option value="all">All</option>
                       <option value="not_sent">Not Sent Yet</option>
-                      <option value="already_sent">Already Sent</option>
+                      <option value="already_sent">Blocked / Sent</option>
                     </select>
                     <button class="btnGhost" id="btnImportMarketingCsv">Import CSV</button>
                     <button class="btnGhost hidden" id="btnSelectMarketingSkipped" disabled>Select Skipped</button>
@@ -597,13 +597,15 @@
 
               <div class="card">
                 <h3>Marketing Default</h3>
-                <p class="smallText">Default month offset for Existing Patients loader.</p>
+                <p class="smallText">Default month offset for Existing Patients loader and marketing cooldown period.</p>
 
                 <div class="inlineRow wrap">
                   <label class="fieldLabel">Months ago</label>
                   <input id="settingMarketingMonths" class="fieldInput compact small" type="number" min="1" max="24" />
                   <label class="fieldLabel">Per page</label>
                   <input id="settingMarketingPageSize" class="fieldInput compact small" type="number" min="10" max="500" value="35" />
+                  <label class="fieldLabel">Cooldown months</label>
+                  <input id="settingMarketingCooldownMonths" class="fieldInput compact small" type="number" min="1" max="24" value="6" />
                 </div>
               </div>
 
